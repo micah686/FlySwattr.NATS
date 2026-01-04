@@ -11,6 +11,8 @@
 *.sln.docstates
 *.env
 
+.idea/
+
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
 
@@ -73,6 +75,7 @@ BenchmarkDotNet.Artifacts/
 project.lock.json
 project.fragment.lock.json
 artifacts/
+.dotnet/
 
 # ASP.NET Scaffolding
 ScaffoldingReadMe.txt
