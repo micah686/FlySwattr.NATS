@@ -17,6 +17,8 @@ public static class ServiceCollectionExtensions
                 {
                     opts.Duration = TimeSpan.FromMinutes(5);
                     opts.IsFailSafeEnabled = true;
+                    opts.FailSafeMaxDuration = TimeSpan.FromHours(1); // Critical for offline resilience
+                    opts.FactorySoftTimeout = TimeSpan.FromMilliseconds(500);
                 });
 
         if (configure!= null)
@@ -43,11 +45,11 @@ public static class ServiceCollectionExtensions
             
             return bucket =>
             {
-                // 1. Create Core (Inner)
+                // 1. Inner Store (Raw NATS)
                 var innerLogger = loggerFactory.CreateLogger<FlySwattr.NATS.Core.Stores.NatsKeyValueStore>();
                 var inner = new FlySwattr.NATS.Core.Stores.NatsKeyValueStore(kvContext, bucket, innerLogger);
 
-                // 2. Create Decorator (Outer)
+                // 2. Outer Store (Cached)
                 var cacheLogger = loggerFactory.CreateLogger<CachingKeyValueStore>();
                 return new CachingKeyValueStore(inner, fusionCache, bucket, cacheLogger);
             };
