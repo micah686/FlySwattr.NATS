@@ -24,40 +24,95 @@ public static class ServiceCollectionExtensions
     }
 
     /// <summary>
-    /// Registers a background worker for a specific JetStream consumer.
+    /// Registers a background worker for a specific JetStream consumer with advanced options.
     /// </summary>
     public static IServiceCollection AddNatsConsumer<TMessage>(
         this IServiceCollection services, 
         string streamName,
         string consumerName,
         Func<IJsMessageContext<TMessage>, Task> handler,
-        int maxConcurrency = 10)
+        Action<NatsConsumerOptions>? configureOptions = null)
     {
         return services.AddSingleton<IHostedService>(sp =>
         {
+            var options = new NatsConsumerOptions();
+            configureOptions?.Invoke(options);
+            
             var jsContext = sp.GetRequiredService<INatsJSContext>();
             var logger = sp.GetRequiredService<ILogger<NatsConsumerBackgroundService<TMessage>>>();
             
-            // Note: In a real implementation, we would fetch the consumer object async
-            // inside the StartAsync of the service, or use a provider.
-            // For brevity, we assume the consumer exists or is handled by Topology package.
+            // Get consumer (sync-over-async during startup - consider factory pattern for production)
             var consumerTask = jsContext.GetConsumerAsync(streamName, consumerName);
-            var consumer = consumerTask.GetAwaiter().GetResult(); // Sync-over-async risk here during startup!
-            // Better practice: Factory returns a Task, Service awaits it in StartAsync.
+            var consumer = consumerTask.GetAwaiter().GetResult();
             
-            var opts = new NatsJSConsumeOpts { MaxMsgs = maxConcurrency };
+            var consumeOpts = new NatsJSConsumeOpts { MaxMsgs = options.MaxConcurrency };
             
-            // Resolve Resilience Pipeline if available (Optional Package integration)
-            // You might use KeyedServices to get specific pipelines here
-            var pipeline = ResiliencePipeline.Empty; 
+            // Resolve optional dependencies
+            var dlqPublisher = options.DlqPublisherServiceKey != null
+                ? sp.GetKeyedService<IJetStreamPublisher>(options.DlqPublisherServiceKey)
+                : sp.GetService<IJetStreamPublisher>();
+                
+            var serializer = sp.GetService<IMessageSerializer>();
+            
+            var objectStore = options.ObjectStoreServiceKey != null
+                ? sp.GetKeyedService<IObjectStore>(options.ObjectStoreServiceKey)
+                : sp.GetService<IObjectStore>();
+                
+            var notificationService = sp.GetService<IDlqNotificationService>();
+
+            // Resolve resilience pipeline (provided by Resilience package)
+            var resiliencePipeline = options.ResiliencePipelineKey != null
+                ? sp.GetKeyedService<ResiliencePipeline>(options.ResiliencePipelineKey)
+                : null;
 
             return new NatsConsumerBackgroundService<TMessage>(
                 consumer,
+                streamName,
+                consumerName,
                 handler,
-                opts,
+                consumeOpts,
                 logger,
-                pipeline
+                options.MaxConcurrency,
+                resiliencePipeline,
+                dlqPublisher,
+                options.DlqPolicy,
+                serializer,
+                objectStore,
+                notificationService
             );
         });
     }
+}
+
+/// <summary>
+/// Configuration options for NATS consumer registration.
+/// </summary>
+public class NatsConsumerOptions
+{
+    /// <summary>
+    /// Maximum number of concurrent message processors and channel capacity.
+    /// </summary>
+    public int MaxConcurrency { get; set; } = 10;
+
+    /// <summary>
+    /// Dead letter policy for poison messages.
+    /// </summary>
+    public DeadLetterPolicy? DlqPolicy { get; set; }
+
+    /// <summary>
+    /// Keyed service key for the DLQ publisher. If null, uses default IJetStreamPublisher.
+    /// </summary>
+    public object? DlqPublisherServiceKey { get; set; }
+
+    /// <summary>
+    /// Keyed service key for the ObjectStore (for large payload offloading).
+    /// If null, uses default IObjectStore.
+    /// </summary>
+    public object? ObjectStoreServiceKey { get; set; }
+
+    /// <summary>
+    /// Keyed service key for the resilience pipeline.
+    /// The pipeline is typically provided by FlySwattr.NATS.Resilience package.
+    /// </summary>
+    public object? ResiliencePipelineKey { get; set; }
 }
