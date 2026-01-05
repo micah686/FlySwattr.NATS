@@ -17,7 +17,7 @@ namespace FlySwattr.NATS.Hosting.Services;
 /// </summary>
 public partial class NatsConsumerBackgroundService<T> : BackgroundService
 {
-    private const int MaxDlqPayloadSize = 64 * 1024; // 64KB inline limit
+    private const int MaxDlqPayloadSize = 1024 * 1024; // 1MB - NATS default max payload
     private const int InitialBufferSize = 4 * 1024; // Start small to avoid over-allocation
 
     private readonly INatsJSConsumer _consumer;

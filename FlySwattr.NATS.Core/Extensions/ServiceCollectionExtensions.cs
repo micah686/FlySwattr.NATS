@@ -5,6 +5,7 @@ using FlySwattr.NATS.Core.Serializers;
 using FlySwattr.NATS.Core.Stores;
 using MemoryPack;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NATS.Client.Core;
@@ -90,5 +91,60 @@ public static class ServiceCollectionExtensions
         return services;
     }
     
-    
+    /// <summary>
+    /// Adds automatic large payload offloading (Claim Check pattern) to NATS services.
+    /// Messages exceeding the configured threshold are automatically offloaded to IObjectStore.
+    /// </summary>
+    /// <param name="services">The service collection.</param>
+    /// <param name="configure">Optional configuration for offloading behavior.</param>
+    /// <param name="objectStoreBucket">The object store bucket name for offloaded payloads. Default: "claim-checks"</param>
+    /// <returns>The service collection for chaining.</returns>
+    /// <remarks>
+    /// Call this AFTER AddFlySwattrNatsCore() to properly decorate the Core implementations.
+    /// If using AddFlySwattrNatsResilience(), call this BEFORE resilience to ensure proper decorator order:
+    /// Core -> Offloading -> Resilience
+    /// </remarks>
+    public static IServiceCollection AddPayloadOffloading(
+        this IServiceCollection services,
+        Action<PayloadOffloadingOptions>? configure = null,
+        string objectStoreBucket = "claim-checks")
+    {
+        // 1. Register Configuration
+        services.AddOptions<PayloadOffloadingOptions>().Configure(configure ?? (_ => { }));
+
+        // 2. Register a keyed IObjectStore for claim checks if not already registered
+        services.AddKeyedSingleton<IObjectStore>(objectStoreBucket, (sp, _) =>
+            new NatsObjectStore(
+                sp.GetRequiredService<INatsObjContext>(),
+                objectStoreBucket,
+                sp.GetRequiredService<ILogger<NatsObjectStore>>()
+            ));
+
+        // 3. Replace IJetStreamPublisher with Offloading decorator
+        // Note: We resolve NatsJetStreamBus directly to avoid circular dependency
+        services.Replace(ServiceDescriptor.Singleton<IJetStreamPublisher>(sp =>
+        {
+            var coreBus = sp.GetRequiredService<NatsJetStreamBus>();
+            var objectStore = sp.GetRequiredKeyedService<IObjectStore>(objectStoreBucket);
+            var serializer = sp.GetRequiredService<IMessageSerializer>();
+            var options = sp.GetRequiredService<IOptions<PayloadOffloadingOptions>>();
+            var logger = sp.GetRequiredService<ILogger<Decorators.OffloadingJetStreamPublisher>>();
+
+            return new Decorators.OffloadingJetStreamPublisher(coreBus, objectStore, serializer, options, logger);
+        }));
+
+        // 4. Replace IJetStreamConsumer with Offloading decorator
+        services.Replace(ServiceDescriptor.Singleton<IJetStreamConsumer>(sp =>
+        {
+            var coreBus = sp.GetRequiredService<NatsJetStreamBus>();
+            var objectStore = sp.GetRequiredKeyedService<IObjectStore>(objectStoreBucket);
+            var serializer = sp.GetRequiredService<IMessageSerializer>();
+            var options = sp.GetRequiredService<IOptions<PayloadOffloadingOptions>>();
+            var logger = sp.GetRequiredService<ILogger<Decorators.OffloadingJetStreamConsumer>>();
+
+            return new Decorators.OffloadingJetStreamConsumer(coreBus, objectStore, serializer, options, logger);
+        }));
+
+        return services;
+    }
 }
