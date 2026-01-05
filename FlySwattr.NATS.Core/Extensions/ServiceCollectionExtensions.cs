@@ -27,7 +27,7 @@ public static class ServiceCollectionExtensions
         // 2. Serializers
         services.AddSingleton<INatsSerializerRegistry, MemoryPackSerializerRegistry>();
         const int maxPayloadSize = 10 * 1024 * 1024; //10MB //TODO: make configurable later
-        services.AddSingleton<ISerializer>(_ => new MemPackSerializer(maxPayloadSize: maxPayloadSize));
+        services.AddSingleton<IMessageSerializer>(_ => new HybridNatsSerializer(maxPayloadSize: maxPayloadSize));
         
         
         // 3. Connection & Contexts
