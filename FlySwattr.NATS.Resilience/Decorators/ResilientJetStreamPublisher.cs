@@ -69,17 +69,19 @@ public class ResilientJetStreamPublisher : IJetStreamPublisher
 
     public Task PublishAsync<T>(string subject, T message, CancellationToken cancellationToken = default)
     {
+        // Pass through to the overload - inner publisher will enforce messageId requirement
         return PublishAsync(subject, message, null, cancellationToken);
     }
 
     public async Task PublishAsync<T>(string subject, T message, string? messageId, CancellationToken cancellationToken = default)
     {
-        // Ensure deterministic ID for Retry de-duplication
-        var actualMsgId = messageId ?? $"{subject}:{Guid.NewGuid():N}";
-
+        // Pass the messageId through - the inner publisher will validate and enforce the requirement.
+        // This is critical: the retry pipeline MUST use the same messageId for all attempts
+        // to leverage JetStream's deduplication. Generating a new ID per retry would defeat
+        // the entire purpose of both retries AND idempotency.
         await _compositePipeline.ExecuteAsync(async ct =>
         {
-            await _inner.PublishAsync(subject, message, actualMsgId, ct);
+            await _inner.PublishAsync(subject, message, messageId, ct);
         }, cancellationToken);
     }
 

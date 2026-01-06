@@ -242,7 +242,9 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
                 try
                 {
                     var dlqMessage = await CreateDlqMessageAsync(context, ex, token);
-                    await _dlqPublisher.PublishAsync(_dlqPolicy.TargetSubject, dlqMessage, token);
+                    // Use deterministic ID based on original stream/consumer/sequence for DLQ idempotency
+                    var dlqMessageId = $"dlq-{_streamName}-{_consumerName}-{context.Sequence}";
+                    await _dlqPublisher.PublishAsync(_dlqPolicy.TargetSubject, dlqMessage, dlqMessageId, token);
 
                     if (_notificationService != null)
                     {

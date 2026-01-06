@@ -31,9 +31,12 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
         _serializer = serializer;
     }
 
-    public async Task PublishAsync<T>(string subject, T message, CancellationToken cancellationToken = default)
+    public Task PublishAsync<T>(string subject, T message, CancellationToken cancellationToken = default)
     {
-        await PublishAsync(subject, message, messageId: null, cancellationToken);
+        throw new ArgumentException(
+            "A messageId must be provided for JetStream publishing to ensure application-level idempotency. " +
+            "Use a business-key-derived ID (e.g., 'Order123-Created') to enable proper de-duplication across retries.",
+            nameof(message));
     }
 
     public async Task PublishAsync<T>(string subject, T message, string? messageId, CancellationToken cancellationToken = default)
@@ -45,23 +48,28 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
         _serializer.Serialize(bufferWriter, message);
         var payload = bufferWriter.WrittenMemory;
 
-        // Ensure a deterministic message id for JetStream de-duplication across retries
-        var msgId = string.IsNullOrWhiteSpace(messageId)
-            ? $"{subject}:{Guid.NewGuid():N}"
-            : messageId!;
+        // Require a caller-provided message ID for true application-level idempotency.
+        // Auto-generating GUIDs would defeat JetStream's deduplication on retries.
+        if (string.IsNullOrWhiteSpace(messageId))
+        {
+            throw new ArgumentException(
+                "A messageId must be provided for JetStream publishing to ensure application-level idempotency. " +
+                "Use a business-key-derived ID (e.g., 'Order123-Created') to enable proper de-duplication across retries.",
+                nameof(messageId));
+        }
         
-        headers["Nats-Msg-Id"] = msgId;
+        headers["Nats-Msg-Id"] = messageId;
 
         var ack = await _jsContext.PublishAsync(
             subject,
             payload,
             headers: headers,
-            opts: new NatsJSPubOpts { MsgId = msgId }, 
+            opts: new NatsJSPubOpts { MsgId = messageId }, 
             cancellationToken: cancellationToken);
 
         ack.EnsureSuccess();
 
-        _logger.LogDebug("Published JetStream message to {Subject} with MsgId {MsgId}", subject, msgId);
+        _logger.LogDebug("Published JetStream message to {Subject} with MsgId {MsgId}", subject, messageId);
     }
 
     public async Task ConsumeAsync<T>(

@@ -35,7 +35,11 @@ public class OffloadingJetStreamPublisher : IJetStreamPublisher
 
     public Task PublishAsync<T>(string subject, T message, CancellationToken cancellationToken = default)
     {
-        return PublishAsync(subject, message, messageId: null, cancellationToken);
+        // Enforce messageId requirement at decorator level for consistency
+        throw new ArgumentException(
+            "A messageId must be provided for JetStream publishing to ensure application-level idempotency. " +
+            "Use a business-key-derived ID (e.g., 'Order123-Created') to enable proper de-duplication across retries.",
+            nameof(message));
     }
 
     public async Task PublishAsync<T>(string subject, T message, string? messageId, CancellationToken cancellationToken = default)
