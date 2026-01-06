@@ -3,6 +3,7 @@ using CommunityToolkit.HighPerformance;
 using CommunityToolkit.HighPerformance.Buffers;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Abstractions.Exceptions;
+using FlySwattr.NATS.Hosting.Health;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using NATS.Client.Core;
@@ -38,6 +39,9 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
     // Resilience pipelines (provided by Resilience package, optional)
     private readonly ResiliencePipeline? _resiliencePipeline;
 
+    // Health metrics for zombie consumer detection
+    private readonly IConsumerHealthMetrics? _healthMetrics;
+
     public NatsConsumerBackgroundService(
         INatsJSConsumer consumer,
         string streamName,
@@ -51,7 +55,8 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
         DeadLetterPolicy? dlqPolicy = null,
         IMessageSerializer? serializer = null,
         IObjectStore? objectStore = null,
-        IDlqNotificationService? notificationService = null)
+        IDlqNotificationService? notificationService = null,
+        IConsumerHealthMetrics? healthMetrics = null)
     {
         _consumer = consumer;
         _streamName = streamName;
@@ -68,6 +73,7 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
         _notificationService = notificationService;
 
         _resiliencePipeline = resiliencePipeline;
+        _healthMetrics = healthMetrics;
     }
 
 
@@ -82,6 +88,9 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Register with health metrics for zombie detection
+        _healthMetrics?.RegisterConsumer(_streamName, _consumerName);
+
         try
         {
             // Channel capacity matches worker count for strict backpressure
@@ -105,6 +114,9 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
                 {
                     await foreach (var msg in _consumer.ConsumeAsync<T>(opts: _consumeOpts, cancellationToken: stoppingToken))
                     {
+                        // Record loop iteration for health check (consumer is actively receiving)
+                        _healthMetrics?.RecordLoopIteration(_streamName, _consumerName);
+
                         var context = CreateContext(msg);
 
                         // Non-blocking write to apply backpressure
@@ -148,6 +160,11 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
         catch (OperationCanceledException)
         {
             // Expected on graceful shutdown
+        }
+        finally
+        {
+            // Unregister from health metrics
+            _healthMetrics?.UnregisterConsumer(_streamName, _consumerName);
         }
     }
 
@@ -198,6 +215,9 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
                     using var ackCts = CancellationTokenSource.CreateLinkedTokenSource(token);
                     ackCts.CancelAfter(TimeSpan.FromSeconds(5));
                     await context.AckAsync(ackCts.Token);
+
+                    // Record heartbeat after successful message processing
+                    _healthMetrics?.RecordHeartbeat(_streamName, _consumerName);
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested)
                 {

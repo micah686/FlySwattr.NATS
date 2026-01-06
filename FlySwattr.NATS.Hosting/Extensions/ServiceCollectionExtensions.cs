@@ -11,11 +11,23 @@ namespace FlySwattr.NATS.Hosting.Extensions;
 
 public static class ServiceCollectionExtensions
 {
-    public static IServiceCollection AddFlySwattrNatsHosting(this IServiceCollection services)
+    public static IServiceCollection AddFlySwattrNatsHosting(
+        this IServiceCollection services,
+        Action<NatsConsumerHealthCheckOptions>? configureHealthCheck = null)
     {
+        // Register consumer health metrics singleton for zombie detection
+        services.AddSingleton<IConsumerHealthMetrics, NatsConsumerHealthMetrics>();
+
+        // Configure consumer health check options
+        if (configureHealthCheck != null)
+        {
+            services.Configure(configureHealthCheck);
+        }
+
         // Health Checks
         services.AddHealthChecks()
-               .AddCheck<NatsHealthCheck>("nats_health");
+            .AddCheck<NatsHealthCheck>("nats_health")
+            .AddCheck<NatsConsumerHealthCheck>("nats_consumer_health");
 
         // Startup Check
         services.AddHostedService<NatsStartupCheck>();
@@ -65,6 +77,9 @@ public static class ServiceCollectionExtensions
                 ? sp.GetKeyedService<ResiliencePipeline>(options.ResiliencePipelineKey)
                 : null;
 
+            // Resolve health metrics for zombie detection
+            var healthMetrics = sp.GetService<IConsumerHealthMetrics>();
+
             return new NatsConsumerBackgroundService<TMessage>(
                 consumer,
                 streamName,
@@ -78,7 +93,8 @@ public static class ServiceCollectionExtensions
                 options.DlqPolicy,
                 serializer,
                 objectStore,
-                notificationService
+                notificationService,
+                healthMetrics
             );
         });
     }
