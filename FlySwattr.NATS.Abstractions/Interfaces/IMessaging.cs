@@ -118,10 +118,11 @@ public interface IJetStreamConsumer
     /// <param name="handler">The handler to process incoming messages.</param>
     /// <param name="queueGroup">Optional queue group (durable consumer name).</param>
     /// <param name="maxDegreeOfParallelism">Optional maximum number of concurrent message processors.</param>
+    /// <param name="maxConcurrency">Optional per-consumer concurrency limit within the bulkhead pool. Prevents high-volume consumers from monopolizing shared resources.</param>
     /// <param name="bulkheadPool">Optional bulkhead pool name for resource isolation (e.g., "critical", "default").</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>A task representing the asynchronous operation.</returns>
-    Task ConsumeAsync<T>(StreamName stream, SubjectName subject, Func<IJsMessageContext<T>, Task> handler, QueueGroup? queueGroup = null, int? maxDegreeOfParallelism = null, string? bulkheadPool = null, CancellationToken cancellationToken = default);
+    Task ConsumeAsync<T>(StreamName stream, SubjectName subject, Func<IJsMessageContext<T>, Task> handler, QueueGroup? queueGroup = null, int? maxDegreeOfParallelism = null, int? maxConcurrency = null, string? bulkheadPool = null, CancellationToken cancellationToken = default);
 
     //TODO: breakout bulkheadPool, as it leaks the Resilience package
     /// <summary>
@@ -133,9 +134,10 @@ public interface IJetStreamConsumer
     /// <param name="handler">The handler to process incoming messages.</param>
     /// <param name="batchSize">The number of messages to pull in each batch.</param>
     /// <param name="maxDegreeOfParallelism">Optional maximum number of concurrent message processors.</param>
+    /// <param name="maxConcurrency">Optional per-consumer concurrency limit within the bulkhead pool. Prevents high-volume consumers from monopolizing shared resources.</param>
     /// <param name="bulkheadPool">Optional bulkhead pool name for resource isolation (e.g., "critical", "default").</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>A task representing the asynchronous operation.</returns>
-    Task ConsumePullAsync<T>(StreamName stream, ConsumerName consumer, Func<IJsMessageContext<T>, Task> handler, int batchSize = 10, int? maxDegreeOfParallelism = null, string? bulkheadPool = null, CancellationToken cancellationToken = default);
+    Task ConsumePullAsync<T>(StreamName stream, ConsumerName consumer, Func<IJsMessageContext<T>, Task> handler, int batchSize = 10, int? maxDegreeOfParallelism = null, int? maxConcurrency = null, string? bulkheadPool = null, CancellationToken cancellationToken = default);
 }
 

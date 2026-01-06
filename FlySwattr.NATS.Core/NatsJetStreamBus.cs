@@ -78,9 +78,11 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
         Func<IJsMessageContext<T>, Task> handler,
         QueueGroup? queueGroup = null,
         int? maxDegreeOfParallelism = null,
+        int? maxConcurrency = null,
         string? bulkheadPool = null,
         CancellationToken cancellationToken = default)
     {
+        // Note: maxConcurrency is enforced by the Resilience decorator, not here in Core
         string? consumerName = queueGroup?.Value;
 
         try
@@ -168,9 +170,11 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
         Func<IJsMessageContext<T>, Task> handler,
         int batchSize = 10,
         int? maxDegreeOfParallelism = null,
+        int? maxConcurrency = null,
         string? bulkheadPool = null,
         CancellationToken cancellationToken = default)
     {
+        // Note: maxConcurrency is enforced by the Resilience decorator, not here in Core
         try
         {
             var jsConsumer = await _jsContext.GetConsumerAsync(stream.Value, consumer.Value, cancellationToken);
