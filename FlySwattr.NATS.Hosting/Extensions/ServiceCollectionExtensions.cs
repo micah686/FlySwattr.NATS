@@ -1,6 +1,7 @@
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Hosting.Configuration;
 using FlySwattr.NATS.Hosting.Health;
+using FlySwattr.NATS.Hosting.Middleware;
 using FlySwattr.NATS.Hosting.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -85,6 +86,9 @@ public static class ServiceCollectionExtensions
             // Resolve topology signal for Safety Mode startup coordination
             var topologyReadySignal = sp.GetService<ITopologyReadySignal>();
 
+            // Resolve middleware pipeline
+            var middlewares = ResolveMiddlewares<TMessage>(sp, options);
+
             return new NatsConsumerBackgroundService<TMessage>(
                 consumer,
                 streamName,
@@ -100,9 +104,42 @@ public static class ServiceCollectionExtensions
                 objectStore,
                 notificationService,
                 healthMetrics,
-                topologyReadySignal
+                topologyReadySignal,
+                middlewares
             );
         });
+    }
+
+    /// <summary>
+    /// Resolves and instantiates the middleware pipeline for a consumer.
+    /// </summary>
+    private static IEnumerable<IConsumerMiddleware<TMessage>> ResolveMiddlewares<TMessage>(
+        IServiceProvider sp, 
+        NatsConsumerOptions options)
+    {
+        var middlewares = new List<IConsumerMiddleware<TMessage>>();
+
+        // Add built-in middleware if enabled
+        if (options.EnableLoggingMiddleware)
+        {
+            middlewares.Add(ActivatorUtilities.CreateInstance<LoggingMiddleware<TMessage>>(sp));
+        }
+
+        if (options.EnableValidationMiddleware)
+        {
+            middlewares.Add(ActivatorUtilities.CreateInstance<ValidationMiddleware<TMessage>>(sp));
+        }
+
+        // Add custom middleware types
+        foreach (var middlewareType in options.MiddlewareTypes)
+        {
+            if (ActivatorUtilities.CreateInstance(sp, middlewareType) is IConsumerMiddleware<TMessage> middleware)
+            {
+                middlewares.Add(middleware);
+            }
+        }
+
+        return middlewares;
     }
 
     /// <summary>
@@ -191,4 +228,37 @@ public class NatsConsumerOptions
     /// The pipeline is typically provided by FlySwattr.NATS.Resilience package.
     /// </summary>
     public object? ResiliencePipelineKey { get; set; }
+
+    /// <summary>
+    /// Whether to enable the built-in logging middleware.
+    /// When enabled, logs message handling start/end with duration.
+    /// Default: true.
+    /// </summary>
+    public bool EnableLoggingMiddleware { get; set; } = true;
+
+    /// <summary>
+    /// Whether to enable the built-in validation middleware.
+    /// When enabled, validates messages using registered IValidator&lt;T&gt; implementations.
+    /// Validation failures are routed directly to DLQ without retries.
+    /// Default: true.
+    /// </summary>
+    public bool EnableValidationMiddleware { get; set; } = true;
+
+    /// <summary>
+    /// Custom middleware types to include in the pipeline.
+    /// Middleware types must implement IConsumerMiddleware&lt;TMessage&gt;.
+    /// Middleware executes in the order they are added.
+    /// </summary>
+    public List<Type> MiddlewareTypes { get; } = new();
+
+    /// <summary>
+    /// Adds a custom middleware type to the pipeline.
+    /// </summary>
+    /// <typeparam name="TMiddleware">The middleware type.</typeparam>
+    /// <returns>The options instance for chaining.</returns>
+    public NatsConsumerOptions AddMiddleware<TMiddleware>() where TMiddleware : class
+    {
+        MiddlewareTypes.Add(typeof(TMiddleware));
+        return this;
+    }
 }

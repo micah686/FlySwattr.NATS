@@ -45,6 +45,9 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
     // Topology coordination signal for Safety Mode startup
     private readonly ITopologyReadySignal? _topologyReadySignal;
 
+    // Middleware pipeline for cross-cutting concerns
+    private readonly IReadOnlyList<IConsumerMiddleware<T>> _middlewares;
+
     public NatsConsumerBackgroundService(
         INatsJSConsumer consumer,
         string streamName,
@@ -60,7 +63,8 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
         IObjectStore? objectStore = null,
         IDlqNotificationService? notificationService = null,
         IConsumerHealthMetrics? healthMetrics = null,
-        ITopologyReadySignal? topologyReadySignal = null)
+        ITopologyReadySignal? topologyReadySignal = null,
+        IEnumerable<IConsumerMiddleware<T>>? middlewares = null)
     {
         _consumer = consumer;
         _streamName = streamName;
@@ -79,6 +83,7 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
         _resiliencePipeline = resiliencePipeline;
         _healthMetrics = healthMetrics;
         _topologyReadySignal = topologyReadySignal;
+        _middlewares = middlewares?.ToList().AsReadOnly() ?? (IReadOnlyList<IConsumerMiddleware<T>>)Array.Empty<IConsumerMiddleware<T>>();
     }
 
 
@@ -220,6 +225,21 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
                 {
                     throw; // Graceful shutdown
                 }
+                catch (MessageValidationException ex)
+                {
+                    // Validation failures are permanent - route directly to DLQ without retries
+                    LogValidationFailed(_streamName, _consumerName, context.Subject, ex);
+                    try
+                    {
+                        await HandleValidationFailureAsync(context, ex, token);
+                    }
+                    catch (Exception handleEx)
+                    {
+                        LogPoisonMessageHandlingFailed(handleEx);
+                        try { await context.TermAsync(token); } catch { /* best effort */ }
+                    }
+                    continue;
+                }
                 catch (Exception ex)
                 {
                     try
@@ -264,13 +284,25 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
 
     private async Task ExecuteHandlerWithResilienceAsync(IJsMessageContext<T> context, CancellationToken token)
     {
+        // Build the "Russian Doll" middleware pipeline
+        Func<Task> pipeline = () => _handler(context);
+
+        // Wrap in middleware (reversed so first registered executes first)
+        foreach (var middleware in _middlewares.Reverse())
+        {
+            var next = pipeline;
+            var mw = middleware; // Capture for closure
+            pipeline = () => mw.InvokeAsync(context, next, token);
+        }
+
+        // Execute through resilience pipeline if configured
         if (_resiliencePipeline != null)
         {
-            await _resiliencePipeline.ExecuteAsync(async _ => await _handler(context), token);
+            await _resiliencePipeline.ExecuteAsync(async _ => await pipeline(), token);
         }
         else
         {
-            await _handler(context);
+            await pipeline();
         }
     }
 
@@ -316,6 +348,40 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
             LogHandlerFailedWithNak(_streamName, _consumerName, context.NumDelivered, ex);
             var backoffSeconds = Math.Min(30, Math.Pow(2, context.NumDelivered - 1));
             try { await context.NackAsync(TimeSpan.FromSeconds(backoffSeconds), token); } catch { /* best effort */ }
+        }
+    }
+
+    /// <summary>
+    /// Handles validation failures by routing directly to DLQ without retries.
+    /// Validation failures are permanent and will never succeed on retry.
+    /// </summary>
+    private async Task HandleValidationFailureAsync(IJsMessageContext<T> context, MessageValidationException ex, CancellationToken token)
+    {
+        if (_dlqPolicy == null || _dlqPublisher == null || _serializer == null)
+        {
+            LogNoDlqAvailable();
+            try { await context.TermAsync(token); } catch { /* best effort */ }
+            return;
+        }
+
+        try
+        {
+            var dlqMessage = await CreateDlqMessageAsync(context, ex, token);
+            // Use deterministic ID based on original stream/consumer/sequence for DLQ idempotency
+            var dlqMessageId = $"dlq-validation-{_streamName}-{_consumerName}-{context.Sequence}";
+            await _dlqPublisher.PublishAsync(_dlqPolicy.TargetSubject, dlqMessage, dlqMessageId, token);
+
+            if (_notificationService != null)
+            {
+                await SendDlqNotificationAsync(context, ex, token);
+            }
+
+            await context.TermAsync(token);
+        }
+        catch (Exception dlqEx)
+        {
+            LogDlqFailed(dlqEx);
+            try { await context.TermAsync(token); } catch { /* best effort */ }
         }
     }
 
@@ -458,6 +524,9 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Consumer {StreamName}/{ConsumerName} cannot start: topology provisioning failed.")]
     private partial void LogTopologyFailed(string streamName, string consumerName, Exception exception);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Validation failed for message on {Subject} (Stream: {StreamName}, Consumer: {ConsumerName}). Routing to DLQ.")]
+    private partial void LogValidationFailed(string streamName, string consumerName, string subject, MessageValidationException exception);
 }
 
 /// <summary>
