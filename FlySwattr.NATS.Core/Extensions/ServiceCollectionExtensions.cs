@@ -89,6 +89,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IAsyncDisposable>(sp => sp.GetRequiredService<NatsJetStreamBus>());
 
         // 6. DLQ Services
+        services.AddSingleton<IDlqPolicyRegistry, DlqPolicyRegistry>();
         services.AddSingleton<IDlqStore, NatsDlqStore>();
         services.AddSingleton<IDlqNotificationService, LoggingDlqNotificationService>();
         services.AddSingleton<IDlqRemediationService>(sp => new Services.NatsDlqRemediationService(

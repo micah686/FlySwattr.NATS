@@ -29,12 +29,7 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
     private readonly string _consumerName;
     private readonly int _workerCount;
 
-    // Optional dependencies
-    private readonly IJetStreamPublisher? _dlqPublisher;
-    private readonly DeadLetterPolicy? _dlqPolicy;
-    private readonly IMessageSerializer? _serializer;
-    private readonly IObjectStore? _objectStore;
-    private readonly IDlqNotificationService? _notificationService;
+    private readonly IPoisonMessageHandler<T> _poisonHandler;
 
     // Resilience pipelines (provided by Resilience package, optional)
     private readonly ResiliencePipeline? _resiliencePipeline;
@@ -55,13 +50,9 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
         Func<IJsMessageContext<T>, Task> handler,
         NatsJSConsumeOpts consumeOpts,
         ILogger logger,
+        IPoisonMessageHandler<T> poisonHandler,
         int? maxDegreeOfParallelism = null,
         ResiliencePipeline? resiliencePipeline = null,
-        IJetStreamPublisher? dlqPublisher = null,
-        DeadLetterPolicy? dlqPolicy = null,
-        IMessageSerializer? serializer = null,
-        IObjectStore? objectStore = null,
-        IDlqNotificationService? notificationService = null,
         IConsumerHealthMetrics? healthMetrics = null,
         ITopologyReadySignal? topologyReadySignal = null,
         IEnumerable<IConsumerMiddleware<T>>? middlewares = null)
@@ -73,12 +64,7 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
         _consumeOpts = consumeOpts;
         _logger = logger;
         _workerCount = maxDegreeOfParallelism ?? consumeOpts.MaxMsgs ?? 1;
-
-        _dlqPublisher = dlqPublisher;
-        _dlqPolicy = dlqPolicy;
-        _serializer = serializer;
-        _objectStore = objectStore;
-        _notificationService = notificationService;
+        _poisonHandler = poisonHandler;
 
         _resiliencePipeline = resiliencePipeline;
         _healthMetrics = healthMetrics;
@@ -225,26 +211,13 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
                 {
                     throw; // Graceful shutdown
                 }
-                catch (MessageValidationException ex)
-                {
-                    // Validation failures are permanent - route directly to DLQ without retries
-                    LogValidationFailed(_streamName, _consumerName, context.Subject, ex);
-                    try
-                    {
-                        await HandleValidationFailureAsync(context, ex, token);
-                    }
-                    catch (Exception handleEx)
-                    {
-                        LogPoisonMessageHandlingFailed(handleEx);
-                        try { await context.TermAsync(token); } catch { /* best effort */ }
-                    }
-                    continue;
-                }
                 catch (Exception ex)
                 {
                     try
                     {
-                        await HandlePoisonMessageAsync(context, ex, token);
+                        var configuredLimit = _consumer.Info.Config.MaxDeliver;
+                        var limitLong = configuredLimit > 0 ? configuredLimit : long.MaxValue;
+                        await _poisonHandler.HandleAsync(context, _streamName, _consumerName, limitLong, ex, token);
                     }
                     catch (Exception handleEx)
                     {
@@ -306,167 +279,6 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
         }
     }
 
-    private async Task HandlePoisonMessageAsync(IJsMessageContext<T> context, Exception ex, CancellationToken token)
-    {
-        var configuredLimit = _consumer.Info.Config.MaxDeliver;
-        var limitLong = configuredLimit > 0 ? configuredLimit : long.MaxValue;
-
-        if (context.NumDelivered >= limitLong && _dlqPolicy != null)
-        {
-            LogDlqInitiated(_streamName, _consumerName, context.NumDelivered, limitLong, ex);
-
-            if (_dlqPublisher != null && _serializer != null)
-            {
-                try
-                {
-                    var dlqMessage = await CreateDlqMessageAsync(context, ex, token);
-                    // Use deterministic ID based on original stream/consumer/sequence for DLQ idempotency
-                    var dlqMessageId = $"dlq-{_streamName}-{_consumerName}-{context.Sequence}";
-                    await _dlqPublisher.PublishAsync(_dlqPolicy.TargetSubject, dlqMessage, dlqMessageId, token);
-
-                    if (_notificationService != null)
-                    {
-                        await SendDlqNotificationAsync(context, ex, token);
-                    }
-
-                    await context.TermAsync(token);
-                }
-                catch (Exception dlqEx)
-                {
-                    LogDlqFailed(dlqEx);
-                    await context.NackAsync(TimeSpan.FromSeconds(30), token);
-                }
-            }
-            else
-            {
-                LogNoDlqAvailable();
-                try { await context.TermAsync(token); } catch { /* best effort */ }
-            }
-        }
-        else
-        {
-            LogHandlerFailedWithNak(_streamName, _consumerName, context.NumDelivered, ex);
-            var backoffSeconds = Math.Min(30, Math.Pow(2, context.NumDelivered - 1));
-            try { await context.NackAsync(TimeSpan.FromSeconds(backoffSeconds), token); } catch { /* best effort */ }
-        }
-    }
-
-    /// <summary>
-    /// Handles validation failures by routing directly to DLQ without retries.
-    /// Validation failures are permanent and will never succeed on retry.
-    /// </summary>
-    private async Task HandleValidationFailureAsync(IJsMessageContext<T> context, MessageValidationException ex, CancellationToken token)
-    {
-        if (_dlqPolicy == null || _dlqPublisher == null || _serializer == null)
-        {
-            LogNoDlqAvailable();
-            try { await context.TermAsync(token); } catch { /* best effort */ }
-            return;
-        }
-
-        try
-        {
-            var dlqMessage = await CreateDlqMessageAsync(context, ex, token);
-            // Use deterministic ID based on original stream/consumer/sequence for DLQ idempotency
-            var dlqMessageId = $"dlq-validation-{_streamName}-{_consumerName}-{context.Sequence}";
-            await _dlqPublisher.PublishAsync(_dlqPolicy.TargetSubject, dlqMessage, dlqMessageId, token);
-
-            if (_notificationService != null)
-            {
-                await SendDlqNotificationAsync(context, ex, token);
-            }
-
-            await context.TermAsync(token);
-        }
-        catch (Exception dlqEx)
-        {
-            LogDlqFailed(dlqEx);
-            try { await context.TermAsync(token); } catch { /* best effort */ }
-        }
-    }
-
-    private async Task<DlqMessage> CreateDlqMessageAsync(IJsMessageContext<T> context, Exception ex, CancellationToken token)
-    {
-        byte[] payload;
-        string contentType;
-        string serializerType;
-
-        try
-        {
-            using var bufferWriter = new ArrayPoolBufferWriter<byte>(InitialBufferSize);
-            _serializer!.Serialize(bufferWriter, context.Message);
-
-            if (bufferWriter.WrittenCount > MaxDlqPayloadSize && _objectStore != null)
-            {
-                // Offload to object store
-                var objectKey = $"dlq-payload/{_streamName}/{_consumerName}/{context.Sequence}-{DateTimeOffset.UtcNow.Ticks}";
-                using var payloadStream = bufferWriter.WrittenMemory.AsStream();
-                await _objectStore.PutAsync(objectKey, payloadStream, token);
-
-                payload = Array.Empty<byte>();
-                contentType = $"objstore://{objectKey}";
-            }
-            else if (bufferWriter.WrittenCount <= MaxDlqPayloadSize)
-            {
-                payload = bufferWriter.WrittenMemory.ToArray();
-                contentType = _serializer.GetContentType<T>();
-            }
-            else
-            {
-                LogLargePayloadWithoutObjectStore(bufferWriter.WrittenCount, MaxDlqPayloadSize);
-                payload = Array.Empty<byte>();
-                contentType = $"truncated:size={bufferWriter.WrittenCount}";
-            }
-
-            serializerType = _serializer.GetType().FullName ?? "Unknown";
-        }
-        catch (Exception serializationEx)
-        {
-            LogDlqSerializationFailed(serializationEx);
-            payload = Array.Empty<byte>();
-            contentType = "application/octet-stream";
-            serializerType = "Failed";
-        }
-
-        return new DlqMessage
-        {
-            OriginalStream = _streamName,
-            OriginalConsumer = _consumerName,
-            OriginalSubject = context.Subject,
-            OriginalSequence = context.Sequence,
-            DeliveryCount = (int)context.NumDelivered,
-            FailedAt = DateTimeOffset.UtcNow,
-            Payload = payload,
-            PayloadEncoding = contentType,
-            ErrorReason = ex.Message,
-            OriginalHeaders = context.Headers.Headers,
-            OriginalMessageType = typeof(T).AssemblyQualifiedName ?? typeof(T).FullName,
-            SerializerType = serializerType
-        };
-    }
-
-    private async Task SendDlqNotificationAsync(IJsMessageContext<T> context, Exception ex, CancellationToken token)
-    {
-        try
-        {
-            var notification = new DlqNotification(
-                MessageId: $"{_streamName}-{context.Sequence}",
-                OriginalStream: _streamName,
-                OriginalConsumer: _consumerName,
-                OriginalSubject: context.Subject,
-                OriginalSequence: context.Sequence,
-                DeliveryCount: (int)context.NumDelivered,
-                ErrorReason: ex.Message,
-                OccurredAt: DateTimeOffset.UtcNow
-            );
-            await _notificationService!.NotifyAsync(notification, token);
-        }
-        catch (Exception notifyEx)
-        {
-            LogDlqNotificationFailed(_streamName, _consumerName, notifyEx);
-        }
-    }
-
     // Zero-allocation logging via source generators
     [LoggerMessage(Level = LogLevel.Debug, Message = "Channel full, applying backpressure (Stream: {StreamName}, Consumer: {ConsumerName})")]
     private partial void LogBackpressure(string streamName, string consumerName);
@@ -486,32 +298,11 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
     [LoggerMessage(Level = LogLevel.Error, Message = "Worker crashed for {StreamName}/{ConsumerName}")]
     private partial void LogWorkerCrashed(string streamName, string consumerName, Exception exception);
 
-    [LoggerMessage(Level = LogLevel.Error, Message = "Handler failed for {StreamName}/{ConsumerName} (Delivery {DeliveryCount}/{MaxDeliver}), initiating DLQ procedure")]
-    private partial void LogDlqInitiated(string streamName, string consumerName, uint deliveryCount, long maxDeliver, Exception exception);
-
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to serialize message for DLQ")]
-    private partial void LogDlqSerializationFailed(Exception exception);
-
-    [LoggerMessage(Level = LogLevel.Error, Message = "Failed to DLQ message")]
-    private partial void LogDlqFailed(Exception exception);
-
-    [LoggerMessage(Level = LogLevel.Warning, Message = "No DLQ policy, publisher, or serializer available. Terminating poison message.")]
-    private partial void LogNoDlqAvailable();
-
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Large payload ({ActualSize} bytes) exceeds inline limit ({MaxSize} bytes) but no object store available. Payload will be truncated.")]
-    private partial void LogLargePayloadWithoutObjectStore(int actualSize, int maxSize);
-
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Handler failed for {StreamName}/{ConsumerName} (Delivery {DeliveryCount}), sending NAK with backoff")]
-    private partial void LogHandlerFailedWithNak(string streamName, string consumerName, uint deliveryCount, Exception exception);
-
     [LoggerMessage(Level = LogLevel.Error, Message = "Pull consumer loop failed for {StreamName}/{ConsumerName}")]
     private partial void LogPullConsumerLoopFailed(string streamName, string consumerName, Exception exception);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Workers did not complete within shutdown timeout for {StreamName}/{ConsumerName}")]
     private partial void LogShutdownTimeout(string streamName, string consumerName);
-
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to send DLQ notification for {StreamName}/{ConsumerName}")]
-    private partial void LogDlqNotificationFailed(string streamName, string consumerName, Exception exception);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Consumer {StreamName}/{ConsumerName} waiting for topology ready signal...")]
     private partial void LogWaitingForTopology(string streamName, string consumerName);
@@ -524,9 +315,6 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Consumer {StreamName}/{ConsumerName} cannot start: topology provisioning failed.")]
     private partial void LogTopologyFailed(string streamName, string consumerName, Exception exception);
-
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Validation failed for message on {Subject} (Stream: {StreamName}, Consumer: {ConsumerName}). Routing to DLQ.")]
-    private partial void LogValidationFailed(string streamName, string consumerName, string subject, MessageValidationException exception);
 }
 
 /// <summary>

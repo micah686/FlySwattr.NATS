@@ -1,4 +1,5 @@
 using FlySwattr.NATS.Abstractions;
+using FlySwattr.NATS.Core;
 using FlySwattr.NATS.Hosting.Configuration;
 using FlySwattr.NATS.Hosting.Health;
 using FlySwattr.NATS.Hosting.Middleware;
@@ -88,6 +89,32 @@ public static class ServiceCollectionExtensions
 
             // Resolve middleware pipeline
             var middlewares = ResolveMiddlewares<TMessage>(sp, options);
+            
+            // Resolve or create poison message handler
+            IPoisonMessageHandler<TMessage> poisonHandler;
+            if (options.PoisonHandlerKey != null)
+            {
+                poisonHandler = sp.GetRequiredKeyedService<IPoisonMessageHandler<TMessage>>(options.PoisonHandlerKey);
+            }
+            else
+            {
+                // Register policy if provided in options and not already registered (best effort)
+                // In a real app, policies should be registered via TopologyManager, but for manual consumer setup:
+                var registry = sp.GetRequiredService<IDlqPolicyRegistry>();
+                if (options.DlqPolicy != null)
+                {
+                    registry.Register(streamName, consumerName, options.DlqPolicy);
+                }
+                
+                poisonHandler = new DefaultDlqPoisonHandler<TMessage>(
+                    dlqPublisher,
+                    serializer,
+                    objectStore,
+                    notificationService,
+                    registry,
+                    sp.GetRequiredService<ILogger<DefaultDlqPoisonHandler<TMessage>>>()
+                );
+            }
 
             return new NatsConsumerBackgroundService<TMessage>(
                 consumer,
@@ -96,13 +123,9 @@ public static class ServiceCollectionExtensions
                 handler,
                 consumeOpts,
                 logger,
+                poisonHandler,
                 options.MaxConcurrency,
                 resiliencePipeline,
-                dlqPublisher,
-                options.DlqPolicy,
-                serializer,
-                objectStore,
-                notificationService,
                 healthMetrics,
                 topologyReadySignal,
                 middlewares
@@ -228,6 +251,12 @@ public class NatsConsumerOptions
     /// The pipeline is typically provided by FlySwattr.NATS.Resilience package.
     /// </summary>
     public object? ResiliencePipelineKey { get; set; }
+    
+    /// <summary>
+    /// Keyed service key for a custom IPoisonMessageHandler&lt;T&gt;.
+    /// If null, a DefaultDlqPoisonHandler is created.
+    /// </summary>
+    public object? PoisonHandlerKey { get; set; }
 
     /// <summary>
     /// Whether to enable the built-in logging middleware.
