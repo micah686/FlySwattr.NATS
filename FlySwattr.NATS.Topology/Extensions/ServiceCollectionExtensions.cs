@@ -1,4 +1,5 @@
 using FlySwattr.NATS.Abstractions;
+using FlySwattr.NATS.Topology.Configuration;
 using FlySwattr.NATS.Topology.Managers;
 using FlySwattr.NATS.Topology.Services;
 using Microsoft.Extensions.DependencyInjection;
@@ -37,9 +38,21 @@ public static class ServiceCollectionExtensions
     /// Enables automatic topology provisioning on application startup.
     /// This registers a hosted service that collects all <see cref="ITopologySource"/> implementations
     /// and calls <see cref="ITopologyManager"/> to ensure streams and consumers exist.
+    /// 
+    /// The provisioning service includes a "Cold Start" protection that waits for NATS connection to be
+    /// established before attempting JetStream management operations. This prevents application crash
+    /// loops during infrastructure instability (e.g., Kubernetes sidecar startup delays).
     /// </summary>
-    public static IServiceCollection AddNatsTopologyProvisioning(this IServiceCollection services)
+    /// <param name="services">The service collection.</param>
+    /// <param name="configure">Optional configuration for startup resilience options.</param>
+    public static IServiceCollection AddNatsTopologyProvisioning(
+        this IServiceCollection services,
+        Action<TopologyStartupOptions>? configure = null)
     {
+        // Register startup configuration options
+        services.AddOptions<TopologyStartupOptions>()
+            .Configure(configure ?? (_ => { }));
+
         services.AddHostedService<TopologyProvisioningService>();
         return services;
     }
