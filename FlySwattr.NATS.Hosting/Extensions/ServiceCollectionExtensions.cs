@@ -1,7 +1,9 @@
 using FlySwattr.NATS.Abstractions;
+using FlySwattr.NATS.Hosting.Configuration;
 using FlySwattr.NATS.Hosting.Health;
 using FlySwattr.NATS.Hosting.Services;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using NATS.Client.JetStream;
@@ -97,6 +99,60 @@ public static class ServiceCollectionExtensions
                 healthMetrics
             );
         });
+    }
+
+    /// <summary>
+    /// Adds the DLQ Advisory Listener service that monitors NATS JetStream advisory events
+    /// for consumer delivery failures (MAX_DELIVERIES exceeded).
+    /// </summary>
+    /// <remarks>
+    /// This provides "Control Plane" active monitoring, giving operations teams visibility into
+    /// server-side delivery failures that would otherwise go unnoticed. When a consumer exceeds
+    /// its MaxDeliver limit, the NATS server publishes an advisory event that this service captures.
+    /// </remarks>
+    /// <param name="services">The service collection.</param>
+    /// <param name="configure">Optional configuration for advisory filtering and behavior.</param>
+    /// <returns>The service collection for chaining.</returns>
+    public static IServiceCollection AddNatsDlqAdvisoryListener(
+        this IServiceCollection services,
+        Action<DlqAdvisoryListenerOptions>? configure = null)
+    {
+        // Configure options
+        if (configure != null)
+        {
+            services.Configure(configure);
+        }
+        else
+        {
+            services.Configure<DlqAdvisoryListenerOptions>(_ => { });
+        }
+
+        // Register default logging handler (uses TryAddEnumerable to allow multiple handlers)
+        services.TryAddEnumerable(
+            ServiceDescriptor.Singleton<IDlqAdvisoryHandler, LoggingDlqAdvisoryHandler>());
+
+        // Register the background service
+        services.AddHostedService<DlqAdvisoryListenerService>();
+
+        return services;
+    }
+
+    /// <summary>
+    /// Registers a custom <see cref="IDlqAdvisoryHandler"/> implementation for handling
+    /// NATS JetStream advisory events.
+    /// </summary>
+    /// <remarks>
+    /// Multiple handlers can be registered and will all be invoked when an advisory is received.
+    /// Use this to integrate with external alerting systems like PagerDuty, Slack, or custom monitoring.
+    /// </remarks>
+    /// <typeparam name="THandler">The handler implementation type.</typeparam>
+    /// <param name="services">The service collection.</param>
+    /// <returns>The service collection for chaining.</returns>
+    public static IServiceCollection AddDlqAdvisoryHandler<THandler>(this IServiceCollection services)
+        where THandler : class, IDlqAdvisoryHandler
+    {
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IDlqAdvisoryHandler, THandler>());
+        return services;
     }
 }
 
