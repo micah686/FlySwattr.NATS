@@ -39,32 +39,50 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<ConsumerSemaphoreManager>();
         services.AddSingleton<HierarchicalResilienceBuilder>();
 
-        // 2. Decorate Publisher
-        // Replace the existing IJetStreamPublisher with the Resilient decorator
-        services.Replace(ServiceDescriptor.Singleton<IJetStreamPublisher>(sp =>
-        {
-            // Resolve the Core implementation (NatsJetStreamBus) explicitly
-            var coreBus = sp.GetRequiredService<FlySwattr.NATS.Core.NatsJetStreamBus>();
-            var resilienceBuilder = sp.GetRequiredService<HierarchicalResilienceBuilder>();
-            var logger = sp.GetRequiredService<ILogger<ResilientJetStreamPublisher>>();
-
-            return new ResilientJetStreamPublisher(coreBus, resilienceBuilder, logger);
-        }));
-
-        // 3. Decorate Consumer
-        // Replace the existing IJetStreamConsumer with the Resilient decorator
-        services.Replace(ServiceDescriptor.Singleton<IJetStreamConsumer>(sp =>
-        {
-            // Resolve the Core implementation (NatsJetStreamBus) explicitly
-            var coreBus = sp.GetRequiredService<FlySwattr.NATS.Core.NatsJetStreamBus>();
-            var bulkheadManager = sp.GetRequiredService<BulkheadManager>();
-            var semaphoreManager = sp.GetRequiredService<ConsumerSemaphoreManager>();
-            var resilienceBuilder = sp.GetRequiredService<HierarchicalResilienceBuilder>();
-            var logger = sp.GetRequiredService<ILogger<ResilientJetStreamConsumer>>();
-
-            return new ResilientJetStreamConsumer(coreBus, bulkheadManager, semaphoreManager, resilienceBuilder, logger);
-        }));
+        // 2. Decorate Publisher and Consumer generically
+        Decorate<IJetStreamPublisher, ResilientJetStreamPublisher>(services);
+        Decorate<IJetStreamConsumer, ResilientJetStreamConsumer>(services);
 
         return services;
+    }
+
+    private static void Decorate<TInterface, TDecorator>(IServiceCollection services)
+        where TInterface : class
+        where TDecorator : class, TInterface
+    {
+        // Find the last registered descriptor for the interface
+        var descriptor = services.LastOrDefault(d => d.ServiceType == typeof(TInterface));
+        if (descriptor == null)
+        {
+            throw new InvalidOperationException($"Service {typeof(TInterface).Name} is not registered. Ensure NATS Core is registered before adding Resilience.");
+        }
+
+        // Generate a unique key for the inner service
+        var innerKey = $"resilience-inner-{typeof(TInterface).Name}";
+
+        // Remove the original registration
+        services.Remove(descriptor);
+
+        // Re-register the original implementation as a keyed service
+        // We assume Singleton lifetime as NATS services are typically singletons
+        if (descriptor.ImplementationInstance != null)
+        {
+            services.AddKeyedSingleton(typeof(TInterface), innerKey, descriptor.ImplementationInstance);
+        }
+        else if (descriptor.ImplementationFactory != null)
+        {
+            services.AddKeyedSingleton(typeof(TInterface), innerKey, (sp, key) => descriptor.ImplementationFactory(sp));
+        }
+        else if (descriptor.ImplementationType != null)
+        {
+            services.AddKeyedSingleton(typeof(TInterface), innerKey, descriptor.ImplementationType);
+        }
+
+        // Register the decorator
+        services.AddSingleton<TInterface>(sp =>
+        {
+            var inner = sp.GetRequiredKeyedService<TInterface>(innerKey);
+            return ActivatorUtilities.CreateInstance<TDecorator>(sp, inner);
+        });
     }
 }
