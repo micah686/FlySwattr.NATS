@@ -42,6 +42,9 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
     // Health metrics for zombie consumer detection
     private readonly IConsumerHealthMetrics? _healthMetrics;
 
+    // Topology coordination signal for Safety Mode startup
+    private readonly ITopologyReadySignal? _topologyReadySignal;
+
     public NatsConsumerBackgroundService(
         INatsJSConsumer consumer,
         string streamName,
@@ -56,7 +59,8 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
         IMessageSerializer? serializer = null,
         IObjectStore? objectStore = null,
         IDlqNotificationService? notificationService = null,
-        IConsumerHealthMetrics? healthMetrics = null)
+        IConsumerHealthMetrics? healthMetrics = null,
+        ITopologyReadySignal? topologyReadySignal = null)
     {
         _consumer = consumer;
         _streamName = streamName;
@@ -74,6 +78,7 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
 
         _resiliencePipeline = resiliencePipeline;
         _healthMetrics = healthMetrics;
+        _topologyReadySignal = topologyReadySignal;
     }
 
 
@@ -90,6 +95,27 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
     {
         // Register with health metrics for zombie detection
         _healthMetrics?.RegisterConsumer(_streamName, _consumerName);
+
+        // Wait for topology to be ready before starting consume loop (Safety Mode)
+        if (_topologyReadySignal != null)
+        {
+            try
+            {
+                LogWaitingForTopology(_streamName, _consumerName);
+                await _topologyReadySignal.WaitAsync(stoppingToken);
+                LogTopologyReady(_streamName, _consumerName);
+            }
+            catch (OperationCanceledException)
+            {
+                LogTopologyWaitCanceled(_streamName, _consumerName);
+                return;
+            }
+            catch (Exception ex)
+            {
+                LogTopologyFailed(_streamName, _consumerName, ex);
+                return;
+            }
+        }
 
         try
         {
@@ -420,6 +446,18 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to send DLQ notification for {StreamName}/{ConsumerName}")]
     private partial void LogDlqNotificationFailed(string streamName, string consumerName, Exception exception);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Consumer {StreamName}/{ConsumerName} waiting for topology ready signal...")]
+    private partial void LogWaitingForTopology(string streamName, string consumerName);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Consumer {StreamName}/{ConsumerName} received topology ready signal, starting consume loop.")]
+    private partial void LogTopologyReady(string streamName, string consumerName);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Consumer {StreamName}/{ConsumerName} topology wait was canceled during shutdown.")]
+    private partial void LogTopologyWaitCanceled(string streamName, string consumerName);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Consumer {StreamName}/{ConsumerName} cannot start: topology provisioning failed.")]
+    private partial void LogTopologyFailed(string streamName, string consumerName, Exception exception);
 }
 
 /// <summary>

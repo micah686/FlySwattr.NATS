@@ -9,13 +9,15 @@ namespace FlySwattr.NATS.Topology.Extensions;
 public static class ServiceCollectionExtensions
 {
     /// <summary>
-    /// Adds core NATS topology management services.
+    /// Adds core NATS topology management services including the <see cref="ITopologyReadySignal"/>
+    /// for coordinating startup of dependent services.
     /// Call <see cref="AddNatsTopologySource{TSource}"/> to register topology sources,
     /// then call <see cref="AddNatsTopologyProvisioning"/> to enable auto-provisioning on startup.
     /// </summary>
     public static IServiceCollection AddFlySwattrNatsTopology(this IServiceCollection services)
     {
         services.TryAddSingleton<ITopologyManager, NatsTopologyManager>();
+        services.TryAddSingleton<ITopologyReadySignal, TopologyReadySignal>();
         return services;
     }
 

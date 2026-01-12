@@ -24,6 +24,7 @@ public partial class DlqAdvisoryListenerService : BackgroundService
     private readonly IDlqNotificationService? _notificationService;
     private readonly DlqAdvisoryListenerOptions _options;
     private readonly ILogger<DlqAdvisoryListenerService> _logger;
+    private readonly ITopologyReadySignal? _topologyReadySignal;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -35,17 +36,40 @@ public partial class DlqAdvisoryListenerService : BackgroundService
         IEnumerable<IDlqAdvisoryHandler> handlers,
         IOptions<DlqAdvisoryListenerOptions> options,
         ILogger<DlqAdvisoryListenerService> logger,
-        IDlqNotificationService? notificationService = null)
+        IDlqNotificationService? notificationService = null,
+        ITopologyReadySignal? topologyReadySignal = null)
     {
         _natsConnection = natsConnection ?? throw new ArgumentNullException(nameof(natsConnection));
         _handlers = handlers ?? throw new ArgumentNullException(nameof(handlers));
         _options = options?.Value ?? throw new ArgumentNullException(nameof(options));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _notificationService = notificationService;
+        _topologyReadySignal = topologyReadySignal;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Wait for topology to be ready before subscribing (Safety Mode)
+        if (_topologyReadySignal != null)
+        {
+            try
+            {
+                LogWaitingForTopology();
+                await _topologyReadySignal.WaitAsync(stoppingToken);
+                LogTopologyReady();
+            }
+            catch (OperationCanceledException)
+            {
+                LogTopologyWaitCanceled();
+                return;
+            }
+            catch (Exception ex)
+            {
+                LogTopologyFailed(ex);
+                return;
+            }
+        }
+
         LogStarting(_options.AdvisorySubject);
 
         while (!stoppingToken.IsCancellationRequested)
@@ -230,4 +254,16 @@ public partial class DlqAdvisoryListenerService : BackgroundService
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to send DLQ notification for advisory: Stream={Stream}, Consumer={Consumer}")]
     private partial void LogNotificationError(string stream, string consumer, Exception exception);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "DLQ Advisory Listener waiting for topology ready signal...")]
+    private partial void LogWaitingForTopology();
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "DLQ Advisory Listener received topology ready signal.")]
+    private partial void LogTopologyReady();
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "DLQ Advisory Listener topology wait was canceled during shutdown.")]
+    private partial void LogTopologyWaitCanceled();
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "DLQ Advisory Listener cannot start: topology provisioning failed.")]
+    private partial void LogTopologyFailed(Exception exception);
 }

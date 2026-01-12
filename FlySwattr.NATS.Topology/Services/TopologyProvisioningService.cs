@@ -7,74 +7,96 @@ namespace FlySwattr.NATS.Topology.Services;
 /// <summary>
 /// An <see cref="IHostedService"/> that provisions NATS topology (streams and consumers) on application startup.
 /// Collects specifications from all registered <see cref="ITopologySource"/> implementations and ensures they exist.
+/// Signals <see cref="ITopologyReadySignal"/> when provisioning completes to coordinate dependent services.
 /// </summary>
 public class TopologyProvisioningService : IHostedService
 {
     private readonly IEnumerable<ITopologySource> _topologySources;
     private readonly ITopologyManager _topologyManager;
+    private readonly ITopologyReadySignal? _readySignal;
     private readonly ILogger<TopologyProvisioningService> _logger;
 
     public TopologyProvisioningService(
         IEnumerable<ITopologySource> topologySources,
         ITopologyManager topologyManager,
-        ILogger<TopologyProvisioningService> logger)
+        ILogger<TopologyProvisioningService> logger,
+        ITopologyReadySignal? readySignal = null)
     {
         _topologySources = topologySources;
         _topologyManager = topologyManager;
         _logger = logger;
+        _readySignal = readySignal;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         _logger.LogInformation("Starting topology provisioning...");
 
-        var sources = _topologySources.ToList();
-        if (sources.Count == 0)
+        try
         {
-            _logger.LogWarning("No ITopologySource implementations registered. No topology will be provisioned.");
-            return;
+            var sources = _topologySources.ToList();
+            if (sources.Count == 0)
+            {
+                _logger.LogWarning("No ITopologySource implementations registered. No topology will be provisioned.");
+                _readySignal?.SignalReady();
+                return;
+            }
+
+            _logger.LogInformation("Found {Count} topology source(s).", sources.Count);
+
+            // Collect all specs
+            var allStreams = sources.SelectMany(s => s.GetStreams()).ToList();
+            var allConsumers = sources.SelectMany(s => s.GetConsumers()).ToList();
+
+            _logger.LogInformation("Provisioning {StreamCount} stream(s) and {ConsumerCount} consumer(s)...",
+                allStreams.Count, allConsumers.Count);
+
+            // Provision streams first (consumers depend on streams)
+            foreach (var streamSpec in allStreams)
+            {
+                try
+                {
+                    await _topologyManager.EnsureStreamAsync(streamSpec, cancellationToken);
+                }
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+                {
+                    _logger.LogError(ex, "Failed to provision stream {StreamName}. Continuing with remaining topology.",
+                        streamSpec.Name);
+                    // Continue provisioning other streams - don't fail startup for a single stream failure
+                }
+            }
+
+            // Provision consumers
+            foreach (var consumerSpec in allConsumers)
+            {
+                try
+                {
+                    await _topologyManager.EnsureConsumerAsync(consumerSpec, cancellationToken);
+                }
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+                {
+                    _logger.LogError(ex, "Failed to provision consumer {ConsumerName} on stream {StreamName}. Continuing with remaining topology.",
+                        consumerSpec.DurableName, consumerSpec.StreamName);
+                    // Continue provisioning other consumers
+                }
+            }
+
+            _logger.LogInformation("Topology provisioning completed.");
+            
+            // Signal dependent services that topology is ready
+            _readySignal?.SignalReady();
         }
-
-        _logger.LogInformation("Found {Count} topology source(s).", sources.Count);
-
-        // Collect all specs
-        var allStreams = sources.SelectMany(s => s.GetStreams()).ToList();
-        var allConsumers = sources.SelectMany(s => s.GetConsumers()).ToList();
-
-        _logger.LogInformation("Provisioning {StreamCount} stream(s) and {ConsumerCount} consumer(s)...",
-            allStreams.Count, allConsumers.Count);
-
-        // Provision streams first (consumers depend on streams)
-        foreach (var streamSpec in allStreams)
+        catch (OperationCanceledException)
         {
-            try
-            {
-                await _topologyManager.EnsureStreamAsync(streamSpec, cancellationToken);
-            }
-            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
-            {
-                _logger.LogError(ex, "Failed to provision stream {StreamName}. Continuing with remaining topology.",
-                    streamSpec.Name);
-                // Continue provisioning other streams - don't fail startup for a single stream failure
-            }
+            // Cancellation requested - don't signal failure, just propagate
+            throw;
         }
-
-        // Provision consumers
-        foreach (var consumerSpec in allConsumers)
+        catch (Exception ex)
         {
-            try
-            {
-                await _topologyManager.EnsureConsumerAsync(consumerSpec, cancellationToken);
-            }
-            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
-            {
-                _logger.LogError(ex, "Failed to provision consumer {ConsumerName} on stream {StreamName}. Continuing with remaining topology.",
-                    consumerSpec.DurableName, consumerSpec.StreamName);
-                // Continue provisioning other consumers
-            }
+            _logger.LogCritical(ex, "Topology provisioning failed with unrecoverable error.");
+            _readySignal?.SignalFailed(ex);
+            throw;
         }
-
-        _logger.LogInformation("Topology provisioning completed.");
     }
 
     public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;

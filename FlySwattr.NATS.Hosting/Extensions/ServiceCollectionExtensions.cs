@@ -82,6 +82,9 @@ public static class ServiceCollectionExtensions
             // Resolve health metrics for zombie detection
             var healthMetrics = sp.GetService<IConsumerHealthMetrics>();
 
+            // Resolve topology signal for Safety Mode startup coordination
+            var topologyReadySignal = sp.GetService<ITopologyReadySignal>();
+
             return new NatsConsumerBackgroundService<TMessage>(
                 consumer,
                 streamName,
@@ -96,7 +99,8 @@ public static class ServiceCollectionExtensions
                 serializer,
                 objectStore,
                 notificationService,
-                healthMetrics
+                healthMetrics,
+                topologyReadySignal
             );
         });
     }
