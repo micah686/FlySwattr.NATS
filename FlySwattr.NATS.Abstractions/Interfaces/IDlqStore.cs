@@ -35,4 +35,21 @@ public interface IDlqStore
         string? filterConsumer = null,
         int limit = 100,
         CancellationToken cancellationToken = default);
+    
+    /// <summary>
+    /// Updates the status of a DLQ entry.
+    /// </summary>
+    /// <param name="id">The unique identifier of the DLQ entry.</param>
+    /// <param name="status">The new status to set.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>True if the entry was found and updated, false otherwise.</returns>
+    Task<bool> UpdateStatusAsync(string id, DlqMessageStatus status, CancellationToken cancellationToken = default);
+    
+    /// <summary>
+    /// Deletes a DLQ entry by its unique identifier.
+    /// </summary>
+    /// <param name="id">The unique identifier of the DLQ entry.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>True if the entry was found and deleted, false otherwise.</returns>
+    Task<bool> DeleteAsync(string id, CancellationToken cancellationToken = default);
 }

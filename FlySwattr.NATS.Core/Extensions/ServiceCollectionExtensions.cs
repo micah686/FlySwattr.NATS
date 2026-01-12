@@ -88,6 +88,18 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IJetStreamConsumer>(sp => sp.GetRequiredService<NatsJetStreamBus>());
         services.AddSingleton<IAsyncDisposable>(sp => sp.GetRequiredService<NatsJetStreamBus>());
 
+        // 6. DLQ Services
+        services.AddSingleton<IDlqStore, NatsDlqStore>();
+        services.AddSingleton<IDlqNotificationService, LoggingDlqNotificationService>();
+        services.AddSingleton<IDlqRemediationService>(sp => new Services.NatsDlqRemediationService(
+            sp.GetRequiredService<IDlqStore>(),
+            sp.GetRequiredService<IJetStreamPublisher>(),
+            sp.GetRequiredService<IMessageSerializer>(),
+            sp.GetRequiredService<ILogger<Services.NatsDlqRemediationService>>(),
+            sp.GetService<IObjectStore>(),
+            sp.GetService<IDlqNotificationService>()
+        ));
+
         return services;
     }
     

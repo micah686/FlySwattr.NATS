@@ -92,4 +92,57 @@ public class NatsDlqStore : IDlqStore
         await Task.CompletedTask; // Satisfy async signature
         return Array.Empty<DlqMessageEntry>();
     }
+
+    /// <inheritdoc />
+    public async Task<bool> UpdateStatusAsync(string id, DlqMessageStatus status, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
+
+        try
+        {
+            var entry = await GetAsync(id, cancellationToken);
+            if (entry == null)
+            {
+                _logger.LogWarning("Cannot update status for DLQ entry {MessageId}: not found", id);
+                return false;
+            }
+
+            var updatedEntry = entry with { Status = status };
+            await StoreAsync(updatedEntry, cancellationToken);
+            
+            _logger.LogDebug("Updated DLQ entry {MessageId} status to {Status}", id, status);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to update DLQ entry {MessageId} status", id);
+            throw;
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> DeleteAsync(string id, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
+
+        try
+        {
+            // Check if entry exists first
+            var entry = await GetAsync(id, cancellationToken);
+            if (entry == null)
+            {
+                _logger.LogWarning("Cannot delete DLQ entry {MessageId}: not found", id);
+                return false;
+            }
+
+            await _store.DeleteAsync(id, cancellationToken);
+            _logger.LogDebug("Deleted DLQ entry {MessageId}", id);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to delete DLQ entry {MessageId}", id);
+            throw;
+        }
+    }
 }
