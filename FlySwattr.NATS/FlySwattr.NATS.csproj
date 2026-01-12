@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <ProjectReference Include="..\FlySwattr.NATS.Abstractions\FlySwattr.NATS.Abstractions.csproj" />
+      <ProjectReference Include="..\FlySwattr.NATS.Caching\FlySwattr.NATS.Caching.csproj" />
+      <ProjectReference Include="..\FlySwattr.NATS.Core\FlySwattr.NATS.Core.csproj" />
+      <ProjectReference Include="..\FlySwattr.NATS.DistributedLock\FlySwattr.NATS.DistributedLock.csproj" />
+      <ProjectReference Include="..\FlySwattr.NATS.Hosting\FlySwattr.NATS.Hosting.csproj" />
+      <ProjectReference Include="..\FlySwattr.NATS.Resilience\FlySwattr.NATS.Resilience.csproj" />
+      <ProjectReference Include="..\FlySwattr.NATS.Topology\FlySwattr.NATS.Topology.csproj" />
+    </ItemGroup>
+
+</Project>
