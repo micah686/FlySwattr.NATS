@@ -50,9 +50,9 @@ public class HybridNatsSerializerTests
     }
 
     [Test]
-    public void GetContentType_ShouldReturnMsgPack_WhenAttributeIsPresent()
+    public void GetContentType_ShouldReturnMemoryPack_WhenAttributeIsPresent()
     {
-        var contentType = _serializer.GetContentType<MessagePackMessage>();
+        var contentType = _serializer.GetContentType<MemoryPackableMessage>();
         contentType.ShouldBe("application/x-memorypack");
     }
 
@@ -116,7 +116,7 @@ public class HybridNatsSerializerTests
         // So this test might fail if I expect it to throw.
         
         // Let's test with a MemoryPackable type.
-        var mpMessage = new MessagePackMessage { Content = new string('a', 20) };
+        var mpMessage = new MemoryPackableMessage { Content = new string('a', 20) };
         
         // Assert
         Assert.Throws<InvalidOperationException>(() => serializerWithLimit.Serialize(writer, mpMessage));
@@ -126,7 +126,7 @@ public class HybridNatsSerializerTests
 }
 
 [MemoryPack.MemoryPackable]
-public partial record MessagePackMessage
+public partial record MemoryPackableMessage
 {
     public string? Content { get; set; }
 }

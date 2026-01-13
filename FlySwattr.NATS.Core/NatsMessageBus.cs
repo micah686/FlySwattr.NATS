@@ -161,12 +161,20 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
 
     public async Task<TResponse?> RequestAsync<TRequest, TResponse>(string subject, TRequest request, TimeSpan timeout, CancellationToken cancellationToken = default)
     {
-        var reply = await _connection.RequestAsync<TRequest, TResponse>(
-            subject,
-            request,
-            replyOpts: new NatsSubOpts { Timeout = timeout },
-            cancellationToken: cancellationToken);
-        return reply.Data;
+        try
+        {
+            var reply = await _connection.RequestAsync<TRequest, TResponse>(
+                subject,
+                request,
+                replyOpts: new NatsSubOpts { Timeout = timeout },
+                cancellationToken: cancellationToken);
+            return reply.Data;
+        }
+        catch (NatsNoReplyException)
+        {
+            _logger.LogWarning("No reply received for request to {Subject}", subject);
+            return default;
+        }
     }
 
     public async ValueTask DisposeAsync()
