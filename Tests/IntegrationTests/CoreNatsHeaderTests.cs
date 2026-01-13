@@ -2,6 +2,7 @@ using FlySwattr.NATS.Core;
 using IntegrationTests.Infrastructure;
 using Microsoft.Extensions.Logging.Abstractions;
 using NATS.Client.Core;
+using NATS.Client.Serializers.Json;
 using Shouldly;
 using TUnit.Core;
 
@@ -19,7 +20,12 @@ public class CoreNatsHeaderTests
         await using var fixture = new NatsContainerFixture();
         await fixture.InitializeAsync();
         
-        var opts = new NatsOpts { Url = fixture.ConnectionString, Name = "HeaderTester" };
+        var opts = new NatsOpts
+        {
+            Url = fixture.ConnectionString,
+            Name = "HeaderTester",
+            SerializerRegistry = NatsJsonSerializerRegistry.Default
+        };
         await using var conn = new NatsConnection(opts);
         await conn.ConnectAsync();
         
