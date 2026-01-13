@@ -28,6 +28,7 @@ public class DlqAdvisoryListenerServiceTests
         _notificationService = Substitute.For<IDlqNotificationService>();
         _logger = Substitute.For<ILogger<DlqAdvisoryListenerService>>();
         _topologyReadySignal = Substitute.For<ITopologyReadySignal>();
+        _topologyReadySignal.WaitAsync(Arg.Any<CancellationToken>()).Returns(Task.CompletedTask);
         
         var config = new DlqAdvisoryListenerOptions
         {
@@ -71,7 +72,7 @@ public class DlqAdvisoryListenerServiceTests
         var msg = CreateMsg("test.advisory.foo", jsonData);
 
         _natsConnection.SubscribeAsync<byte[]>("test.advisory", cancellationToken: Arg.Any<CancellationToken>())
-            .Returns(CreateAsyncEnumerable(new[] { msg }));
+            .Returns(callInfo => CreateAsyncEnumerable(new[] { msg }, callInfo.Arg<CancellationToken>()));
 
         var service = new TestableDlqAdvisoryListenerService(
             _natsConnection, new[] { _handler }, _options, _logger, _notificationService, _topologyReadySignal);
@@ -111,14 +112,16 @@ public class DlqAdvisoryListenerServiceTests
         return (NatsMsg<byte[]>)boxed;
     }
 
-    private static async IAsyncEnumerable<T> CreateAsyncEnumerable<T>(IEnumerable<T> items)
+    private static async IAsyncEnumerable<T> CreateAsyncEnumerable<T>(
+        IEnumerable<T> items, 
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         foreach (var item in items)
         {
             yield return item;
         }
         
-        // Hang indefinitely to simulate a live subscription
-        await Task.Delay(-1);
+        // Hang indefinitely to simulate a live subscription (but respect cancellation)
+        await Task.Delay(Timeout.Infinite, cancellationToken);
     }
 }
