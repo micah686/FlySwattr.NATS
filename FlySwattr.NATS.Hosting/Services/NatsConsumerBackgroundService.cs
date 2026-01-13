@@ -27,7 +27,7 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
     private readonly NatsJSConsumeOpts _consumeOpts;
     private readonly string _streamName;
     private readonly string _consumerName;
-    private readonly int _workerCount;
+    private readonly int _workerCount; //TODO: replace worker count to something agnostic
 
     private readonly IPoisonMessageHandler<T> _poisonHandler;
 
