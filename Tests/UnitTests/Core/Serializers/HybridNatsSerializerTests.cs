@@ -113,6 +113,36 @@ public class HybridNatsSerializerTests
         Assert.Throws<InvalidOperationException>(() => serializerWithLimit.Serialize(writer, mpMessage));
     }
 
+    /// <summary>
+    /// Validates that the SizeLimitingBufferWriter protection triggers when attempting to serialize
+    /// a payload exceeding the default 10MB limit. This is a defensive mechanism to prevent
+    /// OutOfMemoryExceptions or denial-of-service attacks via massive payloads.
+    /// 
+    /// The protection triggers BEFORE memory is committed to the underlying transport writer,
+    /// effectively protecting the application's heap.
+    /// </summary>
+    [Test]
+    public void Serialize_PayloadExceeding10MB_ShouldThrowInvalidOperationException()
+    {
+        // Arrange
+        // Use default serializer with 10MB limit (10 * 1024 * 1024 = 10,485,760 bytes)
+        var serializer = new HybridNatsSerializer();
+        var writer = new ArrayBufferWriter<byte>();
+
+        // Create an object graph that exceeds 10MB
+        // Each character in a string is serialized, plus MemoryPack overhead
+        // We'll create a ~11MB payload to ensure we exceed the limit
+        const int elevenMegabytes = 11 * 1024 * 1024;
+        var oversizedMessage = new MemoryPackableMessage { Content = new string('X', elevenMegabytes) };
+
+        // Act & Assert
+        var exception = Assert.Throws<InvalidOperationException>(() => 
+            serializer.Serialize(writer, oversizedMessage));
+
+        // Verify the exception message indicates a size limit violation
+        exception!.Message.ShouldContain("exceeded maximum payload size");
+    }
+
     #endregion
 
     #region Format Selection Verification Tests
