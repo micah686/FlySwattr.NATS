@@ -38,6 +38,38 @@ public class NatsJetStreamBusTests : IAsyncDisposable
     }
 
     [Test]
+    public async Task PublishAsync_WithNullMessageId_ShouldThrowArgumentException()
+    {
+        // Act & Assert
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await _bus.PublishAsync("test.subject", new { Data = "test" }, messageId: (string?)null));
+    }
+
+    [Test]
+    public async Task PublishAsync_WithEmptyMessageId_ShouldThrowArgumentException()
+    {
+        // Act & Assert
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await _bus.PublishAsync("test.subject", new { Data = "test" }, messageId: ""));
+    }
+
+    [Test]
+    public async Task PublishAsync_WithWhitespaceMessageId_ShouldThrowArgumentException()
+    {
+        // Act & Assert
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await _bus.PublishAsync("test.subject", new { Data = "test" }, messageId: "   "));
+    }
+
+    [Test]
+    public async Task PublishAsync_WithoutMessageIdOverload_ShouldThrowArgumentException()
+    {
+        // Act & Assert - the overload without messageId should throw
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await _bus.PublishAsync("test.subject", new { Data = "test" }));
+    }
+
+    [Test]
     public async Task PublishAsync_ShouldThrow_OnFailure()
     {
         // Arrange
