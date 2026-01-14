@@ -87,14 +87,40 @@ public class OffloadingJetStreamPublisher : IJetStreamPublisher
             OriginalSize = payload.Length
         };
 
-        _logger.LogInformation(
-            "Published large message ({Size} bytes) to {Subject} via claim check {ObjectKey}",
-            payload.Length,
-            subject,
-            objectKey);
-
-        // Publish the claim check wrapper instead of the original message
-        await _inner.PublishAsync(subject, claimCheck, messageId, cancellationToken);
+        try
+        {
+            // Publish the claim check wrapper instead of the original message
+            await _inner.PublishAsync(subject, claimCheck, messageId, cancellationToken);
+            
+            _logger.LogInformation(
+                "Published large message ({Size} bytes) to {Subject} via claim check {ObjectKey}",
+                payload.Length,
+                subject,
+                objectKey);
+        }
+        catch
+        {
+            // Compensating action: clean up the orphaned payload from object store
+            _logger.LogWarning(
+                "Publish failed after uploading payload to object store. Attempting to clean up orphaned object {ObjectKey}",
+                objectKey);
+            
+            try
+            {
+                await _objectStore.DeleteAsync(objectKey, cancellationToken);
+                _logger.LogDebug("Successfully cleaned up orphaned object {ObjectKey}", objectKey);
+            }
+            catch (Exception cleanupEx)
+            {
+                // Log but don't mask the original exception
+                _logger.LogError(
+                    cleanupEx,
+                    "Failed to clean up orphaned object {ObjectKey}. Manual cleanup may be required.",
+                    objectKey);
+            }
+            
+            throw; // Re-throw the original publish exception
+        }
     }
 }
 
