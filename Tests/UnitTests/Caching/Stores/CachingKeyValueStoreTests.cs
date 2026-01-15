@@ -2,6 +2,8 @@ using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Caching.Configuration;
 using FlySwattr.NATS.Caching.Stores;
 using Microsoft.Extensions.Logging;
+using NATS.Client.JetStream;
+using NATS.Client.JetStream.Models;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
 using Shouldly;
@@ -137,6 +139,51 @@ public class CachingKeyValueStoreTests : IAsyncDisposable
         // Assert
         // Should return stale value instead of throwing
         result.ShouldBe(cachedValue);
+    }
+
+    /// <summary>
+    /// Tests the "Stale-While-Revalidate" pattern with a NATS-specific exception (503 Service Unavailable).
+    /// This simulates a scenario where:
+    /// 1. A key is populated in the L1 cache
+    /// 2. The TTL (Duration) expires, triggering a factory call to refresh from L2 (NATS)
+    /// 3. The NATS cluster (L2) is unreachable (throws NatsJSApiException 503)
+    /// 4. The time is still within FailSafeMaxDuration
+    /// Expected: The stale value from L1 should be returned, preventing cascading failures.
+    /// </summary>
+    [Test]
+    public async Task GetAsync_ShouldServeStaleData_WhenL2ThrowsNatsJSApiException503()
+    {
+        // Arrange
+        var key = "l2-outage-key";
+        var staleValue = "stale-data-for-resilience";
+        
+        // Populate cache with fail-safe enabled, simulating an initial successful fetch from L2
+        await _fusionCache.SetAsync($"{_bucketName}:{key}", staleValue, new FusionCacheEntryOptions
+        {
+            Duration = TimeSpan.FromMilliseconds(100), // Short TTL - will expire quickly
+            IsFailSafeEnabled = true,
+            FailSafeMaxDuration = TimeSpan.FromHours(1) // Long fail-safe window
+        });
+
+        // Wait for TTL to expire (data is now "stale" but within FailSafeMaxDuration)
+        await Task.Delay(150);
+
+        // Simulate NATS cluster unavailability with 503 Service Unavailable
+        var natsError = new ApiError { Code = 503, Description = "JetStream system temporarily unavailable" };
+        var natsException = new NatsJSApiException(natsError);
+        
+        _innerStore.GetAsync<string>(key, Arg.Any<CancellationToken>())
+            .ThrowsAsync(natsException);
+
+        // Act - Attempt to get the value when L2 is down
+        var result = await _sut.GetAsync<string>(key);
+
+        // Assert
+        // Should return stale value from L1 cache instead of throwing NatsJSApiException
+        result.ShouldBe(staleValue);
+        
+        // Verify that the factory (inner store) was actually called (proving cache miss triggered refresh attempt)
+        await _innerStore.Received(1).GetAsync<string>(key, Arg.Any<CancellationToken>());
     }
 
     [Test]
