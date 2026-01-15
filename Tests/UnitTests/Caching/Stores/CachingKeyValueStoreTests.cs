@@ -209,4 +209,76 @@ public class CachingKeyValueStoreTests : IAsyncDisposable
         var cachedValue = await _fusionCache.GetOrDefaultAsync<string>($"{_bucketName}:{key}");
         cachedValue.ShouldBeNull();
     }
+
+    /// <summary>
+    /// Tests the Soft Timeout Responsiveness behavior for FusionCache.
+    /// 
+    /// Scenario: When the factory (NATS fetch) is slow, FusionCache should return
+    /// stale data quickly based on FactorySoftTimeout rather than blocking for the
+    /// full factory duration.
+    /// 
+    /// This tests system responsiveness under load degradation (latency spikes):
+    /// - Configure FactorySoftTimeout to 50ms
+    /// - Mock inner store with 500ms delay
+    /// - Cache has stale value (TTL expired, within FailSafeMaxDuration)
+    /// - GetAsync should return in ~50ms with stale value, not block for 500ms
+    /// </summary>
+    [Test]
+    public async Task GetAsync_ShouldReturnStaleValue_WhenFactoryExceedsSoftTimeout()
+    {
+        // Arrange
+        var key = "soft-timeout-key";
+        var staleValue = "stale-value-from-cache";
+        var freshValue = "fresh-value-from-factory";
+
+        // Create a new CachingKeyValueStore with soft timeout configured
+        var softTimeoutConfig = new FusionCacheConfiguration
+        {
+            MemoryCacheDuration = TimeSpan.FromMilliseconds(100), // Short TTL
+            FailSafeMaxDuration = TimeSpan.FromMinutes(5),
+            FactorySoftTimeout = TimeSpan.FromMilliseconds(50), // 50ms soft timeout
+            FactoryHardTimeout = TimeSpan.FromSeconds(10) // Long hard timeout
+        };
+
+        // Need fresh FusionCache with specific options
+        using var fusionCache = new FusionCache(new FusionCacheOptions());
+        var sut = new CachingKeyValueStore(_innerStore, fusionCache, softTimeoutConfig, _bucketName, _logger);
+
+        // Populate cache with stale value (simulating a previous successful fetch)
+        await fusionCache.SetAsync($"{_bucketName}:{key}", staleValue, new FusionCacheEntryOptions
+        {
+            Duration = TimeSpan.FromMilliseconds(50), // Short TTL
+            IsFailSafeEnabled = true,
+            FailSafeMaxDuration = TimeSpan.FromMinutes(5)
+        });
+
+        // Wait for TTL to expire (data is now "stale" but within FailSafeMaxDuration)
+        await Task.Delay(100);
+
+        // Mock inner store to delay for 500ms (much longer than soft timeout)
+        _innerStore.GetAsync<string>(key, Arg.Any<CancellationToken>())
+            .Returns(async callInfo =>
+            {
+                await Task.Delay(500);
+                return (string?)freshValue;
+            });
+
+        // Act - measure actual response time
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        var result = await sut.GetAsync<string>(key);
+        stopwatch.Stop();
+
+        // Assert
+        // Should return stale value quickly (around soft timeout of 50ms)
+        result.ShouldBe(staleValue);
+
+        // Response should be fast (soft timeout + buffer), not the full 500ms factory delay
+        // Allow generous buffer for test execution overhead (up to 200ms total)
+        stopwatch.ElapsedMilliseconds.ShouldBeLessThan(200, 
+            $"Expected response in ~50ms (soft timeout), but took {stopwatch.ElapsedMilliseconds}ms. " +
+            "This suggests soft timeout is not working - system blocked for full factory duration.");
+        
+        // Verify the factory was actually called (proving cache miss triggered refresh attempt)
+        await _innerStore.Received(1).GetAsync<string>(key, Arg.Any<CancellationToken>());
+    }
 }
