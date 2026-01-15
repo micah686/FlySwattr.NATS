@@ -9,6 +9,7 @@ using NATS.Client.KeyValueStore;
 using NATS.Client.ObjectStore;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
+using Shouldly;
 using TUnit.Core;
 
 namespace UnitTests.ControlPlane;
@@ -193,6 +194,238 @@ public class NatsTopologyManagerTests
         await _objContext.Received(1).CreateObjectStoreAsync(
             Arg.Is<NatsObjConfig>(c => c.Bucket == name.Value), 
             Arg.Any<CancellationToken>());
+    }
+
+    /// <summary>
+    /// 6.1 Concurrent Provisioning and Thundering Herds Test
+    /// 
+    /// Scenario: In a microservices environment, 5 instances start simultaneously
+    /// and all attempt to provision the same stream topology.
+    /// 
+    /// The code uses DistributedLock (topology_lock_...) to synchronize this provisioning.
+    /// This test verifies that startup logic is idempotent and thread-safe across distributed instances.
+    /// 
+    /// Assertions:
+    /// - Only one CreateStreamAsync call actually reaches the NATS mock
+    /// - The other 4 tasks wait and complete successfully without throwing LockNotAcquiredException
+    /// </summary>
+    [Test]
+    public async Task ConcurrentProvisioning_ShouldSerializeAccess_WithDistributedLock()
+    {
+        // Arrange
+        var jsContext = Substitute.For<INatsJSContext>();
+        var kvContext = Substitute.For<INatsKVContext>();
+        var objContext = Substitute.For<INatsObjContext>();
+        var logger = Substitute.For<ILogger<NatsTopologyManager>>();
+        var dlqRegistry = Substitute.For<IDlqPolicyRegistry>();
+        var lockProvider = Substitute.For<IDistributedLockProvider>();
+        
+        var spec = new StreamSpec 
+        { 
+            Name = StreamName.From("concurrent-test-stream"), 
+            Subjects = ["concurrent.>"] 
+        };
+
+        // Setup a gate to synchronize tasks at the lock acquisition point
+        var lockAcquireGate = new SemaphoreSlim(0);
+        var createCallCount = 0;
+        var lockHeld = new SemaphoreSlim(1, 1); // Simulate the lock with a semaphore
+        
+        var mockLock = Substitute.For<IDistributedLock>();
+        lockProvider.CreateLock(Arg.Any<string>()).Returns(mockLock);
+
+        // Mock the lock to simulate serialized access
+        mockLock.TryAcquireAsync(Arg.Any<TimeSpan>(), Arg.Any<CancellationToken>())
+            .Returns(callInfo =>
+            {
+                // Signal that we're trying to acquire
+                lockAcquireGate.Release();
+                
+                // Simulate lock acquisition with semaphore (only one task proceeds at a time)
+                lockHeld.Wait();
+                
+                var handle = Substitute.For<IDistributedSynchronizationHandle>();
+                handle.When(x => x.DisposeAsync()).Do(_ => lockHeld.Release());
+                return new ValueTask<IDistributedSynchronizationHandle?>(handle);
+            });
+
+        // Track stream existence across calls - first returns null (create), subsequent return existing
+        var streamCreated = false;
+        jsContext.GetStreamAsync(spec.Name.Value, cancellationToken: Arg.Any<CancellationToken>())
+            .Returns(callInfo =>
+            {
+                if (streamCreated)
+                {
+                    // Return existing stream config
+                    var existingConfig = new StreamConfig(spec.Name.Value, spec.Subjects)
+                    {
+                        Storage = StreamConfigStorage.File,
+                        Retention = StreamConfigRetention.Limits,
+                        NumReplicas = 1,
+                        MaxBytes = -1,
+                        MaxMsgSize = -1,
+                        MaxAge = TimeSpan.Zero,
+                        Discard = StreamConfigDiscard.Old
+                    };
+                    var existingStream = Substitute.For<INatsJSStream>();
+                    existingStream.Info.Returns(new StreamInfo { Config = existingConfig });
+                    return new ValueTask<INatsJSStream>(existingStream);
+                }
+                // First caller gets 404 (not found)
+                throw CreateNatsJSApiException(404);
+            });
+
+        jsContext.CreateStreamAsync(Arg.Any<StreamConfig>(), Arg.Any<CancellationToken>())
+            .Returns(callInfo =>
+            {
+                Interlocked.Increment(ref createCallCount);
+                streamCreated = true;
+                return new ValueTask<INatsJSStream>(Substitute.For<INatsJSStream>());
+            });
+
+        var sut = new NatsTopologyManager(jsContext, kvContext, objContext, logger, dlqRegistry, lockProvider);
+
+        // Act: Spin up 5 concurrent tasks
+        const int concurrentInstances = 5;
+        var tasks = new Task[concurrentInstances];
+        for (int i = 0; i < concurrentInstances; i++)
+        {
+            tasks[i] = sut.EnsureStreamAsync(spec);
+        }
+
+        // Wait for all tasks to attempt lock acquisition
+        for (int i = 0; i < concurrentInstances; i++)
+        {
+            await lockAcquireGate.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+
+        // All tasks should complete successfully
+        await Task.WhenAll(tasks);
+
+        // Assert
+        // Only one CreateStreamAsync call should reach the NATS mock
+        createCallCount.ShouldBe(1, "Only the first task to acquire the lock should create the stream");
+        
+        await jsContext.Received(1).CreateStreamAsync(
+            Arg.Any<StreamConfig>(), 
+            Arg.Any<CancellationToken>());
+        
+        // No exceptions should be thrown (all tasks completed successfully)
+        foreach (var task in tasks)
+        {
+            task.IsCompletedSuccessfully.ShouldBeTrue("All tasks should complete successfully without exceptions");
+        }
+    }
+
+    /// <summary>
+    /// 6.2 Immutable Property Conflicts - Stream Immutability Safety Test
+    /// 
+    /// NATS JetStream streams have immutable properties (e.g., Storage type: File vs. Memory).
+    /// Attempting to update these should throw an error.
+    /// 
+    /// Scenario:
+    /// - Provision a Stream with Storage = File
+    /// - Change the configuration to Storage = Memory and restart the service
+    /// 
+    /// Assertions:
+    /// - The service should fail fast (throw InvalidOperationException)
+    /// - It must NOT silently ignore the config change (leaving the system inconsistent)
+    /// - It must NOT delete and recreate the stream (causing massive data loss)
+    /// </summary>
+    [Test]
+    public async Task EnsureStreamAsync_ShouldThrowInvalidOperationException_WhenStorageTypeChanges()
+    {
+        // Arrange: Existing stream with Storage = File
+        var spec = new StreamSpec 
+        { 
+            Name = StreamName.From("immutable-test-stream"), 
+            Subjects = ["immutable.>"],
+            StorageType = StorageType.Memory // Config wants Memory
+        };
+
+        var existingConfig = new StreamConfig(spec.Name.Value, spec.Subjects)
+        {
+            Storage = StreamConfigStorage.File, // Existing is File
+            Retention = StreamConfigRetention.Limits,
+            NumReplicas = 1,
+            MaxBytes = -1,
+            MaxMsgSize = -1,
+            MaxAge = TimeSpan.Zero,
+            Discard = StreamConfigDiscard.Old
+        };
+        
+        var existingStream = Substitute.For<INatsJSStream>();
+        existingStream.Info.Returns(new StreamInfo { Config = existingConfig });
+
+        _jsContext.GetStreamAsync(spec.Name.Value, cancellationToken: Arg.Any<CancellationToken>())
+            .Returns(existingStream);
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await _sut.EnsureStreamAsync(spec));
+
+        // Assert: Should fail with clear message about storage type
+        exception.ShouldNotBeNull();
+        exception!.Message.ShouldContain("Storage type cannot be changed");
+        exception.Message.ShouldContain("File");
+        exception.Message.ShouldContain("Memory");
+
+        // Assert: Should NOT try to update (fail-fast before update attempt)
+        await _jsContext.DidNotReceive().UpdateStreamAsync(
+            Arg.Any<StreamConfig>(), 
+            Arg.Any<CancellationToken>());
+
+        // Assert: Should NOT delete and recreate (would cause massive data loss)
+        await _jsContext.DidNotReceive().DeleteStreamAsync(
+            Arg.Any<string>(), 
+            Arg.Any<CancellationToken>());
+    }
+
+    /// <summary>
+    /// 6.2 Immutable Property Conflicts - Retention Policy Change Test
+    /// 
+    /// Additional test for retention policy changes which are also immutable.
+    /// </summary>
+    [Test]
+    public async Task EnsureStreamAsync_ShouldThrowInvalidOperationException_WhenRetentionPolicyChanges()
+    {
+        // Arrange: Existing stream with Retention = Limits
+        var spec = new StreamSpec 
+        { 
+            Name = StreamName.From("retention-test-stream"), 
+            Subjects = ["retention.>"],
+            StorageType = StorageType.File,
+            RetentionPolicy = StreamRetention.Interest // Config wants Interest
+        };
+
+        var existingConfig = new StreamConfig(spec.Name.Value, spec.Subjects)
+        {
+            Storage = StreamConfigStorage.File,
+            Retention = StreamConfigRetention.Limits, // Existing is Limits
+            NumReplicas = 1,
+            MaxBytes = -1,
+            MaxMsgSize = -1,
+            MaxAge = TimeSpan.Zero,
+            Discard = StreamConfigDiscard.Old
+        };
+        
+        var existingStream = Substitute.For<INatsJSStream>();
+        existingStream.Info.Returns(new StreamInfo { Config = existingConfig });
+
+        _jsContext.GetStreamAsync(spec.Name.Value, cancellationToken: Arg.Any<CancellationToken>())
+            .Returns(existingStream);
+
+        // Act & Assert
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await _sut.EnsureStreamAsync(spec));
+
+        // Assert: Should fail fast with clear error message
+        exception.ShouldNotBeNull();
+        exception!.Message.ShouldContain("Retention policy cannot be changed");
+        
+        // Assert: Should NOT modify or delete
+        await _jsContext.DidNotReceive().UpdateStreamAsync(Arg.Any<StreamConfig>(), Arg.Any<CancellationToken>());
+        await _jsContext.DidNotReceive().DeleteStreamAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
     }
 
     private static NatsJSApiException CreateNatsJSApiException(int code, int errCode = 0, string description = "")
