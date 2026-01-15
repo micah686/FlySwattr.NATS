@@ -210,6 +210,212 @@ public class CachingKeyValueStoreTests : IAsyncDisposable
         cachedValue.ShouldBeNull();
     }
 
+    #region Distributed Invalidation Race Tests
+
+    /// <summary>
+    /// Tests that when a local PutAsync occurs and NATS echoes the event back to the watcher,
+    /// no race condition or "cache thrashing" occurs.
+    /// 
+    /// Architectural Context:
+    /// The implementation uses a Write-Invalidate strategy where PutAsync:
+    /// 1. Writes to NATS
+    /// 2. Invalidates local cache
+    /// 
+    /// NATS then echoes the event back to the watcher, which also triggers cache invalidation.
+    /// This test verifies that this "double invalidation" doesn't cause issues and the
+    /// subsequent read correctly fetches the fresh value.
+    /// </summary>
+    [Test]
+    public async Task PutAsync_WithWatcherEcho_ShouldNotCauseCacheThrashing()
+    {
+        // Arrange
+        var key = "self-invalidation-key";
+        var initialValue = "initial-value";
+        var newValue = "updated-value";
+        
+        // Capture the watcher callback so we can simulate the echo
+        Func<KvChangeEvent<string>, Task>? capturedWatcherCallback = null;
+        await _innerStore.WatchAsync<string>(
+            key, 
+            Arg.Do<Func<KvChangeEvent<string>, Task>>(cb => capturedWatcherCallback = cb), 
+            Arg.Any<CancellationToken>());
+        
+        // Pre-populate cache and start watching
+        await _fusionCache.SetAsync($"{_bucketName}:{key}", initialValue);
+        await _sut.WatchAsync<string>(key, _ => Task.CompletedTask, CancellationToken.None);
+        
+        // Setup inner store to return fresh value on subsequent read
+        _innerStore.GetAsync<string>(key, Arg.Any<CancellationToken>()).Returns(newValue);
+
+        // Act - Step 1: Local node performs PutAsync
+        await _sut.PutAsync(key, newValue);
+        
+        // Act - Step 2: Simulate NATS echoing the event back to the watcher
+        // This happens asynchronously in real scenarios, but we simulate it immediately
+        capturedWatcherCallback.ShouldNotBeNull();
+        var echoEvent = new KvChangeEvent<string>(KvChangeType.Put, newValue, key, 2);
+        await capturedWatcherCallback!(echoEvent);
+
+        // Act - Step 3: Read the value after the echo
+        var result = await _sut.GetAsync<string>(key);
+
+        // Assert
+        // The value should be the fresh value from NATS, not stale or null
+        result.ShouldBe(newValue);
+        
+        // Verify inner store was called for the read (cache was invalidated)
+        await _innerStore.Received().GetAsync<string>(key, Arg.Any<CancellationToken>());
+    }
+
+    /// <summary>
+    /// Tests the timing-specific race condition where the watcher echo arrives
+    /// very quickly after PutAsync, potentially before the cache invalidation completes.
+    /// 
+    /// This tests the "eventual consistency" race window:
+    /// - PutAsync writes to NATS and invalidates cache
+    /// - Echo arrives almost immediately
+    /// - Another read occurs during this window
+    /// 
+    /// The test verifies that regardless of timing, the cache remains consistent.
+    /// </summary>
+    [Test]
+    public async Task PutAsync_WithImmediateWatcherEcho_CacheRemainsConsistent()
+    {
+        // Arrange
+        var key = "race-timing-key";
+        var existingValue = "existing";
+        var updatedValue = "updated";
+        
+        // Capture watcher callback
+        Func<KvChangeEvent<string>, Task>? capturedCallback = null;
+        await _innerStore.WatchAsync<string>(
+            key,
+            Arg.Do<Func<KvChangeEvent<string>, Task>>(cb => capturedCallback = cb),
+            Arg.Any<CancellationToken>());
+        
+        // Pre-populate cache and start watching
+        await _fusionCache.SetAsync($"{_bucketName}:{key}", existingValue);
+        await _sut.WatchAsync<string>(key, _ => Task.CompletedTask, CancellationToken.None);
+        
+        // Configure inner store behavior for reads
+        _innerStore.GetAsync<string>(key, Arg.Any<CancellationToken>()).Returns(updatedValue);
+
+        // Act - Perform Put and simulate immediate echo (race condition window)
+        var putTask = _sut.PutAsync(key, updatedValue);
+        
+        // Simulate echo arriving during PlutAsync execution
+        capturedCallback.ShouldNotBeNull();
+        var echoTask = capturedCallback!(new KvChangeEvent<string>(KvChangeType.Put, updatedValue, key, 2));
+        
+        await Task.WhenAll(putTask, echoTask);
+
+        // Act - Read after both operations complete
+        var result = await _sut.GetAsync<string>(key);
+
+        // Assert
+        // Cache should still work correctly - returning the updated value
+        result.ShouldBe(updatedValue);
+        
+        // Verify the read went to inner store (cache was properly invalidated)
+        await _innerStore.Received().GetAsync<string>(key, Arg.Any<CancellationToken>());
+    }
+
+    /// <summary>
+    /// Tests that multiple rapid writes don't cause cascading invalidations
+    /// that could leave the cache in an inconsistent state.
+    /// 
+    /// Scenario:
+    /// - Write A triggers invalidation
+    /// - Write B triggers invalidation  
+    /// - Echo from A arrives
+    /// - Echo from B arrives
+    /// - Read should return value B, not A or stale data
+    /// </summary>
+    [Test]
+    public async Task RapidWrites_WithDelayedEchoes_ShouldMaintainLastWriteWins()
+    {
+        // Arrange
+        var key = "rapid-writes-key";
+        var valueA = "value-A";
+        var valueB = "value-B";
+        var finalValue = "value-B"; // Last write wins
+        
+        // Capture watcher callback
+        Func<KvChangeEvent<string>, Task>? capturedCallback = null;
+        await _innerStore.WatchAsync<string>(
+            key,
+            Arg.Do<Func<KvChangeEvent<string>, Task>>(cb => capturedCallback = cb),
+            Arg.Any<CancellationToken>());
+        
+        // Start watching
+        await _sut.WatchAsync<string>(key, _ => Task.CompletedTask, CancellationToken.None);
+        
+        // Configure inner store to return the final value
+        _innerStore.GetAsync<string>(key, Arg.Any<CancellationToken>()).Returns(finalValue);
+
+        // Act - Rapid writes
+        await _sut.PutAsync(key, valueA);
+        await _sut.PutAsync(key, valueB);
+        
+        // Simulate delayed echoes arriving (out of order is also valid)
+        capturedCallback.ShouldNotBeNull();
+        await capturedCallback!(new KvChangeEvent<string>(KvChangeType.Put, valueA, key, 1));
+        await capturedCallback!(new KvChangeEvent<string>(KvChangeType.Put, valueB, key, 2));
+
+        // Act - Read after all echoes
+        var result = await _sut.GetAsync<string>(key);
+
+        // Assert
+        // Should return the latest value from NATS (last-write-wins)
+        result.ShouldBe(finalValue);
+    }
+
+    /// <summary>
+    /// Tests the delete-put race condition where a delete is quickly followed by a put.
+    /// The watcher must handle the echo sequence correctly so the final read returns
+    /// the put value, not null (from delete).
+    /// </summary>
+    [Test]
+    public async Task DeleteFollowedByPut_WithEchoes_ShouldReturnPutValue()
+    {
+        // Arrange
+        var key = "delete-put-race-key";
+        var initialValue = "exists";
+        var newValue = "recreated";
+        
+        // Capture watcher callback
+        Func<KvChangeEvent<string>, Task>? capturedCallback = null;
+        await _innerStore.WatchAsync<string>(
+            key,
+            Arg.Do<Func<KvChangeEvent<string>, Task>>(cb => capturedCallback = cb),
+            Arg.Any<CancellationToken>());
+        
+        // Pre-populate and start watching
+        await _fusionCache.SetAsync($"{_bucketName}:{key}", initialValue);
+        await _sut.WatchAsync<string>(key, _ => Task.CompletedTask, CancellationToken.None);
+        
+        // Configure inner store: after delete+put sequence, returns the new value
+        _innerStore.GetAsync<string>(key, Arg.Any<CancellationToken>()).Returns(newValue);
+
+        // Act - Delete then Put in quick succession
+        await _sut.DeleteAsync(key);
+        await _sut.PutAsync(key, newValue);
+        
+        // Simulate echoes arriving
+        capturedCallback.ShouldNotBeNull();
+        await capturedCallback!(new KvChangeEvent<string>(KvChangeType.Delete, default, key, 1));
+        await capturedCallback!(new KvChangeEvent<string>(KvChangeType.Put, newValue, key, 2));
+
+        // Act - Read after echoes
+        var result = await _sut.GetAsync<string>(key);
+
+        // Assert
+        // Should return the recreated value, not null
+        result.ShouldBe(newValue);
+    }
+
+    #endregion
+
     /// <summary>
     /// Tests the Soft Timeout Responsiveness behavior for FusionCache.
     /// 
