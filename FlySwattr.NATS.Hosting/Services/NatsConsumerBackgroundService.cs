@@ -27,7 +27,7 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
     private readonly NatsJSConsumeOpts _consumeOpts;
     private readonly string _streamName;
     private readonly string _consumerName;
-    private readonly int _workerCount; //TODO: replace worker count to something agnostic
+    private readonly int _maxParallelism;
 
     private readonly IPoisonMessageHandler<T> _poisonHandler;
 
@@ -63,7 +63,7 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
         _handler = handler;
         _consumeOpts = consumeOpts;
         _logger = logger;
-        _workerCount = maxDegreeOfParallelism ?? consumeOpts.MaxMsgs ?? 1;
+        _maxParallelism = maxDegreeOfParallelism ?? consumeOpts.MaxMsgs ?? 1;
         _poisonHandler = poisonHandler;
 
         _resiliencePipeline = resiliencePipeline;
@@ -111,18 +111,18 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
         try
         {
             // Channel capacity matches worker count for strict backpressure
-            var channel = Channel.CreateBounded<IJsMessageContext<T>>(new BoundedChannelOptions(_workerCount)
+            var channel = Channel.CreateBounded<IJsMessageContext<T>>(new BoundedChannelOptions(_maxParallelism)
             {
                 SingleWriter = true,
                 SingleReader = false,
                 FullMode = BoundedChannelFullMode.Wait,
-                Capacity = _workerCount
+                Capacity = _maxParallelism
             });
 
-            var workers = new Task[_workerCount];
-            for (int i = 0; i < _workerCount; i++)
+            var parallelTasks = new Task[_maxParallelism];
+            for (int i = 0; i < _maxParallelism; i++)
             {
-                workers[i] = RunWorkerAsync(channel.Reader, stoppingToken);
+                parallelTasks[i] = RunWorkerAsync(channel.Reader, stoppingToken);
             }
 
             while (!stoppingToken.IsCancellationRequested)
@@ -167,7 +167,7 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
             using var shutdownCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             try
             {
-                await Task.WhenAll(workers).WaitAsync(shutdownCts.Token);
+                await Task.WhenAll(parallelTasks).WaitAsync(shutdownCts.Token);
             }
             catch (OperationCanceledException)
             {
