@@ -27,7 +27,7 @@ public class NatsMessageBusEventsTests : IAsyncDisposable
     }
 
     [Test]
-    public void ShouldRaiseConnectionStateChanged_WhenConnectionOpened()
+    public async Task ShouldRaiseConnectionStateChanged_WhenConnectionOpened()
     {
         // Arrange
         var receivedState = NatsConnectionState.Closed;
@@ -45,7 +45,7 @@ public class NatsMessageBusEventsTests : IAsyncDisposable
             _connection, new NatsEventArgs("Connected"));
 
         // Assert
-        Thread.Sleep(50); // Allow async handler to propagate
+        await Task.Delay(500); // Allow async handler to propagate
         
         eventRaised.ShouldBeTrue();
         receivedState.ShouldBe(NatsConnectionState.Open);

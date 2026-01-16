@@ -19,6 +19,7 @@
         <PackageReference Include="NSubstitute" Version="5.3.0" />
         <PackageReference Include="Shouldly" Version="4.3.0" />
         <PackageReference Include="NATS.Net" Version="2.7.0" />
+        <PackageReference Include="Polly.Testing" Version="8.5.0" />
         <PackageReference Include="Vogen" Version="8.0.4" />
     </ItemGroup>
 
