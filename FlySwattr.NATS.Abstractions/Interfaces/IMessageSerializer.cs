@@ -3,7 +3,7 @@ using System.Buffers;
 // ReSharper disable once IdentifierTypo
 namespace FlySwattr.NATS.Abstractions;
 
-//TODO: Might need to adjust when I allow for multiple types (Json, MessagePack, MemoryPack)
+//TODO: Might need to adjust when I allow for multiple types (Json, MemoryPack)
 public interface IMessageSerializer
 {
     void Serialize<T>(IBufferWriter<byte> writer, T message);

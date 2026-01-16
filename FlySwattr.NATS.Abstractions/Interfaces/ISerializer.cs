@@ -5,7 +5,7 @@ namespace FlySwattr.NATS.Abstractions;
 
 /// <summary>
 /// Abstraction for pluggable serialization.
-/// Allows switching between JSON, MessagePack, and MemoryPack at runtime.
+/// Allows switching between JSON,  and MemoryPack at runtime.
 /// </summary>
 public interface ISerializer
 {
