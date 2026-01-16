@@ -58,9 +58,16 @@ public class HybridNatsSerializer : IMessageSerializer
     {
         if (IsMemoryPackable<T>())
         {
-            // Fast path: MemoryPack
-            return MemoryPackSerializer.Deserialize<T>(data.Span, _memoryPackOptions)
-                   ?? throw new InvalidOperationException($"MemoryPack deserialization returned null for type {typeof(T).Name}");
+            try
+            {
+                // Fast path: MemoryPack
+                return MemoryPackSerializer.Deserialize<T>(data.Span, _memoryPackOptions)
+                       ?? throw new MemoryPackSerializationException($"MemoryPack deserialization returned null for type {typeof(T).Name}");
+            }
+            catch (Exception ex) when (ex is not MemoryPackSerializationException)
+            {
+                 throw new MemoryPackSerializationException($"Failed to deserialize {typeof(T).Name} with MemoryPack", ex);
+            }
         }
         else
         {

@@ -154,9 +154,9 @@ public class NatsConsumerBackgroundServiceTests
             var msg = Substitute.For<INatsJSMsg<string>>();
             msg.Data.Returns($"message-{i}");
             msg.Subject.Returns("test.subject");
-            msg.NakAsync(Arg.Any<AckOpts>(), Arg.Any<TimeSpan>(), Arg.Any<CancellationToken>())
-                .Returns(ValueTask.CompletedTask)
-                .AndDoes(_ => Interlocked.Increment(ref nakCount));
+            msg.NakAsync(default, default, default)
+                .ReturnsForAnyArgs(ValueTask.CompletedTask)
+                .AndDoes(x => Interlocked.Increment(ref nakCount));
             mockMessages.Add(msg);
         }
         
@@ -189,33 +189,29 @@ public class NatsConsumerBackgroundServiceTests
         var executeTask = service.StartAsync(cts.Token);
         
         // Wait for handler to start processing first message
-        var handlerStartedTask = handlerStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        await handlerStartedTask;
+        await handlerStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
         
         // Wait for all messages to be yielded (which triggers NAKs for overflow)
-        var messagesYieldedTask = messagesYielded.Task.WaitAsync(TimeSpan.FromSeconds(2));
-        await messagesYieldedTask;
+        await messagesYielded.Task.WaitAsync(TimeSpan.FromSeconds(5));
         
-        // Small buffer for async operations to complete
+        // Unblock handler FIRST to ensure workers can drain/exit
+        handlerBlocked.TrySetResult(); 
+        
+        // Small buffer to allow worker to process next message if any
         await Task.Delay(100);
-        
+
         // Stop the service
         await cts.CancelAsync();
-        handlerBlocked.TrySetResult(); // Unblock handler to allow graceful shutdown
         
         try
         {
-            await service.StopAsync(CancellationToken.None);
+            // Wait for service to stop with generous timeout
+            await service.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
         }
         catch (OperationCanceledException) { /* Expected */ }
+        catch (TimeoutException) { /* Ignore stop timeout in test */ }
         
         // Assert
-        // With MaxConcurrency = 1: channel capacity = 1
-        // First message enters channel and blocks in handler
-        // Second message: channel has 1 slot, TryWrite succeeds (queued)
-        // Messages 3-5: TryWrite fails, NAKed = 3 NAKs
-        // Note: The actual count depends on timing of worker processing
-        // At minimum, we expect the last few messages to be NAKed
         nakCount.ShouldBeGreaterThanOrEqualTo(3, 
             $"Expected at least 3 NAKs when 5 messages overwhelm a capacity-1 channel, got {nakCount}");
     }

@@ -394,6 +394,158 @@ public class HybridNatsSerializerTests
     }
 
     #endregion
+
+    #region T05/T06: JSON Fallback and Partial Data Tests
+
+    /// <summary>
+    /// T05: Fallback Logic Test
+    /// Serialize a non-[MemoryPackable] object and verify it produces valid JSON.
+    /// </summary>
+    [Test]
+    public void Serialize_NonMemoryPackableObject_ShouldProduceValidJson()
+    {
+        // Arrange - PlainPocoForFallback is NOT decorated with [MemoryPackable]
+        var message = new PlainPocoForFallback
+        {
+            Name = "Test User",
+            Value = 42,
+            Timestamp = new DateTime(2024, 1, 15, 10, 30, 0, DateTimeKind.Utc)
+        };
+        var writer = new ArrayBufferWriter<byte>();
+        
+        // Act
+        _serializer.Serialize(writer, message);
+        
+        // Assert - Output should be valid JSON
+        var jsonBytes = writer.WrittenSpan;
+        jsonBytes[0].ShouldBe((byte)'{', "Non-MemoryPackable should produce JSON starting with '{'");
+        
+        // Parse as JSON to verify validity
+        using var jsonDoc = JsonDocument.Parse(writer.WrittenMemory);
+        var root = jsonDoc.RootElement;
+        
+        // Verify JSON structure contains expected properties (camelCase per default options)
+        root.TryGetProperty("name", out var nameProp).ShouldBeTrue("JSON should contain 'name' property");
+        nameProp.GetString().ShouldBe("Test User");
+        
+        root.TryGetProperty("value", out var valueProp).ShouldBeTrue("JSON should contain 'value' property");
+        valueProp.GetInt32().ShouldBe(42);
+        
+        root.TryGetProperty("timestamp", out var timestampProp).ShouldBeTrue("JSON should contain 'timestamp' property");
+        timestampProp.ValueKind.ShouldBe(JsonValueKind.String);
+    }
+
+    /// <summary>
+    /// T05 (Extended): Verify JSON fallback produces roundtrip-compatible output.
+    /// </summary>
+    [Test]
+    public void Serialize_NonMemoryPackableObject_ShouldRoundtripCorrectly()
+    {
+        // Arrange
+        var original = new PlainPocoForFallback
+        {
+            Name = "Roundtrip Test",
+            Value = 123,
+            Timestamp = new DateTime(2024, 6, 15, 12, 0, 0, DateTimeKind.Utc)
+        };
+        var writer = new ArrayBufferWriter<byte>();
+        
+        // Act
+        _serializer.Serialize(writer, original);
+        var result = _serializer.Deserialize<PlainPocoForFallback>(writer.WrittenMemory);
+        
+        // Assert
+        result.ShouldNotBeNull();
+        result.Name.ShouldBe(original.Name);
+        result.Value.ShouldBe(original.Value);
+        result.Timestamp.ShouldBe(original.Timestamp);
+    }
+
+    /// <summary>
+    /// T06: Partial Data Check
+    /// Verify that deserializing JSON with extra fields does not throw - extra data is ignored.
+    /// </summary>
+    [Test]
+    public void Deserialize_JsonWithExtraFields_ShouldNotThrow()
+    {
+        // Arrange - Create JSON with extra fields not present in target type
+        var jsonWithExtraFields = """
+        {
+            "name": "Test User",
+            "value": 42,
+            "timestamp": "2024-01-15T10:30:00Z",
+            "extraField1": "this field doesn't exist in POCO",
+            "extraField2": 999,
+            "nestedExtra": { "a": 1, "b": 2 }
+        }
+        """;
+        var jsonBytes = System.Text.Encoding.UTF8.GetBytes(jsonWithExtraFields);
+        
+        // Act - Should not throw despite extra fields
+        var result = _serializer.Deserialize<PlainPocoForFallback>(jsonBytes);
+        
+        // Assert - Known fields should be populated correctly
+        result.ShouldNotBeNull();
+        result.Name.ShouldBe("Test User");
+        result.Value.ShouldBe(42);
+    }
+
+    /// <summary>
+    /// T06: Partial Data Check
+    /// Verify that deserializing JSON with missing optional fields works correctly.
+    /// </summary>
+    [Test]
+    public void Deserialize_JsonWithMissingOptionalFields_ShouldUseDefaults()
+    {
+        // Arrange - JSON missing some nullable fields
+        var jsonWithMissingFields = """
+        {
+            "name": "Minimal User"
+        }
+        """;
+        var jsonBytes = System.Text.Encoding.UTF8.GetBytes(jsonWithMissingFields);
+        
+        // Act
+        var result = _serializer.Deserialize<PlainPocoForFallback>(jsonBytes);
+        
+        // Assert
+        result.ShouldNotBeNull();
+        result.Name.ShouldBe("Minimal User");
+        result.Value.ShouldBe(0); // default int value
+        result.Timestamp.ShouldBe(default); // default DateTime
+    }
+
+    /// <summary>
+    /// T06: Partial Data Check (Variant)
+    /// Ensure that DTO properties that exist in memory aren't affected by [JsonIgnore] during the
+    /// serialization/deserialization cycle - they're simply absent from the JSON output.
+    /// </summary>
+    [Test]
+    public void Serialize_DtoWithJsonIgnore_ShouldExcludeIgnoredProperties()
+    {
+        // Arrange
+        var dto = new DtoWithIgnoredProperties
+        {
+            VisibleProperty = "I'm visible",
+            SensitiveData = "This should not appear in JSON"
+        };
+        var writer = new ArrayBufferWriter<byte>();
+        
+        // Act
+        _serializer.Serialize(writer, dto);
+        
+        // Assert - Parse JSON and verify sensitiveData is NOT present
+        using var jsonDoc = JsonDocument.Parse(writer.WrittenMemory);
+        var root = jsonDoc.RootElement;
+        
+        root.TryGetProperty("visibleProperty", out var visible).ShouldBeTrue();
+        visible.GetString().ShouldBe("I'm visible");
+        
+        // The ignored property should NOT be in JSON output
+        root.TryGetProperty("sensitiveData", out _).ShouldBeFalse("JsonIgnore property should not appear in JSON");
+    }
+
+    #endregion
 }
 
 #region MemoryPackable Test Types (must be partial and in file scope for source generation)
@@ -457,6 +609,28 @@ public partial record MemoryPackableWithInterface : HybridNatsSerializerTests.IT
 public partial class MemoryPackableList
 {
     public List<MemoryPackableMessage>? Items { get; set; }
+}
+
+/// <summary>
+/// Plain POCO for testing JSON fallback (T05).
+/// NOT decorated with [MemoryPackable].
+/// </summary>
+public class PlainPocoForFallback
+{
+    public string? Name { get; set; }
+    public int Value { get; set; }
+    public DateTime Timestamp { get; set; }
+}
+
+/// <summary>
+/// DTO with [JsonIgnore] for testing partial data handling (T06).
+/// </summary>
+public class DtoWithIgnoredProperties
+{
+    public string? VisibleProperty { get; set; }
+    
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? SensitiveData { get; set; }
 }
 
 #endregion

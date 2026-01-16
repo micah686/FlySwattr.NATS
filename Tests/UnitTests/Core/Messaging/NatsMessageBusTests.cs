@@ -97,11 +97,10 @@ public class NatsMessageBusTests : IAsyncDisposable
         _connection.RequestAsync<string, string>(subject, request, replyOpts: Arg.Any<NatsSubOpts>(), cancellationToken: Arg.Any<CancellationToken>())
             .Returns(x => ValueTask.FromException<NatsMsg<string>>(new NatsNoReplyException())); 
 
-        // Act
-        var result = await _bus.RequestAsync<string, string>(subject, request, TimeSpan.FromSeconds(1));
+        // Act & Assert
+        await Assert.ThrowsAsync<NatsNoReplyException>(async () => 
+            await _bus.RequestAsync<string, string>(subject, request, TimeSpan.FromSeconds(1)));
 
-        // Assert
-        result.ShouldBeNull();
         await _connection.Received(1).RequestAsync<string, string>(subject, request, replyOpts: Arg.Any<NatsSubOpts>(), cancellationToken: Arg.Any<CancellationToken>());
     }
 }
