@@ -217,15 +217,22 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
         // Check if payload is offloaded to object store
         if (entry.Payload == null || entry.Payload.Length == 0)
         {
-            // Look for object store reference in headers or a convention-based key
-            // The DLQ message creation uses: objstore://{objectKey} as PayloadEncoding
-            // But DlqMessageEntry doesn't have PayloadEncoding, so we need to use the original headers
-            // or fall back to checking if there's an object store key pattern
-            
-            if (_objectStore != null && entry.OriginalHeaders?.TryGetValue("x-dlq-payload-ref", out var payloadRef) == true)
+            // Look for object store reference in PayloadEncoding
+            if (_objectStore != null && 
+                !string.IsNullOrEmpty(entry.PayloadEncoding) && 
+                entry.PayloadEncoding.StartsWith("objstore://"))
             {
+                var payloadRef = entry.PayloadEncoding.Substring(11); // Remove prefix
                 using var ms = new MemoryStream();
                 await _objectStore.GetAsync(payloadRef, ms, cancellationToken);
+                return ms.ToArray();
+            }
+            
+            // Fallback for backward compatibility or alternative header-based refs
+            if (_objectStore != null && entry.OriginalHeaders?.TryGetValue("x-dlq-payload-ref", out var headerRef) == true)
+            {
+                using var ms = new MemoryStream();
+                await _objectStore.GetAsync(headerRef, ms, cancellationToken);
                 return ms.ToArray();
             }
             

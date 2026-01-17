@@ -46,9 +46,11 @@ public record DlqMessageEntry
     /// <summary>Optional error reason from the last processing attempt.</summary>
     public string? ErrorReason { get; init; }
     
-    //TODO: Do we need to include the full payload? Or does this need to be a pointer?
-    /// <summary>The payload of the failed message.</summary>
+    /// <summary>The payload of the failed message. If null/empty, check PayloadEncoding for external reference.</summary>
     public byte[]? Payload { get; init; }
+
+    /// <summary>Encoding format or storage reference (e.g. "json", "binary", "objstore://key").</summary>
+    public string? PayloadEncoding { get; init; }
 
     /// <summary>Original headers of the failed message.</summary>
     public Dictionary<string, string>? OriginalHeaders { get; init; }
