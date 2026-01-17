@@ -7,6 +7,7 @@ namespace FlySwattr.NATS.Core;
 /// <summary>
 /// NATS Key-Value backed implementation of <see cref="IDlqStore"/>.
 /// Stores DLQ entries in a dedicated KV bucket for persistence and querying.
+/// Uses hierarchical keys ({stream}.{consumer}.{id}) to enable native NATS KV filtering.
 /// </summary>
 internal class NatsDlqStore : IDlqStore
 {
@@ -23,6 +24,33 @@ internal class NatsDlqStore : IDlqStore
         _logger = logger;
     }
 
+    /// <summary>
+    /// Builds a hierarchical KV key from stream, consumer, and entry ID.
+    /// Format: {stream}.{consumer}.{id}
+    /// </summary>
+    private static string BuildKey(string stream, string consumer, string id) 
+        => $"{SanitizeToken(stream)}.{SanitizeToken(consumer)}.{id}";
+    
+    /// <summary>
+    /// Sanitizes a token for use in NATS KV keys by replacing reserved characters.
+    /// </summary>
+    private static string SanitizeToken(string token) 
+        => token.Replace(".", "_").Replace("*", "_").Replace(">", "_");
+    
+    /// <summary>
+    /// Builds the NATS wildcard pattern for filtering keys.
+    /// </summary>
+    private static string BuildFilterPattern(string? stream, string? consumer)
+    {
+        return (stream, consumer) switch
+        {
+            (not null, not null) => $"{SanitizeToken(stream)}.{SanitizeToken(consumer)}.*",
+            (not null, null) => $"{SanitizeToken(stream)}.>",
+            (null, not null) => $"*.{SanitizeToken(consumer)}.*",
+            _ => ">"
+        };
+    }
+
     /// <inheritdoc />
     public async Task StoreAsync(DlqMessageEntry entry, CancellationToken cancellationToken = default)
     {
@@ -31,12 +59,12 @@ internal class NatsDlqStore : IDlqStore
 
         try
         {
-            // Store as JSON for human readability and flexibility
+            var key = BuildKey(entry.OriginalStream, entry.OriginalConsumer, entry.Id);
             var json = JsonSerializer.Serialize(entry);
-            await _store.PutAsync(entry.Id, json, cancellationToken);
+            await _store.PutAsync(key, json, cancellationToken);
             
-            _logger.LogDebug("Stored DLQ entry {MessageId} for {Stream}/{Consumer}", 
-                entry.Id, entry.OriginalStream, entry.OriginalConsumer);
+            _logger.LogDebug("Stored DLQ entry {MessageId} for {Stream}/{Consumer} with key {Key}", 
+                entry.Id, entry.OriginalStream, entry.OriginalConsumer, key);
         }
         catch (Exception ex)
         {
@@ -52,6 +80,7 @@ internal class NatsDlqStore : IDlqStore
 
         try
         {
+            // The id parameter is the full hierarchical key
             var json = await _store.GetAsync<string>(id, cancellationToken);
             
             if (string.IsNullOrEmpty(json))
@@ -75,22 +104,34 @@ internal class NatsDlqStore : IDlqStore
         int limit = 100,
         CancellationToken cancellationToken = default)
     {
-        //TODO:
-        // Note: NATS KV doesn't support native filtering, so we'd need to:
-        // 1. Use a separate index stream, or
-        // 2. Watch all keys and filter in memory (expensive for large datasets)
-        // 
-        // For now, this returns an empty list with a log warning.
-        // A production implementation would use a separate indexing strategy.
-        
-        _logger.LogWarning(
-            "ListAsync is not fully implemented. Consider using a dedicated indexing strategy. " +
-            "Filters: Stream={Stream}, Consumer={Consumer}, Limit={Limit}",
-            filterStream, filterConsumer, limit);
-
-        // Return empty list - full implementation would require indexing strategy
-        await Task.CompletedTask; // Satisfy async signature
-        return Array.Empty<DlqMessageEntry>();
+        try
+        {
+            var pattern = BuildFilterPattern(filterStream, filterConsumer);
+            _logger.LogDebug("Listing DLQ entries with pattern {Pattern}, limit {Limit}", pattern, limit);
+            
+            var entries = new List<DlqMessageEntry>();
+            
+            await foreach (var key in _store.GetKeysAsync([pattern], cancellationToken))
+            {
+                if (entries.Count >= limit) 
+                    break;
+                
+                var entry = await GetAsync(key, cancellationToken);
+                if (entry != null)
+                {
+                    entries.Add(entry);
+                }
+            }
+            
+            _logger.LogDebug("Found {Count} DLQ entries matching filters", entries.Count);
+            return entries;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to list DLQ entries with filters Stream={Stream}, Consumer={Consumer}", 
+                filterStream, filterConsumer);
+            throw;
+        }
     }
 
     /// <inheritdoc />
@@ -108,7 +149,9 @@ internal class NatsDlqStore : IDlqStore
             }
 
             var updatedEntry = entry with { Status = status };
-            await StoreAsync(updatedEntry, cancellationToken);
+            // Re-store with the same key (id is already the full hierarchical key)
+            var json = JsonSerializer.Serialize(updatedEntry);
+            await _store.PutAsync(id, json, cancellationToken);
             
             _logger.LogDebug("Updated DLQ entry {MessageId} status to {Status}", id, status);
             return true;
@@ -127,7 +170,7 @@ internal class NatsDlqStore : IDlqStore
 
         try
         {
-            // Check if entry exists first
+            // Check if entry exists first (id is the full hierarchical key)
             var entry = await GetAsync(id, cancellationToken);
             if (entry == null)
             {

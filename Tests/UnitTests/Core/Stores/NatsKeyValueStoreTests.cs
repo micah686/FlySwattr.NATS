@@ -96,6 +96,30 @@ public class NatsKeyValueStoreTests : IAsyncDisposable
         await _natsKvStore.Received(1).DeleteAsync(key, Arg.Any<NatsKVDeleteOpts?>(), Arg.Any<CancellationToken>());
     }
 
+    [Test]
+    public async Task GetKeysAsync_ShouldReturnMatchingKeys()
+    {
+        // Arrange
+        var patterns = new[] { "orders.*", "payments.>" };
+        var expectedKeys = new[] { "orders.processor", "payments.handler.v1" };
+        
+        _natsKvStore.GetKeysAsync(
+            Arg.Is<IEnumerable<string>>(p => p.SequenceEqual(patterns)),
+            Arg.Any<NatsKVWatchOpts?>(),
+            Arg.Any<CancellationToken>()
+        ).Returns(expectedKeys.ToAsyncEnumerable());
+
+        // Act
+        var result = new List<string>();
+        await foreach (var key in _sut.GetKeysAsync(patterns))
+        {
+            result.Add(key);
+        }
+
+        // Assert
+        result.ShouldBe(expectedKeys);
+    }
+
     private NatsKVEntry<T> CreateTestEntry<T>(string key, T value, ulong revision, NatsKVOperation op = NatsKVOperation.Put)
     {
         try 

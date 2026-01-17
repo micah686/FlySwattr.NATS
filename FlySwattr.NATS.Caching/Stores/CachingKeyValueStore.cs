@@ -105,4 +105,10 @@ internal class CachingKeyValueStore : IKeyValueStore
             await handler(change);
         }, cancellationToken);
     }
+
+    public IAsyncEnumerable<string> GetKeysAsync(IEnumerable<string> patterns, CancellationToken cancellationToken = default)
+    {
+        // Direct passthrough - no caching for key enumeration
+        return _inner.GetKeysAsync(patterns, cancellationToken);
+    }
 }

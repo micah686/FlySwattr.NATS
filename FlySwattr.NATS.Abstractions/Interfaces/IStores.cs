@@ -18,6 +18,15 @@ public interface IKeyValueStore
     /// <param name="handler">Handler invoked on each change event.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     Task WatchAsync<T>(string key, Func<KvChangeEvent<T>, Task> handler, CancellationToken cancellationToken = default);
+    
+    /// <summary>
+    /// Gets all keys matching the specified patterns.
+    /// Patterns support NATS wildcards: '*' (single token) and '>' (multi-token suffix).
+    /// </summary>
+    /// <param name="patterns">Key patterns to filter by (e.g., "orders.*", "orders.processor.>").</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>Async enumerable of matching keys.</returns>
+    IAsyncEnumerable<string> GetKeysAsync(IEnumerable<string> patterns, CancellationToken cancellationToken = default);
 }
 
 public interface IObjectStore

@@ -1,4 +1,5 @@
 using System.Net.Sockets;
+using System.Runtime.CompilerServices;
 using FlySwattr.NATS.Abstractions;
 using Microsoft.Extensions.Logging;
 using NATS.Client.Core;
@@ -184,6 +185,27 @@ internal class NatsKeyValueStore : IKeyValueStore, IAsyncDisposable
                 _logger.LogError(ex, "Fatal error watching key {Key} in bucket {Bucket}", key, _bucket);
                 throw;
             }
+        }
+    }
+
+    public async IAsyncEnumerable<string> GetKeysAsync(
+        IEnumerable<string> patterns, 
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        INatsKVStore store;
+        try
+        {
+            store = await GetStoreAsync(cancellationToken);
+        }
+        catch (NatsJSApiException ex) when (ex.Error.Code is 503 or 504)
+        {
+            InvalidateCache();
+            throw;
+        }
+
+        await foreach (var key in store.GetKeysAsync(patterns, cancellationToken: cancellationToken))
+        {
+            yield return key;
         }
     }
 
