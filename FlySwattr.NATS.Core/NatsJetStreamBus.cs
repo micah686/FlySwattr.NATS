@@ -76,14 +76,12 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
         StreamName stream,
         SubjectName subject,
         Func<IJsMessageContext<T>, Task> handler,
-        QueueGroup? queueGroup = null,
-        int? maxDegreeOfParallelism = null,
-        int? maxConcurrency = null,
-        string? bulkheadPool = null,
+        JetStreamConsumeOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        var opts = options ?? JetStreamConsumeOptions.Default;
         // Note: maxConcurrency is enforced by the Resilience decorator, not here in Core
-        string? consumerName = queueGroup?.Value;
+        string? consumerName = opts.QueueGroup?.Value;
 
         try
         {
@@ -104,7 +102,7 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
                  consumer = await _jsContext.CreateOrUpdateConsumerAsync(stream.Value, config, cancellationToken);
             }
             
-            var effectiveParallelism = maxDegreeOfParallelism ?? 10;
+            var effectiveParallelism = opts.MaxDegreeOfParallelism ?? 10;
             
             var service = new BasicNatsConsumerService<T>(
                 consumer,
@@ -168,18 +166,16 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
         StreamName stream,
         ConsumerName consumer,
         Func<IJsMessageContext<T>, Task> handler,
-        int batchSize = 10,
-        int? maxDegreeOfParallelism = null,
-        int? maxConcurrency = null,
-        string? bulkheadPool = null,
+        JetStreamConsumeOptions? options = null,
         CancellationToken cancellationToken = default)
     {
+        var opts = options ?? JetStreamConsumeOptions.Default;
         // Note: maxConcurrency is enforced by the Resilience decorator, not here in Core
         try
         {
             var jsConsumer = await _jsContext.GetConsumerAsync(stream.Value, consumer.Value, cancellationToken);
 
-            var effectiveParallelism = maxDegreeOfParallelism ?? 10;
+            var effectiveParallelism = opts.MaxDegreeOfParallelism ?? 10;
             
             var service = new BasicNatsConsumerService<T>(
                 jsConsumer,

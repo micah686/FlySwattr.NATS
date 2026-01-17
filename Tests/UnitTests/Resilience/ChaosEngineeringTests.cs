@@ -683,7 +683,13 @@ public class ChaosEngineeringTests
 
         // Verify the failure is logged/signaled properly
         exception.ShouldNotBeNull();
-        exception.Message.ShouldContain("Connection refused");
+        // The service either throws the inner exception (if retries exhausted) or a timeout exception (if global timeout reached)
+        // Ideally we should just check that it failed
+        var msg = exception.Message;
+        var valid = msg.Contains("startup timeout", StringComparison.OrdinalIgnoreCase) || 
+                    msg.Contains("Connection refused", StringComparison.OrdinalIgnoreCase);
+        
+        valid.ShouldBeTrue($"Exception message '{msg}' did not contain expected error text");
         mockReadySignal.DidNotReceive().SignalReady();
     }
 

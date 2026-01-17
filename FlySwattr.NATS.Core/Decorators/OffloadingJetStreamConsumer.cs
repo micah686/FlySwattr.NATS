@@ -35,10 +35,7 @@ internal class OffloadingJetStreamConsumer : IJetStreamConsumer
         StreamName stream,
         SubjectName subject,
         Func<IJsMessageContext<T>, Task> handler,
-        QueueGroup? queueGroup = null,
-        int? maxDegreeOfParallelism = null,
-        int? maxConcurrency = null,
-        string? bulkheadPool = null,
+        JetStreamConsumeOptions? options = null,
         CancellationToken cancellationToken = default)
     {
         // Wrap the handler to intercept ClaimCheckMessage and retrieve the actual payload
@@ -48,17 +45,14 @@ internal class OffloadingJetStreamConsumer : IJetStreamConsumer
             await handler(resolvedContext);
         };
 
-        await _inner.ConsumeAsync(stream, subject, wrappedHandler, queueGroup, maxDegreeOfParallelism, maxConcurrency, bulkheadPool, cancellationToken);
+        await _inner.ConsumeAsync(stream, subject, wrappedHandler, options, cancellationToken);
     }
 
     public async Task ConsumePullAsync<T>(
         StreamName stream,
         ConsumerName consumer,
         Func<IJsMessageContext<T>, Task> handler,
-        int batchSize = 10,
-        int? maxDegreeOfParallelism = null,
-        int? maxConcurrency = null,
-        string? bulkheadPool = null,
+        JetStreamConsumeOptions? options = null,
         CancellationToken cancellationToken = default)
     {
         // Wrap the handler to intercept ClaimCheckMessage and retrieve the actual payload
@@ -68,7 +62,7 @@ internal class OffloadingJetStreamConsumer : IJetStreamConsumer
             await handler(resolvedContext);
         };
 
-        await _inner.ConsumePullAsync(stream, consumer, wrappedHandler, batchSize, maxDegreeOfParallelism, maxConcurrency, bulkheadPool, cancellationToken);
+        await _inner.ConsumePullAsync(stream, consumer, wrappedHandler, options, cancellationToken);
     }
 
     private async Task<IJsMessageContext<T>> ResolveClaimCheckAsync<T>(

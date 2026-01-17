@@ -60,18 +60,16 @@ internal class ResilientJetStreamConsumer : IJetStreamConsumer
         StreamName stream,
         SubjectName subject,
         Func<IJsMessageContext<T>, Task> handler,
-        QueueGroup? queueGroup = null,
-        int? maxDegreeOfParallelism = null,
-        int? maxConcurrency = null,
-        string? bulkheadPool = null,
+        JetStreamConsumeOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        var poolName = bulkheadPool ?? "default";
-        var consumerKey = $"{stream.Value}/{queueGroup?.Value ?? subject.Value}";
+        var opts = options ?? JetStreamConsumeOptions.Default;
+        var poolName = opts.BulkheadPool ?? "default";
+        var consumerKey = $"{stream.Value}/{opts.QueueGroup?.Value ?? subject.Value}";
 
         _logger.LogDebug(
             "Starting resilient consumer for {ConsumerKey} in pool '{Pool}' with maxConcurrency={MaxConcurrency}",
-            consumerKey, poolName, maxConcurrency?.ToString() ?? "unlimited");
+            consumerKey, poolName, opts.MaxConcurrency?.ToString() ?? "unlimited");
 
         // Get the bulkhead pipeline for this pool (enforces global concurrency limits)
         var bulkheadPipeline = _bulkheadManager.GetPoolPipeline(poolName);
@@ -80,8 +78,8 @@ internal class ResilientJetStreamConsumer : IJetStreamConsumer
         var consumerPipeline = _resilienceBuilder.GetPipeline(consumerKey, _globalPipeline);
 
         // If maxConcurrency is specified, wrap the handler with per-consumer semaphore
-        var effectiveHandler = maxConcurrency.HasValue
-            ? WrapHandlerWithSemaphore(consumerKey, maxConcurrency.Value, handler)
+        var effectiveHandler = opts.MaxConcurrency.HasValue
+            ? WrapHandlerWithSemaphore(consumerKey, opts.MaxConcurrency.Value, handler)
             : handler;
 
         // Wrap the consume call with bulkhead + circuit breaker
@@ -90,8 +88,7 @@ internal class ResilientJetStreamConsumer : IJetStreamConsumer
             await consumerPipeline.ExecuteAsync(async innerCt =>
             {
                 await _inner.ConsumeAsync(
-                    stream, subject, effectiveHandler, queueGroup,
-                    maxDegreeOfParallelism, maxConcurrency, bulkheadPool, innerCt);
+                    stream, subject, effectiveHandler, opts, innerCt);
             }, ct);
         }, cancellationToken);
     }
@@ -100,18 +97,16 @@ internal class ResilientJetStreamConsumer : IJetStreamConsumer
         StreamName stream,
         ConsumerName consumer,
         Func<IJsMessageContext<T>, Task> handler,
-        int batchSize = 10,
-        int? maxDegreeOfParallelism = null,
-        int? maxConcurrency = null,
-        string? bulkheadPool = null,
+        JetStreamConsumeOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        var poolName = bulkheadPool ?? "default";
+        var opts = options ?? JetStreamConsumeOptions.Default;
+        var poolName = opts.BulkheadPool ?? "default";
         var consumerKey = $"{stream.Value}/{consumer.Value}";
 
         _logger.LogDebug(
             "Starting resilient pull consumer for {ConsumerKey} in pool '{Pool}' with maxConcurrency={MaxConcurrency}",
-            consumerKey, poolName, maxConcurrency?.ToString() ?? "unlimited");
+            consumerKey, poolName, opts.MaxConcurrency?.ToString() ?? "unlimited");
 
         // Get the bulkhead pipeline for this pool
         var bulkheadPipeline = _bulkheadManager.GetPoolPipeline(poolName);
@@ -120,8 +115,8 @@ internal class ResilientJetStreamConsumer : IJetStreamConsumer
         var consumerPipeline = _resilienceBuilder.GetPipeline(consumerKey, _globalPipeline);
 
         // If maxConcurrency is specified, wrap the handler with per-consumer semaphore
-        var effectiveHandler = maxConcurrency.HasValue
-            ? WrapHandlerWithSemaphore(consumerKey, maxConcurrency.Value, handler)
+        var effectiveHandler = opts.MaxConcurrency.HasValue
+            ? WrapHandlerWithSemaphore(consumerKey, opts.MaxConcurrency.Value, handler)
             : handler;
 
         // Wrap the consume call
@@ -130,8 +125,7 @@ internal class ResilientJetStreamConsumer : IJetStreamConsumer
             await consumerPipeline.ExecuteAsync(async innerCt =>
             {
                 await _inner.ConsumePullAsync(
-                    stream, consumer, effectiveHandler, batchSize,
-                    maxDegreeOfParallelism, maxConcurrency, bulkheadPool, innerCt);
+                    stream, consumer, effectiveHandler, opts, innerCt);
             }, ct);
         }, cancellationToken);
     }

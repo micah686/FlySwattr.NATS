@@ -67,7 +67,7 @@ public class ResilientJetStreamConsumerTests : IAsyncDisposable
             stream, 
             subject, 
             Arg.Any<Func<IJsMessageContext<string>, Task>>(), 
-            null, null, null, null, 
+            Arg.Any<JetStreamConsumeOptions>(), 
             Arg.Any<CancellationToken>());
     }
 
@@ -78,9 +78,10 @@ public class ResilientJetStreamConsumerTests : IAsyncDisposable
         var stream = StreamName.From("stream");
         var subject = SubjectName.From("subject");
         var maxConcurrency = 5;
+        var options = new JetStreamConsumeOptions { MaxConcurrency = maxConcurrency };
         
         // Act
-        await _sut.ConsumeAsync<object>(stream, subject, _ => Task.CompletedTask, maxConcurrency: maxConcurrency);
+        await _sut.ConsumeAsync<object>(stream, subject, _ => Task.CompletedTask, options: options);
 
         // Assert
         // Verify semaphore created
@@ -92,7 +93,7 @@ public class ResilientJetStreamConsumerTests : IAsyncDisposable
             stream, 
             subject, 
             Arg.Any<Func<IJsMessageContext<object>, Task>>(), // Handler is wrapped
-            null, null, maxConcurrency, null, 
+            Arg.Is<JetStreamConsumeOptions>(o => o.MaxConcurrency == maxConcurrency), 
             Arg.Any<CancellationToken>());
     }
 
@@ -112,7 +113,7 @@ public class ResilientJetStreamConsumerTests : IAsyncDisposable
             stream, 
             consumer, 
             Arg.Any<Func<IJsMessageContext<string>, Task>>(), 
-            10, null, null, null, 
+            Arg.Any<JetStreamConsumeOptions>(), 
             Arg.Any<CancellationToken>());
     }
 }
