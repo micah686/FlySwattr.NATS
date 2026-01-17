@@ -71,7 +71,7 @@ _ = jsConsumer.ConsumeAsync<OrderPlacedEvent>(
         // Display compact JetStream metadata
         AnsiConsole.MarkupLine($"  [blue]Seq:[/] {ctx.Sequence} | [blue]Delivered:[/] {ctx.NumDelivered} | [blue]Subject:[/] {ctx.Subject}");
         AnsiConsole.MarkupLine($"  OrderId: [cyan]{ctx.Message.OrderId}[/]");
-        AnsiConsole.MarkupLine($"  SKU: [cyan]{ctx.Message.Sku}[/]");
+        AnsiConsole.MarkupLine($"  SKU: [cyan]{ctx.Message.Sku ?? "(null)"}[/]");
         
         // Display headers if present
         if (ctx.Headers.Headers.Count > 0)

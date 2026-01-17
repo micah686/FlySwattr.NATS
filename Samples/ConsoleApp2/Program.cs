@@ -116,7 +116,7 @@ _ = jsConsumer.ConsumeAsync<OrderPlacedEvent>(
         
         // Display message content
         AnsiConsole.MarkupLine($"  OrderId: [cyan]{ctx.Message.OrderId}[/]");
-        AnsiConsole.MarkupLine($"  SKU: [cyan]{ctx.Message.Sku}[/]");
+        AnsiConsole.MarkupLine($"  SKU: [cyan]{ctx.Message.Sku ?? "(null)"}[/]");
         
         // Display headers if present
         if (ctx.Headers.Headers.Count > 0)
@@ -141,7 +141,7 @@ _ = jsConsumer.ConsumeAsync<OrderPlacedEvent>(
         }
         
         // Check for SKU that should fail validation
-        if (ctx.Message.Sku.StartsWith("POISON-"))
+        if (ctx.Message.Sku != null && ctx.Message.Sku.StartsWith("POISON-"))
         {
             AnsiConsole.MarkupLine($"[yellow]  ⚠ Invalid SKU detected: {ctx.Message.Sku}[/]");
             
