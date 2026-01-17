@@ -7,7 +7,7 @@ using NATS.Client.KeyValueStore;
 
 namespace FlySwattr.NATS.Core.Stores;
 
-public class NatsKeyValueStore : IKeyValueStore, IAsyncDisposable
+internal class NatsKeyValueStore : IKeyValueStore, IAsyncDisposable
 {
     private readonly INatsKVContext _kvContext;
     private readonly string _bucket;

@@ -1,7 +1,7 @@
 using Medallion.Threading;
 using Microsoft.Extensions.Logging;
-using NATS.Client.JetStream;
-using NATS.Client.KeyValueStore;
+using global::NATS.Client.JetStream;
+using global::NATS.Client.KeyValueStore;
 using Polly;
 using Polly.Retry;
 
@@ -11,7 +11,7 @@ namespace FlySwattr.NATS.DistributedLock.Services;
 /// NATS KV-backed distributed lock provider implementing DistributedLock.Core interfaces.
 /// Uses Polly for retry with exponential backoff and jitter to prevent thundering herd.
 /// </summary>
-public class NatsDistributedLockProvider : IDistributedLockProvider
+internal class NatsDistributedLockProvider : IDistributedLockProvider
 {
     private readonly INatsKVContext _kvContext;
     private readonly ILogger<NatsDistributedLockProvider> _logger;

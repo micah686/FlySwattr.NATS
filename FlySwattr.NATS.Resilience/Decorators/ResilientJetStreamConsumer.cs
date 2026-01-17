@@ -20,7 +20,7 @@ namespace FlySwattr.NATS.Resilience.Decorators;
 /// </list>
 /// </para>
 /// </remarks>
-public class ResilientJetStreamConsumer : IJetStreamConsumer
+internal class ResilientJetStreamConsumer : IJetStreamConsumer
 {
     private readonly IJetStreamConsumer _inner;
     private readonly BulkheadManager _bulkheadManager;

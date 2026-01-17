@@ -11,7 +11,7 @@ namespace FlySwattr.NATS.Core.Decorators;
 /// When a message payload exceeds the configured threshold, it is automatically 
 /// offloaded to an IObjectStore and replaced with a reference header.
 /// </summary>
-public class OffloadingJetStreamPublisher : IJetStreamPublisher
+internal class OffloadingJetStreamPublisher : IJetStreamPublisher
 {
     private readonly IJetStreamPublisher _inner;
     private readonly IObjectStore _objectStore;
@@ -128,7 +128,7 @@ public class OffloadingJetStreamPublisher : IJetStreamPublisher
 /// Internal marker message used for claim check references.
 /// This is published instead of the original large payload.
 /// </summary>
-public class ClaimCheckMessage
+internal class ClaimCheckMessage
 {
     /// <summary>
     /// Reference to the offloaded payload in object store (e.g., "objstore://claimcheck/subject/guid")

@@ -10,7 +10,7 @@ namespace FlySwattr.NATS.Hosting.Middleware;
 /// handled specially by the consumer pipeline (routed to DLQ without retries).
 /// </summary>
 /// <typeparam name="T">The type of message being validated.</typeparam>
-public class ValidationMiddleware<T> : IConsumerMiddleware<T>
+internal class ValidationMiddleware<T> : IConsumerMiddleware<T>
 {
     private readonly IEnumerable<IValidator<T>> _validators;
 

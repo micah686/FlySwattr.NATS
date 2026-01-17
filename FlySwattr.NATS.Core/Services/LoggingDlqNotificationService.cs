@@ -8,7 +8,7 @@ namespace FlySwattr.NATS.Core;
 /// Logs DLQ events with structured logging for observability.
 /// Can be replaced with Slack, PagerDuty, or email implementations.
 /// </summary>
-public class LoggingDlqNotificationService : IDlqNotificationService
+internal class LoggingDlqNotificationService : IDlqNotificationService
 {
     private readonly ILogger<LoggingDlqNotificationService> _logger;
 

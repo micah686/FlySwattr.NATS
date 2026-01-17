@@ -220,7 +220,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
     }
 }
 
-public class MessageContext<T> : IMessageContext<T>
+internal class MessageContext<T> : IMessageContext<T>
 {
     private readonly INatsMsg<T> _msg;
 

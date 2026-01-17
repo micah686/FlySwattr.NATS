@@ -22,7 +22,7 @@ namespace FlySwattr.NATS.Resilience.Configuration;
 /// leaving at least 70 available for other consumers.
 /// </para>
 /// </remarks>
-public class ConsumerSemaphoreManager : IAsyncDisposable
+internal class ConsumerSemaphoreManager : IAsyncDisposable
 {
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _semaphores = new();
     private readonly ILogger<ConsumerSemaphoreManager> _logger;

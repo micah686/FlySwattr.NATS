@@ -11,7 +11,7 @@ public interface IDlqPolicyRegistry
     DeadLetterPolicy? Get(string stream, string consumer);
 }
 
-public class DlqPolicyRegistry : IDlqPolicyRegistry
+internal class DlqPolicyRegistry : IDlqPolicyRegistry
 {
     private readonly ConcurrentDictionary<string, DeadLetterPolicy> _policies = new();
     private readonly ILogger<DlqPolicyRegistry> _logger;

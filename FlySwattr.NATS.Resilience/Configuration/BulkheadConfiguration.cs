@@ -35,7 +35,7 @@ public class BulkheadConfiguration
 /// for different consumer categories. Critical consumers (like DLQ processor)
 /// get their own pools that aren't affected by traffic in other pools.
 /// </summary>
-public class BulkheadManager : IAsyncDisposable
+internal class BulkheadManager : IAsyncDisposable
 {
     private readonly ConcurrentDictionary<string, (ConcurrencyLimiter Limiter, ResiliencePipeline Pipeline)> _pools = new();
     private readonly BulkheadConfiguration _config;

@@ -9,7 +9,7 @@ namespace FlySwattr.NATS.Hosting.Middleware;
 /// Logs message handling start, completion, and duration for observability.
 /// </summary>
 /// <typeparam name="T">The type of message being processed.</typeparam>
-public partial class LoggingMiddleware<T> : IConsumerMiddleware<T>
+internal partial class LoggingMiddleware<T> : IConsumerMiddleware<T>
 {
     private readonly ILogger _logger;
 

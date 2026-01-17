@@ -11,7 +11,7 @@ namespace FlySwattr.NATS.Resilience.Decorators;
 /// Decorator that wraps IJetStreamPublisher with resilience policies (circuit breaker, retry).
 /// Uses HierarchicalResilienceBuilder to obtain consumer-level circuit breakers layered on top of a global pipeline.
 /// </summary>
-public class ResilientJetStreamPublisher : IJetStreamPublisher
+internal class ResilientJetStreamPublisher : IJetStreamPublisher
 {
     private readonly IJetStreamPublisher _inner;
     private readonly ResiliencePipeline _compositePipeline;

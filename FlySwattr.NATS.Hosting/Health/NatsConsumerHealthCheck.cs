@@ -6,7 +6,7 @@ namespace FlySwattr.NATS.Hosting.Health;
 /// <summary>
 /// Health check that detects "zombie" consumers where the consume loop has silently exited.
 /// </summary>
-public class NatsConsumerHealthCheck : IHealthCheck
+internal class NatsConsumerHealthCheck : IHealthCheck
 {
     private readonly IConsumerHealthMetrics _metrics;
     private readonly NatsConsumerHealthCheckOptions _options;

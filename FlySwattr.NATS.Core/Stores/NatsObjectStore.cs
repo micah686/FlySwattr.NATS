@@ -8,7 +8,7 @@ using NATS.Client.ObjectStore.Models;
 
 namespace FlySwattr.NATS.Core.Stores;
 
-public class NatsObjectStore : IObjectStore, IAsyncDisposable
+internal class NatsObjectStore : IObjectStore, IAsyncDisposable
 {
     private readonly INatsObjContext _objContext;
     private readonly string _bucket;
