@@ -29,6 +29,7 @@ var host = builder.Build();
 var messageBus = host.Services.GetRequiredService<IMessageBus>();
 var jsConsumer = host.Services.GetRequiredService<IJetStreamConsumer>();
 var topologyManager = host.Services.GetRequiredService<ITopologyManager>();
+var dlqStore = host.Services.GetRequiredService<IDlqStore>();
 var random = new Random();
 
 // Ensure DLQ KV bucket exists for advisory handler to store entries
@@ -140,9 +141,22 @@ _ = jsConsumer.ConsumeAsync<OrderPlacedEvent>(
         if (ctx.Headers.Headers.TryGetValue("x-poison", out var poisonValue) && poisonValue == "true")
         {
             AnsiConsole.MarkupLine("[red]  ⚠ POISON MESSAGE DETECTED![/]");
-            AnsiConsole.MarkupLine($"  [red]Delivery attempt {ctx.NumDelivered} - calling Term to trigger DLQ[/]");
+            AnsiConsole.MarkupLine($"  [red]Delivery attempt {ctx.NumDelivered} - storing to DLQ and terminating[/]");
             
-            // Terminate the message (don't redeliver, send to DLQ)
+            // Store DLQ entry before terminating (TermAsync doesn't trigger server advisory)
+            await dlqStore.StoreAsync(new DlqMessageEntry
+            {
+                Id = $"ORDERS_STREAM.orders-consumer.{ctx.Sequence}",
+                OriginalStream = "ORDERS_STREAM",
+                OriginalConsumer = "orders-consumer",
+                OriginalSubject = ctx.Subject,
+                OriginalSequence = ctx.Sequence,
+                DeliveryCount = (int)ctx.NumDelivered,
+                StoredAt = DateTimeOffset.UtcNow,
+                ErrorReason = "Poison message detected via x-poison header",
+                Status = DlqMessageStatus.Pending
+            });
+            
             await ctx.TermAsync();
             Console.WriteLine();
             return;
@@ -155,7 +169,22 @@ _ = jsConsumer.ConsumeAsync<OrderPlacedEvent>(
             
             if (ctx.NumDelivered >= 3)
             {
-                AnsiConsole.MarkupLine("[red]  Max deliveries reached - calling Term to trigger DLQ[/]");
+                AnsiConsole.MarkupLine("[red]  Max deliveries reached - storing to DLQ and terminating[/]");
+                
+                // Store DLQ entry before terminating (TermAsync doesn't trigger server advisory)
+                await dlqStore.StoreAsync(new DlqMessageEntry
+                {
+                    Id = $"ORDERS_STREAM.orders-consumer.{ctx.Sequence}",
+                    OriginalStream = "ORDERS_STREAM",
+                    OriginalConsumer = "orders-consumer",
+                    OriginalSubject = ctx.Subject,
+                    OriginalSequence = ctx.Sequence,
+                    DeliveryCount = (int)ctx.NumDelivered,
+                    StoredAt = DateTimeOffset.UtcNow,
+                    ErrorReason = $"Invalid SKU validation failed: {ctx.Message.Sku}",
+                    Status = DlqMessageStatus.Pending
+                });
+                
                 await ctx.TermAsync();
             }
             else
