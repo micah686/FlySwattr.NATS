@@ -194,6 +194,10 @@ public static class ServiceCollectionExtensions
         // Register default logging handler (uses TryAddEnumerable to allow multiple handlers)
         services.TryAddEnumerable(
             ServiceDescriptor.Singleton<IDlqAdvisoryHandler, LoggingDlqAdvisoryHandler>());
+        
+        // Register DLQ store handler to persist entries for remediation UI
+        services.TryAddEnumerable(
+            ServiceDescriptor.Singleton<IDlqAdvisoryHandler, DlqStoreAdvisoryHandler>());
 
         // Register the background service
         services.AddHostedService<DlqAdvisoryListenerService>();

@@ -1,5 +1,6 @@
 ﻿using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Extensions;
+using FlySwattr.NATS.Hosting.Extensions;
 using FlySwattr.NATS.Topology.Extensions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -21,10 +22,17 @@ builder.Services.AddEnterpriseNATSMessaging(options =>
 // Register Orders topology for auto-provisioning
 builder.Services.AddNatsTopologySource<OrdersTopology>();
 
+// Enable DLQ advisory monitoring (listens for MAX_DELIVERIES server events)
+builder.Services.AddNatsDlqAdvisoryListener();
+
 var host = builder.Build();
 var messageBus = host.Services.GetRequiredService<IMessageBus>();
 var jsConsumer = host.Services.GetRequiredService<IJetStreamConsumer>();
+var topologyManager = host.Services.GetRequiredService<ITopologyManager>();
 var random = new Random();
+
+// Ensure DLQ KV bucket exists for advisory handler to store entries
+await topologyManager.EnsureBucketAsync(BucketName.From("fs-dlq-entries"), StorageType.File);
 
 AnsiConsole.MarkupLine("[green]Connected to NATS. Setting up subscriptions...[/]\n");
 

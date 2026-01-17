@@ -1,4 +1,3 @@
-using System.Buffers;
 using System.Collections.Concurrent;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Abstractions.Exceptions;
@@ -41,13 +40,6 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
 
     public async Task PublishAsync<T>(string subject, T message, string? messageId, CancellationToken cancellationToken = default)
     {
-        var headers = new NatsHeaders();
-        headers.Add("Content-Type", _serializer.GetContentType<T>());
-
-        var bufferWriter = new ArrayBufferWriter<byte>();
-        _serializer.Serialize(bufferWriter, message);
-        var payload = bufferWriter.WrittenMemory;
-
         // Require a caller-provided message ID for true application-level idempotency.
         // Auto-generating GUIDs would defeat JetStream's deduplication on retries.
         if (string.IsNullOrWhiteSpace(messageId))
@@ -57,12 +49,18 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
                 "Use a business-key-derived ID (e.g., 'Order123-Created') to enable proper de-duplication across retries.",
                 nameof(messageId));
         }
-        
-        headers["Nats-Msg-Id"] = messageId;
 
+        var headers = new NatsHeaders
+        {
+            ["Content-Type"] = _serializer.GetContentType<T>(),
+            ["Nats-Msg-Id"] = messageId
+        };
+
+        // Pass the message directly to NATS.Net - let the configured MemoryPackSerializerRegistry
+        // handle serialization. Do NOT pre-serialize here as that causes double-serialization.
         var ack = await _jsContext.PublishAsync(
             subject,
-            payload,
+            message,
             headers: headers,
             opts: new NatsJSPubOpts { MsgId = messageId }, 
             cancellationToken: cancellationToken);
