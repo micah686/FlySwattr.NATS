@@ -9,7 +9,7 @@ namespace FlySwattr.NATS.Caching.Stores;
 /// A decorator around <see cref="IKeyValueStore"/> that adds L1 caching via FusionCache.
 /// Features include fail-safe (stale data on NATS outage), soft/hard timeouts, and stampede protection.
 /// </summary>
-public class CachingKeyValueStore : IKeyValueStore
+internal class CachingKeyValueStore : IKeyValueStore
 {
     private readonly IKeyValueStore _inner;
     private readonly IFusionCache _cache;

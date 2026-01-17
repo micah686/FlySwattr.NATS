@@ -37,7 +37,7 @@ public class ConsumerCircuitBreakerOptions
 /// Each consumer gets its own circuit breaker that trips independently from others, preventing cascade failures.
 /// Uses a ConcurrentDictionary with time-based eviction to prevent memory leaks from ephemeral consumers.
 /// </summary>
-public class HierarchicalResilienceBuilder : IAsyncDisposable
+internal class HierarchicalResilienceBuilder : IAsyncDisposable
 {
     private readonly ConcurrentDictionary<string, (ResiliencePipeline Pipeline, DateTime LastAccess)> _pipelineCache = new();
     private readonly ILogger<HierarchicalResilienceBuilder> _logger;

@@ -8,7 +8,7 @@ namespace FlySwattr.NATS.Core;
 /// NATS Key-Value backed implementation of <see cref="IDlqStore"/>.
 /// Stores DLQ entries in a dedicated KV bucket for persistence and querying.
 /// </summary>
-public class NatsDlqStore : IDlqStore
+internal class NatsDlqStore : IDlqStore
 {
     private const string BucketName = "fs-dlq-entries";
     

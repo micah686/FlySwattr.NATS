@@ -17,7 +17,7 @@ namespace FlySwattr.NATS.Hosting.Services;
 /// This service provides the "Control Plane" active monitoring capability, giving operations teams
 /// visibility into server-side delivery failures that would otherwise go unnoticed.
 /// </remarks>
-public partial class DlqAdvisoryListenerService : BackgroundService
+internal partial class DlqAdvisoryListenerService : BackgroundService
 {
     private readonly INatsConnection _natsConnection;
     private readonly IEnumerable<IDlqAdvisoryHandler> _handlers;

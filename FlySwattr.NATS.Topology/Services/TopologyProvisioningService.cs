@@ -19,7 +19,7 @@ namespace FlySwattr.NATS.Topology.Services;
 /// 
 /// Signals <see cref="ITopologyReadySignal"/> when provisioning completes to coordinate dependent services.
 /// </summary>
-public class TopologyProvisioningService : IHostedService
+internal class TopologyProvisioningService : IHostedService
 {
     private readonly IEnumerable<ITopologySource> _topologySources;
     private readonly ITopologyManager _topologyManager;

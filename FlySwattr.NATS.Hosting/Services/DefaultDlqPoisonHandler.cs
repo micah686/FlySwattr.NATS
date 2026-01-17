@@ -14,7 +14,7 @@ namespace FlySwattr.NATS.Hosting.Services;
 /// by offloading to a Dead Letter Queue and optionally notifying via IDlqNotificationService.
 /// </summary>
 /// <typeparam name="T">The message payload type.</typeparam>
-public partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
+internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
 {
     private const int MaxDlqPayloadSize = 1024 * 1024; // 1MB - NATS default max payload
     private const int InitialBufferSize = 4 * 1024;

@@ -7,7 +7,7 @@ namespace FlySwattr.NATS.Topology.Services;
 /// Implementation of <see cref="ITopologyReadySignal"/> using TaskCompletionSource.
 /// Provides thread-safe coordination for startup sequencing.
 /// </summary>
-public class TopologyReadySignal : ITopologyReadySignal
+internal class TopologyReadySignal : ITopologyReadySignal
 {
     private readonly TaskCompletionSource<bool> _tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly ILogger<TopologyReadySignal> _logger;

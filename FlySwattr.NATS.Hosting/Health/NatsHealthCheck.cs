@@ -4,7 +4,7 @@ using NATS.Client.JetStream;
 
 namespace FlySwattr.NATS.Hosting.Health;
 
-public class NatsHealthCheck : IHealthCheck
+internal class NatsHealthCheck : IHealthCheck
 {
     private readonly INatsConnection _connection;
     private readonly INatsJSContext _jsContext;

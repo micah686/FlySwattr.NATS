@@ -6,7 +6,7 @@ namespace FlySwattr.NATS.Hosting.Services;
 /// <summary>
 /// Default implementation of <see cref="IDlqAdvisoryHandler"/> that logs advisory events.
 /// </summary>
-public partial class LoggingDlqAdvisoryHandler : IDlqAdvisoryHandler
+internal partial class LoggingDlqAdvisoryHandler : IDlqAdvisoryHandler
 {
     private readonly ILogger<LoggingDlqAdvisoryHandler> _logger;
 

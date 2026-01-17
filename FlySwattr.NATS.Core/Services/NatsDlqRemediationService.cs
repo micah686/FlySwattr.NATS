@@ -8,7 +8,7 @@ namespace FlySwattr.NATS.Core.Services;
 /// NATS-backed implementation of <see cref="IDlqRemediationService"/>.
 /// Provides operations to inspect, replay, archive, and delete DLQ messages.
 /// </summary>
-public partial class NatsDlqRemediationService : IDlqRemediationService
+internal partial class NatsDlqRemediationService : IDlqRemediationService
 {
     private readonly IDlqStore _dlqStore;
     private readonly IJetStreamPublisher _publisher;

@@ -9,7 +9,7 @@ namespace FlySwattr.NATS.Core.Decorators;
 /// Decorator that implements the consumer side of the Claim Check pattern.
 /// Automatically detects and retrieves large payloads that were offloaded to IObjectStore.
 /// </summary>
-public class OffloadingJetStreamConsumer : IJetStreamConsumer
+internal class OffloadingJetStreamConsumer : IJetStreamConsumer
 {
     private readonly IJetStreamConsumer _inner;
     private readonly IObjectStore _objectStore;

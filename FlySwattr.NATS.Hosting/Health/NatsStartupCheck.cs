@@ -4,7 +4,7 @@ using NATS.Client.Core;
 
 namespace FlySwattr.NATS.Hosting.Health;
 
-public class NatsStartupCheck : IHostedService
+internal class NatsStartupCheck : IHostedService
 {
     private readonly INatsConnection _connection;
     private readonly ILogger<NatsStartupCheck> _logger;

@@ -8,7 +8,7 @@ using NATS.Client.ObjectStore;
 
 namespace FlySwattr.NATS.Topology.Managers;
 
-public class NatsTopologyManager : ITopologyManager
+internal class NatsTopologyManager : ITopologyManager
 {
     private readonly INatsJSContext _jsContext;
     private readonly INatsKVContext _kvContext;

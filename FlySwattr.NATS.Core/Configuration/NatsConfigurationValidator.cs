@@ -2,7 +2,7 @@ using FluentValidation;
 
 namespace FlySwattr.NATS.Core.Configuration;
 
-public class NatsConfigurationValidator : AbstractValidator<NatsConfiguration>
+internal class NatsConfigurationValidator : AbstractValidator<NatsConfiguration>
 {
     public NatsConfigurationValidator()
     {

@@ -5,7 +5,7 @@ namespace FlySwattr.NATS.Hosting.Health;
 /// <summary>
 /// Thread-safe singleton service that maintains heartbeat timestamps for all registered consumers.
 /// </summary>
-public class NatsConsumerHealthMetrics : IConsumerHealthMetrics
+internal class NatsConsumerHealthMetrics : IConsumerHealthMetrics
 {
     private readonly ConcurrentDictionary<ConsumerKey, MutableConsumerState> _consumers = new();
     private readonly TimeProvider _timeProvider;

@@ -295,7 +295,7 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
     }
 }
 
-public class BasicNatsConsumerService<T> : BackgroundService
+internal class BasicNatsConsumerService<T> : BackgroundService
 {
     private readonly INatsJSConsumer _consumer;
     private readonly string _stream;
@@ -372,7 +372,7 @@ public class BasicNatsConsumerService<T> : BackgroundService
     }
 }
 
-public class JsMessageContext<T> : IJsMessageContext<T>
+internal class JsMessageContext<T> : IJsMessageContext<T>
 {
     private readonly INatsJSMsg<T> _msg;
 
