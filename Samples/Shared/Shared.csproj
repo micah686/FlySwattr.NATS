@@ -10,4 +10,8 @@
         <PackageReference Include="MemoryPack" Version="1.21.4" />
     </ItemGroup>
 
+    <ItemGroup>
+        <ProjectReference Include="..\..\FlySwattr.NATS.Abstractions\FlySwattr.NATS.Abstractions.csproj" />
+    </ItemGroup>
+
 </Project>

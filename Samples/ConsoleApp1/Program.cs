@@ -1,7 +1,10 @@
 ﻿using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Extensions;
+using FlySwattr.NATS.Topology.Extensions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using NATS.Client.JetStream;
+using NATS.Client.JetStream.Models;
 using Shared;
 using Spectre.Console;
 
@@ -12,7 +15,11 @@ builder.Services.AddEnterpriseNATSMessaging(options =>
     options.Core.Url = "nats://localhost:4222";
     options.EnableCaching = true;
     options.EnableResilience = true;
+    options.EnableTopologyProvisioning = true;
 });
+
+// Register Orders topology for auto-provisioning
+builder.Services.AddNatsTopologySource<OrdersTopology>();
 
 var host = builder.Build();
 
@@ -21,6 +28,10 @@ var messageBus = host.Services.GetRequiredService<IMessageBus>();
 var topologyManager = host.Services.GetRequiredService<ITopologyManager>();
 var kvStoreFactory = host.Services.GetRequiredService<Func<string, IKeyValueStore>>();
 var objectStoreFactory = host.Services.GetRequiredService<Func<string, IObjectStore>>();
+var jsPublisher = host.Services.GetRequiredService<IJetStreamPublisher>();
+var jsConsumer = host.Services.GetRequiredService<IJetStreamConsumer>();
+var dlqService = host.Services.GetRequiredService<IDlqRemediationService>();
+var jsContext = host.Services.GetRequiredService<INatsJSContext>();
 
 // Constants
 const string KvBucket = "samples_kv";
@@ -36,6 +47,27 @@ await AnsiConsole.Status()
         
         ctx.Status("Creating Object Store bucket...");
         await topologyManager.EnsureObjectStoreAsync(BucketName.From(ObjectBucket), StorageType.Memory);
+        
+        ctx.Status("Creating DLQ entries bucket...");
+        await topologyManager.EnsureBucketAsync(BucketName.From("fs-dlq-entries"), StorageType.File);
+        
+        ctx.Status("Ensuring ORDERS_STREAM exists...");
+        await topologyManager.EnsureStreamAsync(new StreamSpec
+        {
+            Name = StreamName.From("ORDERS_STREAM"),
+            Subjects = ["orders.>"],
+            StorageType = StorageType.File,
+            RetentionPolicy = StreamRetention.Limits
+        });
+        
+        ctx.Status("Ensuring DLQ_STREAM exists...");
+        await topologyManager.EnsureStreamAsync(new StreamSpec
+        {
+            Name = StreamName.From("DLQ_STREAM"),
+            Subjects = ["dlq.>"],
+            StorageType = StorageType.File,
+            RetentionPolicy = StreamRetention.Limits
+        });
     });
 
 // Get store instances
@@ -65,7 +97,8 @@ while (running)
                 "4. Storage: Key-Value Store",
                 "5. Storage: Object Store",
                 "6. Place Order with Headers",
-                "7. Exit"));
+                "7. JetStream Operations",
+                "8. Exit"));
 
     switch (choice)
     {
@@ -87,7 +120,10 @@ while (running)
         case "6. Place Order with Headers":
             await PlaceOrderWithHeadersAsync();
             break;
-        case "7. Exit":
+        case "7. JetStream Operations":
+            await JetStreamMenuAsync();
+            break;
+        case "8. Exit":
             running = false;
             break;
     }
@@ -243,7 +279,7 @@ async Task KvListKeysAsync()
         .AddColumn("Key");
 
     var hasKeys = false;
-    await foreach (var key in kvStore.GetKeysAsync([">"])) 
+    await foreach (var key in kvStore.GetKeysAsync([">"]))
     {
         table.AddRow(key);
         hasKeys = true;
@@ -478,4 +514,392 @@ async Task PlaceOrderWithHeadersAsync()
         AnsiConsole.Write(table);
     }
     Console.WriteLine();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// JetStream Operations Menu
+// ─────────────────────────────────────────────────────────────────────────────
+
+async Task JetStreamMenuAsync()
+{
+    var inJsMenu = true;
+    while (inJsMenu && running)
+    {
+        var choice = AnsiConsole.Prompt(
+            new SelectionPrompt<string>()
+                .Title("[blue]JetStream Operations[/] - Select an operation:")
+                .AddChoices(
+                    "1. Infrastructure: List Streams",
+                    "2. Infrastructure: Inspect Stream",
+                    "3. Infrastructure: Purge Stream",
+                    "4. Publish with Message ID (Idempotent)",
+                    "5. DLQ Manager",
+                    "← Back to Main Menu"));
+
+        switch (choice)
+        {
+            case "1. Infrastructure: List Streams":
+                await JsListStreamsAsync();
+                break;
+            case "2. Infrastructure: Inspect Stream":
+                await JsInspectStreamAsync();
+                break;
+            case "3. Infrastructure: Purge Stream":
+                await JsPurgeStreamAsync();
+                break;
+            case "4. Publish with Message ID (Idempotent)":
+                await JsPublishWithIdAsync();
+                break;
+            case "5. DLQ Manager":
+                await DlqManagerMenuAsync();
+                break;
+            case "← Back to Main Menu":
+                inJsMenu = false;
+                break;
+        }
+    }
+}
+
+async Task JsListStreamsAsync()
+{
+    AnsiConsole.MarkupLine("[yellow]Listing all JetStream streams...[/]");
+    
+    var table = new Table()
+        .Border(TableBorder.Rounded)
+        .AddColumn("Stream Name")
+        .AddColumn("Messages")
+        .AddColumn("Bytes")
+        .AddColumn("Subjects");
+
+    var hasStreams = false;
+    await foreach (var streamName in jsContext.ListStreamNamesAsync())
+    {
+        hasStreams = true;
+        try
+        {
+            var stream = await jsContext.GetStreamAsync(streamName);
+            var info = stream.Info;
+            var subjects = string.Join(", ", info.Config.Subjects ?? []);
+            table.AddRow(
+                $"[cyan]{streamName}[/]",
+                info.State.Messages.ToString("N0"),
+                $"{info.State.Bytes:N0}",
+                subjects);
+        }
+        catch
+        {
+            table.AddRow($"[cyan]{streamName}[/]", "[dim]?[/]", "[dim]?[/]", "[dim]?[/]");
+        }
+    }
+    
+    if (hasStreams)
+    {
+        AnsiConsole.Write(table);
+    }
+    else
+    {
+        AnsiConsole.MarkupLine("[dim]No streams found.[/]");
+    }
+    Console.WriteLine();
+}
+
+async Task JsInspectStreamAsync()
+{
+    var streamName = AnsiConsole.Ask<string>("Enter [cyan]stream name[/] (e.g., ORDERS_STREAM):", "ORDERS_STREAM");
+    
+    try
+    {
+        var stream = await jsContext.GetStreamAsync(streamName);
+        var info = stream.Info;
+        
+        AnsiConsole.Write(new Rule($"[cyan]{streamName}[/] Configuration").LeftJustified());
+        
+        var configTable = new Table()
+            .Border(TableBorder.Rounded)
+            .AddColumn("Property")
+            .AddColumn("Value");
+        
+        configTable.AddRow("Subjects", string.Join(", ", info.Config.Subjects ?? []));
+        configTable.AddRow("Storage", info.Config.Storage.ToString());
+        configTable.AddRow("Retention", info.Config.Retention.ToString());
+        configTable.AddRow("Replicas", info.Config.NumReplicas.ToString());
+        configTable.AddRow("Max Age", info.Config.MaxAge == TimeSpan.Zero ? "Unlimited" : info.Config.MaxAge.ToString());
+        configTable.AddRow("Max Bytes", info.Config.MaxBytes == 0 ? "Unlimited" : info.Config.MaxBytes.ToString("N0"));
+        
+        AnsiConsole.Write(configTable);
+        
+        AnsiConsole.Write(new Rule($"[cyan]{streamName}[/] State").LeftJustified());
+        
+        var stateTable = new Table()
+            .Border(TableBorder.Rounded)
+            .AddColumn("Property")
+            .AddColumn("Value");
+        
+        stateTable.AddRow("Messages", info.State.Messages.ToString("N0"));
+        stateTable.AddRow("Bytes", info.State.Bytes.ToString("N0"));
+        stateTable.AddRow("First Sequence", info.State.FirstSeq.ToString("N0"));
+        stateTable.AddRow("Last Sequence", info.State.LastSeq.ToString("N0"));
+        stateTable.AddRow("Consumer Count", info.State.ConsumerCount.ToString());
+        
+        AnsiConsole.Write(stateTable);
+    }
+    catch (Exception ex)
+    {
+        AnsiConsole.MarkupLine($"[red]Error inspecting stream: {ex.Message}[/]");
+    }
+    Console.WriteLine();
+}
+
+async Task JsPurgeStreamAsync()
+{
+    var streamName = AnsiConsole.Ask<string>("Enter [cyan]stream name[/] to purge:", "ORDERS_STREAM");
+    
+    if (!AnsiConsole.Confirm($"[red]Are you sure you want to purge ALL messages from {streamName}?[/]", false))
+    {
+        AnsiConsole.MarkupLine("[dim]Purge cancelled.[/]\n");
+        return;
+    }
+    
+    try
+    {
+        var stream = await jsContext.GetStreamAsync(streamName);
+        var response = await stream.PurgeAsync(new StreamPurgeRequest());
+        
+        AnsiConsole.MarkupLine($"[green]✓ Purged {response.Purged} messages from {streamName}[/]\n");
+    }
+    catch (Exception ex)
+    {
+        AnsiConsole.MarkupLine($"[red]Error purging stream: {ex.Message}[/]\n");
+    }
+}
+
+async Task JsPublishWithIdAsync()
+{
+    var orderId = Guid.NewGuid();
+    var sku = $"SKU-{Random.Shared.Next(100, 999)}";
+    
+    var defaultMsgId = $"order-{orderId}";
+    var messageId = AnsiConsole.Ask<string>($"Enter [cyan]message ID[/] for deduplication:", defaultMsgId);
+    
+    var orderEvent = new OrderPlacedEvent(orderId, sku);
+    
+    await jsPublisher.PublishAsync("orders.placed", orderEvent, messageId);
+    
+    AnsiConsole.MarkupLine($"[green]✓ Published to JetStream with Message ID[/]");
+    AnsiConsole.MarkupLine($"  MessageId: [yellow]{messageId}[/]");
+    AnsiConsole.MarkupLine($"  OrderId: [cyan]{orderId}[/]");
+    AnsiConsole.MarkupLine($"  SKU: [cyan]{sku}[/]");
+    
+    if (AnsiConsole.Confirm("Publish again with [yellow]same Message ID[/] to test deduplication?", true))
+    {
+        var newOrder = new OrderPlacedEvent(Guid.NewGuid(), $"SKU-{Random.Shared.Next(100, 999)}");
+        try
+        {
+            await jsPublisher.PublishAsync("orders.placed", newOrder, messageId);
+            AnsiConsole.MarkupLine($"[yellow]Published duplicate with same Message ID: {messageId}[/]");
+            AnsiConsole.MarkupLine("[dim]Check stream message count - it should NOT have increased due to deduplication![/]");
+        }
+        catch (NATS.Client.JetStream.NatsJSDuplicateMessageException)
+        {
+            AnsiConsole.MarkupLine($"[green]✓ DEDUPLICATION CONFIRMED![/] NATS rejected the duplicate message.");
+            AnsiConsole.MarkupLine($"  [dim]Message ID {messageId} was already stored in the stream.[/]");
+        }
+    }
+    Console.WriteLine();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DLQ Manager Menu
+// ─────────────────────────────────────────────────────────────────────────────
+
+async Task DlqManagerMenuAsync()
+{
+    var inDlqMenu = true;
+    while (inDlqMenu && running)
+    {
+        var choice = AnsiConsole.Prompt(
+            new SelectionPrompt<string>()
+                .Title("[red]DLQ Manager[/] - Select an operation:")
+                .AddChoices(
+                    "1. Simulate Poison Message",
+                    "2. List DLQ Entries",
+                    "3. Replay Message",
+                    "4. Archive Message",
+                    "5. Delete Message",
+                    "← Back to JetStream Menu"));
+
+        switch (choice)
+        {
+            case "1. Simulate Poison Message":
+                await DlqSimulatePoisonAsync();
+                break;
+            case "2. List DLQ Entries":
+                await DlqListAsync();
+                break;
+            case "3. Replay Message":
+                await DlqReplayAsync();
+                break;
+            case "4. Archive Message":
+                await DlqArchiveAsync();
+                break;
+            case "5. Delete Message":
+                await DlqDeleteAsync();
+                break;
+            case "← Back to JetStream Menu":
+                inDlqMenu = false;
+                break;
+        }
+    }
+}
+
+async Task DlqSimulatePoisonAsync()
+{
+    var orderId = Guid.NewGuid();
+    var sku = "POISON-SKU";
+    
+    var orderEvent = new OrderPlacedEvent(orderId, sku);
+    var headers = new MessageHeaders(new Dictionary<string, string>
+    {
+        ["x-poison"] = "true",
+        ["x-simulate-failure"] = "validation-error"
+    });
+    
+    await jsPublisher.PublishAsync("orders.placed", orderEvent, $"poison-{orderId}");
+    await messageBus.PublishAsync("orders.placed", orderEvent, headers);
+    
+    AnsiConsole.MarkupLine($"[red]⚠ Published POISON message[/]");
+    AnsiConsole.MarkupLine($"  OrderId: [cyan]{orderId}[/]");
+    AnsiConsole.MarkupLine($"  SKU: [yellow]{sku}[/]");
+    AnsiConsole.MarkupLine($"  Headers: [dim]x-poison=true, x-simulate-failure=validation-error[/]");
+    AnsiConsole.MarkupLine("[dim]This message will fail validation in ConsoleApp2 and be routed to DLQ after max retries.[/]\n");
+}
+
+async Task DlqListAsync()
+{
+    AnsiConsole.MarkupLine("[yellow]Fetching DLQ entries...[/]");
+    
+    try
+    {
+        var entries = await dlqService.ListAsync(limit: 50);
+        
+        if (entries.Count == 0)
+        {
+            AnsiConsole.MarkupLine("[dim]No entries in DLQ.[/]\n");
+            return;
+        }
+        
+        var table = new Table()
+            .Border(TableBorder.Rounded)
+            .AddColumn("ID")
+            .AddColumn("Stream")
+            .AddColumn("Consumer")
+            .AddColumn("Subject")
+            .AddColumn("Deliveries")
+            .AddColumn("Status")
+            .AddColumn("Stored At");
+
+        foreach (var entry in entries)
+        {
+            var statusColor = entry.Status switch
+            {
+                DlqMessageStatus.Pending => "yellow",
+                DlqMessageStatus.Processing => "blue",
+                DlqMessageStatus.Resolved => "green",
+                DlqMessageStatus.Archived => "dim",
+                _ => "white"
+            };
+            
+            table.AddRow(
+                $"[cyan]{entry.Id[..Math.Min(12, entry.Id.Length)]}...[/]",
+                entry.OriginalStream,
+                entry.OriginalConsumer,
+                entry.OriginalSubject,
+                entry.DeliveryCount.ToString(),
+                $"[{statusColor}]{entry.Status}[/]",
+                entry.StoredAt.ToString("g"));
+        }
+        
+        AnsiConsole.Write(table);
+        AnsiConsole.MarkupLine($"[dim]Total: {entries.Count} entries[/]\n");
+    }
+    catch (Exception ex)
+    {
+        AnsiConsole.MarkupLine($"[red]Error listing DLQ: {ex.Message}[/]\n");
+    }
+}
+
+async Task DlqReplayAsync()
+{
+    var id = AnsiConsole.Ask<string>("Enter [cyan]DLQ entry ID[/] to replay:");
+    
+    try
+    {
+        var result = await dlqService.ReplayAsync(id);
+        
+        if (result.Success)
+        {
+            AnsiConsole.MarkupLine($"[green]✓ Successfully replayed message {id}[/]\n");
+        }
+        else
+        {
+            AnsiConsole.MarkupLine($"[red]✗ Replay failed: {result.ErrorMessage}[/]\n");
+        }
+    }
+    catch (Exception ex)
+    {
+        AnsiConsole.MarkupLine($"[red]Error replaying message: {ex.Message}[/]\n");
+    }
+}
+
+async Task DlqArchiveAsync()
+{
+    var id = AnsiConsole.Ask<string>("Enter [cyan]DLQ entry ID[/] to archive:");
+    var reason = AnsiConsole.Ask<string>("Enter [cyan]archive reason[/] (optional):", "");
+    
+    try
+    {
+        var result = await dlqService.ArchiveAsync(id, string.IsNullOrEmpty(reason) ? null : reason);
+        
+        if (result.Success)
+        {
+            AnsiConsole.MarkupLine($"[green]✓ Successfully archived message {id}[/]\n");
+        }
+        else
+        {
+            AnsiConsole.MarkupLine($"[red]✗ Archive failed: {result.ErrorMessage}[/]\n");
+        }
+    }
+    catch (Exception ex)
+    {
+        AnsiConsole.MarkupLine($"[red]Error archiving message: {ex.Message}[/]\n");
+    }
+}
+
+async Task DlqDeleteAsync()
+{
+    var id = AnsiConsole.Ask<string>("Enter [cyan]DLQ entry ID[/] to delete:");
+    
+    if (!AnsiConsole.Confirm($"[red]Are you sure you want to permanently delete {id}?[/]", false))
+    {
+        AnsiConsole.MarkupLine("[dim]Delete cancelled.[/]\n");
+        return;
+    }
+    
+    try
+    {
+        var result = await dlqService.DeleteAsync(id);
+        
+        if (result.Success)
+        {
+            AnsiConsole.MarkupLine($"[green]✓ Successfully deleted message {id}[/]\n");
+        }
+        else
+        {
+            AnsiConsole.MarkupLine($"[red]✗ Delete failed: {result.ErrorMessage}[/]\n");
+        }
+    }
+    catch (Exception ex)
+    {
+        AnsiConsole.MarkupLine($"[red]Error deleting message: {ex.Message}[/]\n");
+    }
 }
