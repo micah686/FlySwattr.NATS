@@ -78,6 +78,7 @@ public static class ServiceCollectionExtensions
             coreOpts.ReconnectWait = options.Core.ReconnectWait;
             coreOpts.MaxReconnect = options.Core.MaxReconnect;
             coreOpts.MaxConcurrency = options.Core.MaxConcurrency;
+            coreOpts.MaxPayloadSize = options.Core.MaxPayloadSize;
         });
 
         // 2. Payload Offloading (Claim Check pattern)
@@ -132,7 +133,14 @@ public static class ServiceCollectionExtensions
         // Auto-provisioning is optional - requires ITopologySource registrations
         if (options.EnableTopologyProvisioning)
         {
-            services.AddNatsTopologyProvisioning();
+            services.AddNatsTopologyProvisioning(startupOpts =>
+            {
+                startupOpts.MaxRetryAttempts = options.TopologyStartup.MaxRetryAttempts;
+                startupOpts.InitialRetryDelay = options.TopologyStartup.InitialRetryDelay;
+                startupOpts.MaxRetryDelay = options.TopologyStartup.MaxRetryDelay;
+                startupOpts.ConnectionTimeout = options.TopologyStartup.ConnectionTimeout;
+                startupOpts.TotalStartupTimeout = options.TopologyStartup.TotalStartupTimeout;
+            });
         }
 
         // 6. Distributed Lock

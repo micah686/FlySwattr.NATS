@@ -4,21 +4,22 @@ using FlySwattr.NATS.Core;
 using FlySwattr.NATS.Core.Serializers;
 using FlySwattr.NATS.Hosting.Services;
 using IntegrationTests.Infrastructure;
+using MemoryPack;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using NATS.Client.Core;
 using NATS.Client.JetStream;
 using NATS.Client.JetStream.Models;
-using NATS.Client.Serializers.Json;
 using Shouldly;
 using TUnit.Core;
 
 namespace IntegrationTests.Hosting;
 
 [Property("nTag", "Hosting")]
-public class NatsConsumerBackgroundServiceTests
+public partial class NatsConsumerBackgroundServiceTests
 {
-    public record TestMessage(int Id, string Content);
+    [MemoryPackable]
+    public partial record TestMessage(int Id, string Content);
 
     [Test]
     public async Task BackgroundService_ShouldHandlePoisonMessage_AfterMaxRetries()
@@ -26,7 +27,11 @@ public class NatsConsumerBackgroundServiceTests
         await using var fixture = new NatsContainerFixture();
         await fixture.InitializeAsync();
 
-        var opts = new NatsOpts { Url = fixture.ConnectionString, SerializerRegistry = NatsJsonSerializerRegistry.Default };
+        var opts = new NatsOpts
+        {
+            Url = fixture.ConnectionString,
+            SerializerRegistry = HybridSerializerRegistry.Default
+        };
         await using var conn = new NatsConnection(opts);
         await conn.ConnectAsync();
         var js = new NatsJSContext(conn);
@@ -108,27 +113,29 @@ public class NatsConsumerBackgroundServiceTests
         bool handlerDone = handlerCountdown.Wait(TimeSpan.FromSeconds(20));
         handlerDone.ShouldBeTrue($"Handler should be called {maxDeliver} times, but was called {maxDeliver - handlerCountdown.CurrentCount} times");
 
+        // Give the poison handler time to complete DLQ publish after final handler throw
+        await Task.Delay(2000);
+
         // 8. Wait/Poll for DLQ Message
         var dlqStreamInfo = await js.GetStreamAsync(dlqStreamName);
         Console.WriteLine($"[DEBUG] DLQ Stream Messages: {dlqStreamInfo.Info.State.Messages}");
 
-        var dlqConsumer = await js.CreateOrUpdateConsumerAsync(dlqStreamName, new ConsumerConfig("DlqWatcher") 
-        { 
-            AckPolicy = ConsumerConfigAckPolicy.Explicit 
+        var dlqConsumer = await js.CreateOrUpdateConsumerAsync(dlqStreamName, new ConsumerConfig("DlqWatcher")
+        {
+            AckPolicy = ConsumerConfigAckPolicy.Explicit
         });
 
-        // Try raw fetch
+        // Fetch DLQ message directly using MemoryPack (same serializer as the connection)
         var start = DateTime.UtcNow;
         DlqMessage? dlqMsg = null;
         while (DateTime.UtcNow - start < TimeSpan.FromSeconds(10))
         {
-            await foreach (var msg in dlqConsumer.FetchAsync<byte[]>(new NatsJSFetchOpts { MaxMsgs = 1, Expires = TimeSpan.FromSeconds(1) }))
+            await foreach (var msg in dlqConsumer.FetchAsync<DlqMessage>(new NatsJSFetchOpts { MaxMsgs = 1, Expires = TimeSpan.FromSeconds(1) }))
             {
                 if (msg.Data != null)
                 {
-                    var json = System.Text.Encoding.UTF8.GetString(msg.Data);
-                    Console.WriteLine($"[DEBUG] Raw DLQ Message: {json}");
-                    dlqMsg = System.Text.Json.JsonSerializer.Deserialize<DlqMessage>(msg.Data, new System.Text.Json.JsonSerializerOptions { PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase });
+                    Console.WriteLine($"[DEBUG] DLQ Message received: Stream={msg.Data.OriginalStream}, Consumer={msg.Data.OriginalConsumer}");
+                    dlqMsg = msg.Data;
                     await msg.AckAsync();
                     break;
                 }

@@ -3,7 +3,7 @@ using NATS.Client.Core;
 
 namespace FlySwattr.NATS.Core.Serializers;
 
-internal class MemoryPackSerializerRegistry : INatsSerializerRegistry
+public class MemoryPackSerializerRegistry : INatsSerializerRegistry
 {
     public INatsSerialize<T> GetSerializer<T>() => MemoryPackNatsSerializer<T>.Default;
     public INatsDeserialize<T> GetDeserializer<T>() => MemoryPackNatsSerializer<T>.Default;

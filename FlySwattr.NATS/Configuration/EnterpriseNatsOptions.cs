@@ -2,6 +2,7 @@ using FlySwattr.NATS.Caching.Configuration;
 using FlySwattr.NATS.Core.Configuration;
 using FlySwattr.NATS.Hosting.Health;
 using FlySwattr.NATS.Resilience.Configuration;
+using FlySwattr.NATS.Topology.Configuration;
 
 namespace FlySwattr.NATS.Configuration;
 
@@ -52,6 +53,13 @@ public class EnterpriseNatsOptions
     /// Consumer health check configuration for zombie detection.
     /// </summary>
     public NatsConsumerHealthCheckOptions HealthCheck { get; } = new();
+
+    /// <summary>
+    /// Topology startup configuration for "Cold Start" resilience.
+    /// Controls retry behavior when NATS is not immediately available during startup
+    /// (e.g., Kubernetes sidecar startup delays).
+    /// </summary>
+    public TopologyStartupOptions TopologyStartup { get; } = new();
 
     /// <summary>
     /// Object store bucket name for claim check payloads.

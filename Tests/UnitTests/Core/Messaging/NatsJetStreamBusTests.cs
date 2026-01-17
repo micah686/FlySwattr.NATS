@@ -72,31 +72,23 @@ public class NatsJetStreamBusTests : IAsyncDisposable
     [Test]
     public async Task PublishAsync_ShouldThrow_OnFailure()
     {
-        // Arrange
+        // Arrange - mock the generic PublishAsync<T> method that NatsJetStreamBus calls
+        // The actual call uses: _jsContext.PublishAsync(subject, message, headers: headers, opts: opts, cancellationToken)
         _jsContext.PublishAsync(
             Arg.Any<string>(),
-            Arg.Any<ReadOnlyMemory<byte>>(),
-            Arg.Any<INatsSerialize<ReadOnlyMemory<byte>>>(),
+            Arg.Any<TestMessage>(),
+            Arg.Any<INatsSerialize<TestMessage>>(),
             Arg.Any<NatsJSPubOpts>(),
             Arg.Any<NatsHeaders>(),
             Arg.Any<CancellationToken>()
-        ).Returns((Func<CallInfo, ValueTask<PubAckResponse>>)(async (info) =>
-        {
-            await Task.Yield();
-            throw new NatsNoRespondersException();
-        }));
+        ).ThrowsAsync(new NatsNoRespondersException());
 
         // Act & Assert
-        try 
-        {
-            await _bus.PublishAsync("test.subject", new { Data = "test" }, "msg-1");
-            Assert.Fail("Should have thrown exception");
-        }
-        catch (NatsNoRespondersException)
-        {
-            // Expected
-        }
+        await Assert.ThrowsAsync<NatsNoRespondersException>(async () =>
+            await _bus.PublishAsync("test.subject", new TestMessage("test"), "msg-1"));
     }
+
+    private record TestMessage(string Data);
 
     [Test]
     public async Task ConsumeAsync_ShouldHandleConsumerDeletion()

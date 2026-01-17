@@ -2,6 +2,7 @@ using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core;
 using FlySwattr.NATS.Core.Serializers;
 using IntegrationTests.Infrastructure;
+using MemoryPack;
 using Microsoft.Extensions.Logging.Abstractions;
 using NATS.Client.Core;
 using NATS.Client.JetStream;
@@ -11,9 +12,10 @@ using TUnit.Core;
 namespace IntegrationTests.Core;
 
 [Property("nTag", "Core")]
-public class NatsIdempotencyIntegrationTests
+public partial class NatsIdempotencyIntegrationTests
 {
-    public record OrderCreatedEvent(string OrderId, decimal Amount);
+    [MemoryPackable]
+    public partial record OrderCreatedEvent(string OrderId, decimal Amount);
 
     [Test]
     public async Task PublishAsync_WithSameMessageId_ShouldDeduplicateOnServer()
@@ -21,13 +23,17 @@ public class NatsIdempotencyIntegrationTests
         // Arrange
         await using var fixture = new NatsContainerFixture();
         await fixture.InitializeAsync();
-        
-        var opts = new NatsOpts { Url = fixture.ConnectionString };
+
+        var opts = new NatsOpts
+        {
+            Url = fixture.ConnectionString,
+            SerializerRegistry = HybridSerializerRegistry.Default
+        };
         await using var conn = new NatsConnection(opts);
         await conn.ConnectAsync();
-        
+
         var jsContext = new NatsJSContext(conn);
-        
+
         // Create stream with de-duplication window
         var streamName = "ORDERS";
         var subject = "orders.created";
@@ -71,13 +77,17 @@ public class NatsIdempotencyIntegrationTests
         // Arrange
         await using var fixture = new NatsContainerFixture();
         await fixture.InitializeAsync();
-        
-        var opts = new NatsOpts { Url = fixture.ConnectionString };
+
+        var opts = new NatsOpts
+        {
+            Url = fixture.ConnectionString,
+            SerializerRegistry = HybridSerializerRegistry.Default
+        };
         await using var conn = new NatsConnection(opts);
         await conn.ConnectAsync();
-        
+
         var jsContext = new NatsJSContext(conn);
-        
+
         var streamName = "ORDERS_DIFF";
         var subject = "orders.created.diff";
         await jsContext.CreateStreamAsync(new StreamConfig
