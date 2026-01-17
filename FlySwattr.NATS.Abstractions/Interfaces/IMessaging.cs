@@ -18,6 +18,17 @@ public interface IMessageBus
     Task PublishAsync<T>(string subject, T message, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Publishes a message to a specific subject with custom headers.
+    /// </summary>
+    /// <typeparam name="T">The type of the message.</typeparam>
+    /// <param name="subject">The subject to publish to.</param>
+    /// <param name="message">The message content.</param>
+    /// <param name="headers">Optional headers to include with the message.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    Task PublishAsync<T>(string subject, T message, MessageHeaders? headers, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Subscribes to a subject and processes received messages using the provided handler.
     /// </summary>
     /// <typeparam name="T">The type of the message.</typeparam>

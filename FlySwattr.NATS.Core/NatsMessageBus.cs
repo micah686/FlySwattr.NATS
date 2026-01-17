@@ -68,6 +68,20 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
         await _connection.PublishAsync(subject, message, cancellationToken: cancellationToken);
     }
 
+    public async Task PublishAsync<T>(string subject, T message, MessageHeaders? headers, CancellationToken cancellationToken = default)
+    {
+        NatsHeaders? natsHeaders = null;
+        if (headers?.Headers.Count > 0)
+        {
+            natsHeaders = new NatsHeaders();
+            foreach (var kvp in headers.Headers)
+            {
+                natsHeaders.Add(kvp.Key, kvp.Value);
+            }
+        }
+        await _connection.PublishAsync(subject, message, headers: natsHeaders, cancellationToken: cancellationToken);
+    }
+
     public async Task SubscribeAsync<T>(string subject, Func<IMessageContext<T>, Task> handler, string? queueGroup = null, CancellationToken cancellationToken = default)
     {
         var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
