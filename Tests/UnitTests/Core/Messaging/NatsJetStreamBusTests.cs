@@ -192,6 +192,80 @@ public class NatsJetStreamBusTests : IAsyncDisposable
         // Assert
         // Verified by no exception
     }
+
+    [Test]
+    public async Task DisposeAsync_ShouldStopAndDisposeBackgroundServices()
+    {
+        // Arrange
+        var consumer = Substitute.For<INatsJSConsumer>();
+        consumer.Info.Returns(new ConsumerInfo { Name = "test-consumer", StreamName = "test-stream", Config = new ConsumerConfig() });
+        
+        _jsContext.CreateOrUpdateConsumerAsync(
+            Arg.Any<string>(), 
+            Arg.Any<ConsumerConfig>(), 
+            Arg.Any<CancellationToken>())
+            .Returns(consumer);
+
+        consumer.ConsumeAsync<object>(
+            Arg.Any<INatsDeserialize<object>>(),
+            Arg.Any<NatsJSConsumeOpts>(),
+            Arg.Any<CancellationToken>())
+            .Returns(CreateEmptyAsyncEnumerable());
+
+        await _bus.ConsumeAsync<object>(
+            StreamName.From("test-stream"),
+            SubjectName.From("test.subject"),
+            async _ => await Task.CompletedTask
+        );
+
+        // Act
+        await _bus.DisposeAsync();
+
+        // Assert
+        // If we reached here without hanging, it means DisposeAsync didn't deadlock.
+        // We can't easily verify private fields, but we've exercised the path.
+    }
+
+    [Test]
+    public async Task ConsumeAsync_ShouldRetry_WhenLoopErrorOccurs()
+    {
+        // Arrange
+        var consumer = Substitute.For<INatsJSConsumer>();
+        consumer.Info.Returns(new ConsumerInfo { Name = "test-consumer", StreamName = "test-stream", Config = new ConsumerConfig() });
+        
+        _jsContext.CreateOrUpdateConsumerAsync(
+            Arg.Any<string>(), 
+            Arg.Any<ConsumerConfig>(), 
+            Arg.Any<CancellationToken>())
+            .Returns(consumer);
+
+        // Throw then return empty
+        var callCount = 0;
+        consumer.ConsumeAsync<object>(
+            Arg.Any<INatsDeserialize<object>>(),
+            Arg.Any<NatsJSConsumeOpts>(),
+            Arg.Any<CancellationToken>())
+            .Returns(info =>
+            {
+                var count = Interlocked.Increment(ref callCount);
+                if (count == 1)
+                {
+                    throw new Exception("Transient loop error");
+                }
+                return CreateEmptyAsyncEnumerable();
+            });
+
+        // Act
+        await _bus.ConsumeAsync<object>(
+            StreamName.From("test-stream"),
+            SubjectName.From("test.subject"),
+            async _ => await Task.CompletedTask
+        );
+
+        // Assert
+        await Task.Delay(1500); // Wait for retry (1s delay in code)
+        await Assert.That(callCount).IsGreaterThanOrEqualTo(2);
+    }
     
     private static IAsyncEnumerable<INatsJSMsg<object>> GetDelayedEmptyEnumerable()
     {
