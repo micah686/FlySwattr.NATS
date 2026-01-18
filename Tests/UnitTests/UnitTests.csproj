@@ -32,6 +32,7 @@
       <ProjectReference Include="..\..\FlySwattr.NATS.Hosting\FlySwattr.NATS.Hosting.csproj" />
       <ProjectReference Include="..\..\FlySwattr.NATS.Resilience\FlySwattr.NATS.Resilience.csproj" />
       <ProjectReference Include="..\..\FlySwattr.NATS.Topology\FlySwattr.NATS.Topology.csproj" />
+      <ProjectReference Include="..\..\FlySwattr.NATS\FlySwattr.NATS.csproj" />
     </ItemGroup>
 
 

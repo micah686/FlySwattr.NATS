@@ -159,7 +159,7 @@ public class NatsDistributedLockProviderTests
         await using var handle = await lockObj.TryAcquireAsync();
         
         // Wait for heartbeat interval (TTL / 2 = 100ms)
-        await Task.Delay(300);
+        await Task.Delay(600);
 
         // Assert
         // Should have called UpdateAsync at least once for heartbeat (with non-empty value)

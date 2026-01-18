@@ -216,6 +216,70 @@ public class NatsConsumerBackgroundServiceTests
             $"Expected at least 3 NAKs when 5 messages overwhelm a capacity-1 channel, got {nakCount}");
     }
 
+    [Test]
+    public async Task ExecuteAsync_ShouldProcessMessages_AndAck()
+    {
+        // Arrange
+        var consumer = Substitute.For<INatsJSConsumer>();
+        var logger = Substitute.For<ILogger>();
+        var poisonHandler = Substitute.For<IPoisonMessageHandler<string>>();
+        
+        var processedMessages = new List<string>();
+        var ackCount = 0;
+        var messagesYielded = new TaskCompletionSource();
+        
+        // Create 2 mock messages
+        var mockMessages = new List<INatsJSMsg<string>>();
+        for (int i = 0; i < 2; i++)
+        {
+            var msg = Substitute.For<INatsJSMsg<string>>();
+            var msgData = $"msg-{i}";
+            msg.Data.Returns(msgData);
+            msg.Subject.Returns("test.subject");
+            msg.AckAsync(Arg.Any<AckOpts?>(), Arg.Any<CancellationToken>())
+                .Returns(ValueTask.CompletedTask)
+                .AndDoes(x => Interlocked.Increment(ref ackCount));
+            mockMessages.Add(msg);
+        }
+        
+        // Setup consumer
+        consumer.ConsumeAsync<string>(
+            Arg.Any<INatsDeserialize<string>>(),
+            Arg.Any<NatsJSConsumeOpts>(),
+            Arg.Any<CancellationToken>())
+            .Returns(c => CreateMessageStream(mockMessages, messagesYielded, c.Arg<CancellationToken>()));
+            
+        // Handler
+        Func<IJsMessageContext<string>, Task> handler = async ctx =>
+        {
+            processedMessages.Add(ctx.Message);
+            await Task.Yield();
+        };
+        
+        var service = new TestableNatsConsumerBackgroundService<string>(
+            consumer, "stream", "consumer", handler, new NatsJSConsumeOpts(), logger, poisonHandler);
+            
+        using var cts = new CancellationTokenSource();
+        
+        // Act
+        var executeTask = service.StartAsync(cts.Token);
+        
+        // Wait for messages to be yielded
+        await messagesYielded.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        
+        // Wait a bit for processing
+        await Task.Delay(200);
+        
+        await cts.CancelAsync();
+        try { await service.StopAsync(CancellationToken.None); } catch { }
+        
+        // Assert
+        processedMessages.Count.ShouldBe(2);
+        processedMessages.ShouldContain("msg-0");
+        processedMessages.ShouldContain("msg-1");
+        ackCount.ShouldBe(2);
+    }
+
     /// <summary>
     /// Helper method to create an async enumerable from a list of messages.
     /// </summary>
