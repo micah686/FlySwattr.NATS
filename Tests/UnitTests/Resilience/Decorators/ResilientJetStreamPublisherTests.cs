@@ -3,7 +3,9 @@ using FlySwattr.NATS.Resilience.Builders;
 using FlySwattr.NATS.Resilience.Decorators;
 using Microsoft.Extensions.Logging;
 using NSubstitute;
+using Polly;
 using Polly.CircuitBreaker;
+using Polly.Retry;
 using Shouldly;
 using TUnit.Core;
 
@@ -266,6 +268,15 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         var inner = Substitute.For<IJetStreamPublisher>();
         var builderLogger = Substitute.For<ILogger<HierarchicalResilienceBuilder>>();
         
+        // Fast retry options
+        var retryOptions = new RetryStrategyOptions
+        {
+            MaxRetryAttempts = 3,
+            BackoffType = DelayBackoffType.Constant,
+            Delay = TimeSpan.Zero,
+            ShouldHandle = new PredicateBuilder().Handle<Exception>()
+        };
+        
         // Consumer-level circuit breaker with very aggressive settings
         var cbOptions = new ConsumerCircuitBreakerOptions
         {
@@ -277,7 +288,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         
         await using var resilienceBuilder = new HierarchicalResilienceBuilder(builderLogger, cbOptions);
         var logger = Substitute.For<ILogger<ResilientJetStreamPublisher>>();
-        var sut = new ResilientJetStreamPublisher(inner, resilienceBuilder, logger);
+        var sut = new ResilientJetStreamPublisher(inner, resilienceBuilder, logger, retryOptions);
         
         var subject = "test.subject";
         var message = "payload";
@@ -334,6 +345,15 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         var inner = Substitute.For<IJetStreamPublisher>();
         var builderLogger = Substitute.For<ILogger<HierarchicalResilienceBuilder>>();
         
+        // Fast retry options
+        var retryOptions = new RetryStrategyOptions
+        {
+            MaxRetryAttempts = 3,
+            BackoffType = DelayBackoffType.Constant,
+            Delay = TimeSpan.Zero,
+            ShouldHandle = new PredicateBuilder().Handle<Exception>()
+        };
+        
         // Low threshold - trip after 2 failures at 50% failure rate
         var cbOptions = new ConsumerCircuitBreakerOptions
         {
@@ -345,7 +365,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         
         await using var resilienceBuilder = new HierarchicalResilienceBuilder(builderLogger, cbOptions);
         var logger = Substitute.For<ILogger<ResilientJetStreamPublisher>>();
-        var sut = new ResilientJetStreamPublisher(inner, resilienceBuilder, logger);
+        var sut = new ResilientJetStreamPublisher(inner, resilienceBuilder, logger, retryOptions);
         
         var subject = "test.subject";
         var message = "payload";
@@ -389,6 +409,15 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         var inner = Substitute.For<IJetStreamPublisher>();
         var builderLogger = Substitute.For<ILogger<HierarchicalResilienceBuilder>>();
         
+        // Fast retry options to prevent test hanging
+        var retryOptions = new RetryStrategyOptions
+        {
+            MaxRetryAttempts = 3,
+            BackoffType = DelayBackoffType.Constant,
+            Delay = TimeSpan.Zero,
+            ShouldHandle = new PredicateBuilder().Handle<Exception>()
+        };
+        
         // Aggressive settings for fast test execution
         var cbOptions = new ConsumerCircuitBreakerOptions
         {
@@ -400,7 +429,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         
         await using var resilienceBuilder = new HierarchicalResilienceBuilder(builderLogger, cbOptions);
         var logger = Substitute.For<ILogger<ResilientJetStreamPublisher>>();
-        var sut = new ResilientJetStreamPublisher(inner, resilienceBuilder, logger);
+        var sut = new ResilientJetStreamPublisher(inner, resilienceBuilder, logger, retryOptions);
         
         var subject = "test.subject";
         var message = "payload";
@@ -421,7 +450,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
 
         // Make enough calls to trip the circuit (5 calls should be plenty)
         // Catch any exception since circuit may throw BrokenCircuitException once tripped
-        for (int i = 0; i < 5; i++)
+        for (int i = 0; i < 15; i++)
         {
             try { await sut.PublishAsync(subject, message, $"msg-fail-{i}"); } 
             catch (Exception) { /* TimeoutException or BrokenCircuitException */ }

@@ -56,28 +56,6 @@ public interface IMessageBus
 /// </summary>
 public interface IJetStreamPublisher
 {
-    /// <summary>
-    /// Publishes a message to a JetStream subject WITHOUT specifying a message ID.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// <b>WARNING:</b> This overload does NOT provide application-level idempotency and will throw
-    /// <see cref="ArgumentException"/> in the default implementation. Use the overload with 
-    /// <paramref name="messageId"/> parameter instead.
-    /// </para>
-    /// <para>
-    /// For proper deduplication, always use <see cref="PublishAsync{T}(string, T, string?, CancellationToken)"/>
-    /// with a business-key-derived message ID (e.g., "Order123-Created").
-    /// </para>
-    /// </remarks>
-    /// <typeparam name="T">The type of the message.</typeparam>
-    /// <param name="subject">The subject to publish to.</param>
-    /// <param name="message">The message content.</param>
-    /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>A task representing the asynchronous operation.</returns>
-    /// <exception cref="ArgumentException">Thrown because a messageId is required for proper idempotency.</exception>
-    [Obsolete("Use the overload with messageId parameter for proper application-level idempotency. This overload throws ArgumentException.")]
-    Task PublishAsync<T>(string subject, T message, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Publishes a message to a JetStream subject with a caller-supplied message ID for server-side 

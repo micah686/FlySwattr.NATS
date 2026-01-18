@@ -23,10 +23,12 @@ internal class ResilientJetStreamPublisher : IJetStreamPublisher
     /// <param name="inner">The underlying Core publisher (NatsJetStreamBus).</param>
     /// <param name="resilienceBuilder">Hierarchical resilience builder for layered circuit breakers.</param>
     /// <param name="logger">Logger instance.</param>
+    /// <param name="retryOptions">Optional retry strategy configuration (useful for testing).</param>
     public ResilientJetStreamPublisher(
         IJetStreamPublisher inner,
         HierarchicalResilienceBuilder resilienceBuilder,
-        ILogger<ResilientJetStreamPublisher> logger)
+        ILogger<ResilientJetStreamPublisher> logger,
+        RetryStrategyOptions? retryOptions = null)
     {
         _inner = inner;
         _logger = logger;
@@ -54,7 +56,7 @@ internal class ResilientJetStreamPublisher : IJetStreamPublisher
                     return default;
                 }
             })
-            .AddRetry(new RetryStrategyOptions
+            .AddRetry(retryOptions ?? new RetryStrategyOptions
             {
                 MaxRetryAttempts = 3,
                 BackoffType = DelayBackoffType.Exponential,
