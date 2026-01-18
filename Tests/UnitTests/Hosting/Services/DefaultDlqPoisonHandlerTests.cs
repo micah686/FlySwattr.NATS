@@ -39,7 +39,7 @@ public class DefaultDlqPoisonHandlerTests
         _notificationService = Substitute.For<IDlqNotificationService>();
         _policyRegistry = Substitute.For<IDlqPolicyRegistry>();
         _logger = Substitute.For<ILogger<DefaultDlqPoisonHandler<TestMessage>>>();
-        _logger.IsEnabled(Arg.Any<LogLevel>()).Returns(true);
+        _logger.IsEnabled(default).ReturnsForAnyArgs(true);
         _context = CreateMockContext();
     }
 
