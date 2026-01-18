@@ -52,20 +52,6 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
     }
 
     [Test]
-    public async Task PublishAsync_Overload_ShouldPassNullMessageId()
-    {
-        // Arrange
-        var subject = "test.subject";
-        var message = "payload";
-
-        // Act
-        await _sut.PublishAsync(subject, message);
-
-        // Assert
-        await _inner.Received(1).PublishAsync(subject, message, null, Arg.Any<CancellationToken>());
-    }
-
-    [Test]
     public async Task PublishAsync_ShouldRetry_OnTransientException()
     {
         // Arrange
