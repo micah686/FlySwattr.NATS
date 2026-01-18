@@ -39,6 +39,7 @@ public class DefaultDlqPoisonHandlerTests
         _notificationService = Substitute.For<IDlqNotificationService>();
         _policyRegistry = Substitute.For<IDlqPolicyRegistry>();
         _logger = Substitute.For<ILogger<DefaultDlqPoisonHandler<TestMessage>>>();
+        _logger.IsEnabled(Arg.Any<LogLevel>()).Returns(true);
         _context = CreateMockContext();
     }
 
@@ -428,6 +429,150 @@ public class DefaultDlqPoisonHandlerTests
             Arg.Any<DlqMessage>(),
             "dlq-orders-stream-orders-consumer-12345",
             Arg.Any<CancellationToken>());
+    }
+
+    #endregion
+
+    #region Large Payload Handling
+
+    /// <summary>
+    /// When payload exceeds MaxDlqPayloadSize (1MB) and ObjectStore is available,
+    /// the handler should offload the payload to ObjectStore and store a reference.
+    /// </summary>
+    [Test]
+    public async Task HandleAsync_LargePayload_ShouldOffloadToObjectStore()
+    {
+        // Arrange
+        var context = CreateMockContext(sequence: 99);
+        
+        var policy = new DeadLetterPolicy { SourceStream = "orders-stream", SourceConsumer = "orders-consumer", TargetStream = StreamName.From("dlq"), TargetSubject = "dlq.orders" };
+        _policyRegistry.Get("orders-stream", "orders-consumer").Returns(policy);
+        
+        // Simulate serializer writing a payload larger than 1MB (1024 * 1024 bytes)
+        var largePayloadSize = 1024 * 1024 + 1000; // Just over 1MB
+        _serializer.When(x => x.Serialize(Arg.Any<IBufferWriter<byte>>(), Arg.Any<TestMessage>()))
+            .Do(callInfo =>
+            {
+                var bufferWriter = callInfo.ArgAt<IBufferWriter<byte>>(0);
+                var buffer = bufferWriter.GetSpan(largePayloadSize);
+                buffer.Slice(0, largePayloadSize).Fill(0xAB);
+                bufferWriter.Advance(largePayloadSize);
+            });
+        _serializer.GetContentType<TestMessage>().Returns("application/json");
+        
+        string? capturedObjectKey = null;
+        _objectStore.PutAsync(Arg.Any<string>(), Arg.Any<Stream>(), Arg.Any<CancellationToken>())
+            .Returns(callInfo =>
+            {
+                capturedObjectKey = callInfo.ArgAt<string>(0);
+                return Task.FromResult("rev-1");
+            });
+
+        DlqMessage? capturedDlqMessage = null;
+        _publisher.PublishAsync(
+            Arg.Any<string>(), 
+            Arg.Any<DlqMessage>(), 
+            Arg.Any<string>(), 
+            Arg.Any<CancellationToken>())
+            .Returns(callInfo =>
+            {
+                capturedDlqMessage = callInfo.Arg<DlqMessage>();
+                return Task.CompletedTask;
+            });
+
+        var handler = CreateHandler();
+        var exception = new InvalidOperationException("Processing failed");
+
+        // Act
+        await handler.HandleAsync(
+            context,
+            "orders-stream",
+            "orders-consumer",
+            maxDeliveries: 3,
+            exception,
+            CancellationToken.None);
+
+        // Assert - ObjectStore should have been called with correct key pattern
+        await _objectStore.Received(1).PutAsync(
+            Arg.Is<string>(key => key.StartsWith("dlq-payload/orders-stream/orders-consumer/99-")),
+            Arg.Any<Stream>(),
+            Arg.Any<CancellationToken>());
+        
+        capturedObjectKey.ShouldNotBeNull();
+        capturedObjectKey.ShouldStartWith("dlq-payload/orders-stream/orders-consumer/99-");
+        
+        // DLQ message should have empty payload with objstore reference
+        capturedDlqMessage.ShouldNotBeNull();
+        capturedDlqMessage.Payload.ShouldBeEmpty();
+        capturedDlqMessage.PayloadEncoding.ShouldStartWith("objstore://dlq-payload/");
+    }
+
+    /// <summary>
+    /// When payload exceeds MaxDlqPayloadSize (1MB) but ObjectStore is NOT available,
+    /// the handler should truncate the payload and log a warning.
+    /// </summary>
+    [Test]
+    public async Task HandleAsync_LargePayloadWithoutObjectStore_ShouldTruncateAndLogWarning()
+    {
+        // Arrange
+        var context = CreateMockContext(sequence: 100);
+        
+        var policy = new DeadLetterPolicy { SourceStream = "orders-stream", SourceConsumer = "orders-consumer", TargetStream = StreamName.From("dlq"), TargetSubject = "dlq.orders" };
+        _policyRegistry.Get("orders-stream", "orders-consumer").Returns(policy);
+        
+        // Simulate serializer writing a payload larger than 1MB
+        var largePayloadSize = 1024 * 1024 + 5000; // Just over 1MB
+        _serializer.When(x => x.Serialize(Arg.Any<IBufferWriter<byte>>(), Arg.Any<TestMessage>()))
+            .Do(callInfo =>
+            {
+                var bufferWriter = callInfo.ArgAt<IBufferWriter<byte>>(0);
+                var buffer = bufferWriter.GetSpan(largePayloadSize);
+                buffer.Slice(0, largePayloadSize).Fill(0xCD);
+                bufferWriter.Advance(largePayloadSize);
+            });
+        _serializer.GetContentType<TestMessage>().Returns("application/json");
+
+        DlqMessage? capturedDlqMessage = null;
+        _publisher.PublishAsync(
+            Arg.Any<string>(), 
+            Arg.Any<DlqMessage>(), 
+            Arg.Any<string>(), 
+            Arg.Any<CancellationToken>())
+            .Returns(callInfo =>
+            {
+                capturedDlqMessage = callInfo.Arg<DlqMessage>();
+                return Task.CompletedTask;
+            });
+
+        // Create handler WITHOUT ObjectStore explicitly
+        // Note: We cannot use CreateHandler(objectStore: null) because it coalesces with the mock field
+        var handler = new DefaultDlqPoisonHandler<TestMessage>(
+            _publisher,
+            _serializer,
+            null, // Explicitly null
+            _notificationService,
+            _policyRegistry,
+            _logger);
+            
+        var exception = new InvalidOperationException("Processing failed");
+
+        // Act
+        await handler.HandleAsync(
+            context,
+            "orders-stream",
+            "orders-consumer",
+            maxDeliveries: 3,
+            exception,
+            CancellationToken.None);
+
+        // Assert - DLQ message should have empty payload with truncation indicator
+        capturedDlqMessage.ShouldNotBeNull();
+        capturedDlqMessage.Payload.ShouldBeEmpty();
+        capturedDlqMessage.PayloadEncoding.ShouldStartWith("truncated:size=");
+        capturedDlqMessage.PayloadEncoding.ShouldContain(largePayloadSize.ToString());
+        
+        // Message should still be terminated
+        await context.Received(1).TermAsync(Arg.Any<CancellationToken>());
     }
 
     #endregion

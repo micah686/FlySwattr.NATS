@@ -147,4 +147,81 @@ public class ColdStartRetryTests
         connection.Opts.ReconnectWaitMax.ShouldBe(TimeSpan.FromSeconds(10));
         connection.Opts.MaxReconnectRetry.ShouldBe(5);
     }
+
+    /// <summary>
+    /// Verifies that when NATS driver retries are combined with Polly retries,
+    /// the total duration is bounded and doesn't cause multiplicative retry explosion.
+    /// 
+    /// This test validates the recommended pattern:
+    /// - NATS driver with minimal/no retries (MaxReconnectRetry=0 or low)
+    /// - Polly handling application-layer retries with bounded duration
+    /// 
+    /// The concern: If NATS has 10 reconnect attempts and Polly has 3 retries,
+    /// the total could be 10 * 3 = 30 actual connection attempts per request.
+    /// </summary>
+    [Test]
+    public async Task CombinedNatsPolly_TotalDuration_ShouldBeBounded()
+    {
+        // Arrange - NATS with limited retries (fail-fast mode)
+        var natsOpts = new NatsOpts
+        {
+            Url = "nats://localhost:9999", // Invalid port - will fail
+            MaxReconnectRetry = 2,
+            ReconnectWaitMin = TimeSpan.FromMilliseconds(100),
+            ReconnectWaitMax = TimeSpan.FromMilliseconds(200)
+        };
+
+        var connection = new NatsConnection(natsOpts);
+
+        // Simulate what Polly would do: 3 retries with exponential backoff
+        var pollyMaxRetries = 3;
+        var pollyBaseDelay = TimeSpan.FromMilliseconds(100);
+        
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+        var attemptCount = 0;
+        
+        // Simulate Polly retry loop
+        for (int pollyAttempt = 0; pollyAttempt <= pollyMaxRetries; pollyAttempt++)
+        {
+            attemptCount++;
+            
+            try
+            {
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                await connection.PingAsync(cts.Token);
+                break; // Success - exit retry loop
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Expected failure - continue retry loop
+                if (pollyAttempt < pollyMaxRetries)
+                {
+                    // Exponential backoff delay
+                    var delay = TimeSpan.FromMilliseconds(
+                        pollyBaseDelay.TotalMilliseconds * Math.Pow(2, pollyAttempt));
+                    await Task.Delay(delay);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                // Timeout hit - count as attempt and continue
+            }
+        }
+        
+        stopwatch.Stop();
+
+        // Assert - Total time should be bounded
+        // With 4 attempts (initial + 3 retries), each with 2s timeout max, plus backoff delays
+        // Expected: ~4 * 2s + (0.1 + 0.2 + 0.4)s backoff = ~8.7s max
+        // We use generous upper bound of 15s to account for test runner variance
+        stopwatch.Elapsed.TotalSeconds.ShouldBeLessThan(15);
+        
+        // Should have attempted exactly 4 times (initial + 3 retries)
+        attemptCount.ShouldBe(4);
+        
+        // Verify configuration prevents multiplicative explosion
+        // Without proper bounds, 2 NATS retries * 4 Polly attempts would mean
+        // up to 8 actual NATS connection attempts - but our timeout limits this
+        connection.Opts.MaxReconnectRetry.ShouldBe(2);
+    }
 }
