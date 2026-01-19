@@ -1,7 +1,9 @@
+using FlySwattr.NATS.Abstractions;
+
 namespace FlySwattr.NATS.Topology.Configuration;
 
 /// <summary>
-/// Configuration options for topology provisioning startup resilience.
+/// Configuration options for topology provisioning startup resilience and auto-infrastructure.
 /// Controls how the application handles the "Cold Start" scenario where
 /// NATS may not be immediately available (e.g., Kubernetes sidecar startup delays).
 /// </summary>
@@ -41,4 +43,33 @@ public class TopologyStartupOptions
     /// Default: 2 minutes.
     /// </summary>
     public TimeSpan TotalStartupTimeout { get; set; } = TimeSpan.FromMinutes(2);
+
+    // --- Auto-Infrastructure Options (Batteries-Included) ---
+
+    /// <summary>
+    /// When true, automatically creates the "fs-dlq-entries" KV bucket required by the
+    /// DLQ store when any consumer has a <see cref="DeadLetterPolicy"/>.
+    /// Default: true
+    /// </summary>
+    public bool AutoCreateDlqBucket { get; set; } = true;
+
+    /// <summary>
+    /// The name of the DLQ entries KV bucket.
+    /// Default: "fs-dlq-entries"
+    /// </summary>
+    public string DlqBucketName { get; set; } = "fs-dlq-entries";
+
+    /// <summary>
+    /// When true, automatically creates the payload offloading object store bucket
+    /// if <see cref="PayloadOffloadingBucketName"/> is specified.
+    /// Default: true
+    /// </summary>
+    public bool AutoCreatePayloadOffloadingBucket { get; set; } = true;
+
+    /// <summary>
+    /// The name of the object store bucket for payload offloading (claim check pattern).
+    /// When set, the bucket will be auto-created during topology provisioning.
+    /// Set to null to disable auto-creation.
+    /// </summary>
+    public string? PayloadOffloadingBucketName { get; set; }
 }

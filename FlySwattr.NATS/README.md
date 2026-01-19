@@ -99,6 +99,7 @@ builder.Services.AddEnterpriseNATSMessaging(opts =>
     opts.EnableCaching = true;                 // Default: true (FusionCache for KV)
     opts.EnableDistributedLock = true;         // Default: true (NATS KV-backed locks)
     opts.EnableTopologyProvisioning = true;    // Default: true (auto-create streams/consumers)
+    opts.EnableDlqAdvisoryListener = true;     // Default: true (monitor MAX_DELIVERIES events)
 
     // ═══════════════════════════════════════════════════════════════════════
     // PAYLOAD OFFLOADING (Claim Check Pattern)
@@ -146,6 +147,29 @@ builder.Services.AddEnterpriseNATSMessaging(opts =>
     // Optional: Set to TimeSpan.FromMinutes(10) to warn if no messages for 10 min
 
     // ═══════════════════════════════════════════════════════════════════════
+    // CONSUMER RESILIENCE (Default Retry Policies - "Batteries Included")
+    // Applied to all consumers for transient failure handling
+    // ═══════════════════════════════════════════════════════════════════════
+
+    opts.ConsumerResilience.MaxRetryAttempts = 3;                      // Default: 3
+    opts.ConsumerResilience.InitialRetryDelay = TimeSpan.FromSeconds(1); // Default: 1 second
+    opts.ConsumerResilience.MaxRetryDelay = TimeSpan.FromSeconds(30);   // Default: 30 seconds
+    opts.ConsumerResilience.UseJitter = true;                          // Default: true (prevent thundering herd)
+    opts.ConsumerResilience.CircuitBreakerFailureRatio = 0.5;          // Default: 50% (trip at 50% errors)
+    opts.ConsumerResilience.CircuitBreakerMinimumThroughput = 10;      // Default: 10 ops before activating
+    opts.ConsumerResilience.CircuitBreakerBreakDuration = TimeSpan.FromSeconds(60); // Default: 60 seconds
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // AUTO-INFRASTRUCTURE (Batteries Included)
+    // Automatic provisioning of DLQ and payload offloading buckets
+    // ═══════════════════════════════════════════════════════════════════════
+
+    opts.TopologyStartup.AutoCreateDlqBucket = true;                   // Default: true
+    opts.TopologyStartup.DlqBucketName = "fs-dlq-entries";             // Default: "fs-dlq-entries"
+    opts.TopologyStartup.AutoCreatePayloadOffloadingBucket = true;     // Default: true
+    // PayloadOffloadingBucketName is auto-set to opts.ClaimCheckBucket when EnablePayloadOffloading = true
+
+    // ═══════════════════════════════════════════════════════════════════════
     // TOPOLOGY STARTUP (Cold Start Resilience)
     // Controls retry behavior when NATS is not immediately available
     // (e.g., Kubernetes sidecar startup delays)
@@ -191,37 +215,75 @@ opts.EnableCaching = false;
 
 ## 📋 Additional Setup (Beyond AddEnterpriseNATSMessaging)
 
-Some components require manual registration as they're app-specific:
+### 1. Unified Topology + Consumers (Batteries Included Recommended)
 
-### 1. Topology Sources (Infrastructure-as-Code)
+The simplest way to set up topology and consumers together - **single source of truth**:
 
-To use declarative topology provisioning, register your `ITopologySource` implementations:
+```csharp
+// After AddEnterpriseNATSMessaging
+services.AddNatsTopologyWithConsumers<OrdersTopology>(topology =>
+{
+    // Map consumer specs to message handlers
+    topology.MapConsumer<OrderPlacedEvent>("orders-consumer", async ctx =>
+    {
+        var order = ctx.Message;
+        await ProcessOrder(order);
+        await ctx.AckAsync();
+    });
+
+    topology.MapConsumer<PaymentProcessedEvent>("payments-consumer",
+        async ctx =>
+        {
+            var payment = ctx.Message;
+            await ProcessPayment(payment);
+            await ctx.AckAsync();
+        },
+        opts =>
+        {
+            opts.MaxConcurrency = 20;
+            opts.ResiliencePipelineKey = "critical";  // Use "critical" bulkhead
+            opts.EnableLoggingMiddleware = true;
+            opts.EnableValidationMiddleware = true;
+        });
+});
+```
+
+**What this does automatically:**
+- Registers the `ITopologySource` implementation
+- Creates background workers for each mapped consumer
+- Applies configured resilience, middleware, and concurrency
+- Starts consumers after topology provisioning completes
+- Auto-handles DLQ policies if defined in topology
+- Integrates with distributed locking for concurrent startup
+
+### 2. Separate Topology Sources (Alternative)
+
+For more complex scenarios where you want to keep topology definitions separate:
 
 ```csharp
 // After AddEnterpriseNATSMessaging
 services.AddNatsTopologySource<MyApplicationTopology>();
 services.AddNatsTopologySource<SharedInfrastructureTopology>();
+
+// Consumers must be registered separately with AddNatsConsumer (see section 4 below)
 ```
 
-### 2. DLQ Advisory Listener (Optional)
+### 3. DLQ Advisory Listener (Auto-Enabled)
 
-Monitor NATS server-side delivery failures (when consumers exceed MaxDeliver):
+**Now automatically registered when topology provisioning is enabled!**
+
+The DLQ Advisory Listener is auto-registered by `AddEnterpriseNATSMessaging` to monitor server-side delivery failures. To customize or add custom handlers:
 
 ```csharp
+// Customize advisory listener behavior
 services.AddNatsDlqAdvisoryListener(opts =>
 {
-    // Default: "$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.>"
-    opts.AdvisorySubject = "$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.>";
-
     // Optional: Filter by stream names
     opts.StreamFilter.Add("ORDERS_STREAM");
     opts.StreamFilter.Add("PAYMENTS_STREAM");
 
     // Optional: Filter by consumer names
     opts.ConsumerFilter.Add("order-processor");
-
-    // Whether to trigger existing IDlqNotificationService (default: true)
-    opts.TriggerDlqNotification = true;
 
     // Reconnect delay after subscription error (default: 5 seconds)
     opts.ReconnectDelay = TimeSpan.FromSeconds(5);
@@ -230,11 +292,74 @@ services.AddNatsDlqAdvisoryListener(opts =>
 // Add custom handlers for alerts (multiple can be registered)
 services.AddDlqAdvisoryHandler<PagerDutyAlertHandler>();
 services.AddDlqAdvisoryHandler<SlackNotificationHandler>();
+services.AddDlqAdvisoryHandler<MetricsCollectionHandler>();
 ```
 
-### 3. Background Consumers (Manual Registration)
+### 4. Declarative KV/Object Stores (Batteries Included)
 
-For manually configured consumers (vs auto-provisioned ones):
+Define KV buckets and Object Stores declaratively in your topology source alongside streams and consumers:
+
+```csharp
+public class MyAppTopology : ITopologySource
+{
+    public IEnumerable<StreamSpec> GetStreams()
+    {
+        yield return new StreamSpec { Name = StreamName.From("ORDERS"), Subjects = ["orders.*"] };
+    }
+
+    public IEnumerable<ConsumerSpec> GetConsumers()
+    {
+        yield return new ConsumerSpec
+        {
+            StreamName = StreamName.From("ORDERS"),
+            DurableName = ConsumerName.From("order-processor")
+        };
+    }
+
+    // NEW: Declare KV buckets alongside your topology
+    public IEnumerable<BucketSpec> GetBuckets()
+    {
+        yield return new BucketSpec
+        {
+            Name = BucketName.From("app-cache"),
+            StorageType = StorageType.File,
+            MaxAge = TimeSpan.FromHours(24),
+            History = 1,
+            Description = "Application configuration cache"
+        };
+
+        yield return new BucketSpec
+        {
+            Name = BucketName.From("user-sessions"),
+            StorageType = StorageType.File,
+            MaxBytes = 100 * 1024 * 1024,  // 100MB limit
+            Description = "User session storage"
+        };
+    }
+
+    // NEW: Declare Object Stores for large files
+    public IEnumerable<ObjectStoreSpec> GetObjectStores()
+    {
+        yield return new ObjectStoreSpec
+        {
+            Name = BucketName.From("invoice-documents"),
+            StorageType = StorageType.File,
+            MaxBytes = 1024 * 1024 * 1024,  // 1GB limit
+            Description = "Invoice PDF storage"
+        };
+    }
+}
+```
+
+**What happens automatically:**
+- Buckets and Object Stores are created during topology provisioning
+- DLQ bucket (`fs-dlq-entries`) is auto-created when consumers have `DeadLetterPolicy`
+- Payload offloading bucket is auto-created when payload offloading is enabled
+- All buckets use distributed locking to prevent races during concurrent startup
+
+### 5. Background Consumers (Manual Registration - Legacy)
+
+For manually configured consumers (vs unified topology registration):
 
 ```csharp
 services.AddNatsConsumer<OrderCreatedEvent>(
@@ -256,8 +381,10 @@ services.AddNatsConsumer<OrderCreatedEvent>(
         // DLQ Configuration
         opts.DlqPolicy = new DeadLetterPolicy
         {
-            MaxRetries = 3,
-            BackoffStrategy = BackoffStrategy.Exponential
+            SourceStream = "ORDERS_STREAM",
+            SourceConsumer = "order-processor",
+            TargetStream = StreamName.From("ORDERS_DLQ"),
+            TargetSubject = "dlq.orders"
         };
         opts.DlqPublisherServiceKey = null;               // Default: null (uses default publisher)
 

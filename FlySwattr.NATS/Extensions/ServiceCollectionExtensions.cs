@@ -6,6 +6,8 @@ using FlySwattr.NATS.Hosting.Extensions;
 using FlySwattr.NATS.Resilience.Extensions;
 using FlySwattr.NATS.Topology.Extensions;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Options;
 
 namespace FlySwattr.NATS.Extensions;
 
@@ -31,6 +33,16 @@ public static class ServiceCollectionExtensions
     ///   <item><description>Topology management and optional auto-provisioning</description></item>
     ///   <item><description>Distributed locking</description></item>
     ///   <item><description>Hosting services and health checks</description></item>
+    ///   <item><description>DLQ Advisory Listener (auto-registered when topology provisioning is enabled)</description></item>
+    /// </list>
+    /// <para>
+    /// <b>"Batteries Included" features:</b> The following are automatically configured:
+    /// </para>
+    /// <list type="bullet">
+    ///   <item><description>DLQ streams are auto-derived from consumer DeadLetterPolicy definitions</description></item>
+    ///   <item><description>The fs-dlq-entries KV bucket is auto-created when consumers have DLQ policies</description></item>
+    ///   <item><description>The DLQ Advisory Listener is auto-registered for MAX_DELIVERIES monitoring</description></item>
+    ///   <item><description>The payload offloading bucket is auto-created when payload offloading is enabled</description></item>
     /// </list>
     /// <para>
     /// <b>Important:</b> Register <see cref="Abstractions.ITopologySource"/> implementations
@@ -46,15 +58,15 @@ public static class ServiceCollectionExtensions
     /// {
     ///     // Core Connection (required)
     ///     opts.Core.Url = "nats://my-cluster:4222";
-    ///     
+    ///
     ///     // Custom bulkhead pools
     ///     opts.Resilience.NamedPools["default"] = 100;
     ///     opts.Resilience.NamedPools["critical"] = 10;
-    ///     
+    ///
     ///     // Custom cache duration
     ///     opts.Caching.MemoryCacheDuration = TimeSpan.FromMinutes(10);
     /// });
-    /// 
+    ///
     /// // Register topology sources separately
     /// services.AddNatsTopologySource&lt;MyApplicationTopology&gt;();
     /// </code>
@@ -67,6 +79,19 @@ public static class ServiceCollectionExtensions
 
         var options = new EnterpriseNatsOptions();
         configure(options);
+
+        // Register the enterprise options for use by other components
+        services.TryAddSingleton(Options.Create(options));
+        services.Configure<ConsumerResilienceOptions>(opts =>
+        {
+            opts.MaxRetryAttempts = options.ConsumerResilience.MaxRetryAttempts;
+            opts.InitialRetryDelay = options.ConsumerResilience.InitialRetryDelay;
+            opts.MaxRetryDelay = options.ConsumerResilience.MaxRetryDelay;
+            opts.UseJitter = options.ConsumerResilience.UseJitter;
+            opts.CircuitBreakerFailureRatio = options.ConsumerResilience.CircuitBreakerFailureRatio;
+            opts.CircuitBreakerMinimumThroughput = options.ConsumerResilience.CircuitBreakerMinimumThroughput;
+            opts.CircuitBreakerBreakDuration = options.ConsumerResilience.CircuitBreakerBreakDuration;
+        });
 
         // 1. Core NATS (always required)
         // Establishes connection, serializers, bus, and store factories
@@ -140,6 +165,17 @@ public static class ServiceCollectionExtensions
                 startupOpts.MaxRetryDelay = options.TopologyStartup.MaxRetryDelay;
                 startupOpts.ConnectionTimeout = options.TopologyStartup.ConnectionTimeout;
                 startupOpts.TotalStartupTimeout = options.TopologyStartup.TotalStartupTimeout;
+
+                // Pass through auto-infrastructure settings
+                startupOpts.AutoCreateDlqBucket = options.TopologyStartup.AutoCreateDlqBucket;
+                startupOpts.DlqBucketName = options.TopologyStartup.DlqBucketName;
+                startupOpts.AutoCreatePayloadOffloadingBucket = options.TopologyStartup.AutoCreatePayloadOffloadingBucket;
+
+                // Auto-create payload offloading bucket when payload offloading is enabled
+                if (options.EnablePayloadOffloading)
+                {
+                    startupOpts.PayloadOffloadingBucketName = options.ClaimCheckBucket;
+                }
             });
         }
 
@@ -156,6 +192,13 @@ public static class ServiceCollectionExtensions
             healthOpts.LoopIterationTimeout = options.HealthCheck.LoopIterationTimeout;
             healthOpts.NoMessageWarningTimeout = options.HealthCheck.NoMessageWarningTimeout;
         });
+
+        // 8. DLQ Advisory Listener (Batteries Included)
+        // Auto-register when topology provisioning is enabled for MAX_DELIVERIES monitoring
+        if (options.EnableTopologyProvisioning && options.EnableDlqAdvisoryListener)
+        {
+            services.AddNatsDlqAdvisoryListener();
+        }
 
         return services;
     }

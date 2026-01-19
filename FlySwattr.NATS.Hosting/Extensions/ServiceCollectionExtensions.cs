@@ -11,6 +11,8 @@ using Microsoft.Extensions.Logging;
 using NATS.Client.JetStream;
 using Polly;
 
+// TopologyBuilder and related types are in FlySwattr.NATS.Abstractions namespace
+
 namespace FlySwattr.NATS.Hosting.Extensions;
 
 public static class ServiceCollectionExtensions
@@ -220,6 +222,68 @@ public static class ServiceCollectionExtensions
         where THandler : class, IDlqAdvisoryHandler
     {
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IDlqAdvisoryHandler, THandler>());
+        return services;
+    }
+
+    /// <summary>
+    /// Registers an <see cref="ITopologySource"/> implementation with unified consumer handler mappings
+    /// and starts the consumers automatically.
+    /// This is the "batteries included" unified registration API.
+    /// </summary>
+    /// <typeparam name="TSource">The topology source implementation type.</typeparam>
+    /// <param name="services">The service collection.</param>
+    /// <param name="configure">Configuration delegate to map consumers to handlers.</param>
+    /// <returns>The service collection for chaining.</returns>
+    /// <remarks>
+    /// <para>
+    /// This method combines topology registration with consumer handler registration and startup,
+    /// eliminating the need to define consumers in two places (topology source and AddNatsConsumer).
+    /// </para>
+    /// <para>
+    /// The topology source's ConsumerSpec definitions provide the stream name, durable name,
+    /// and other JetStream configuration. The handler mappings connect those consumers to
+    /// your message processing logic.
+    /// </para>
+    /// </remarks>
+    /// <example>
+    /// <code>
+    /// builder.Services.AddNatsTopologyWithConsumers&lt;OrdersTopology&gt;(topology =>
+    /// {
+    ///     topology.MapConsumer&lt;OrderPlacedEvent&gt;("orders-consumer", async ctx =>
+    ///     {
+    ///         // Process the order
+    ///         await ctx.AckAsync();
+    ///     });
+    ///
+    ///     topology.MapConsumer&lt;PaymentProcessedEvent&gt;("payments-consumer", async ctx =>
+    ///     {
+    ///         // Process payment
+    ///         await ctx.AckAsync();
+    ///     });
+    /// });
+    /// </code>
+    /// </example>
+    public static IServiceCollection AddNatsTopologyWithConsumers<TSource>(
+        this IServiceCollection services,
+        Action<TopologyBuilder<TSource>> configure)
+        where TSource : class, ITopologySource
+    {
+        ArgumentNullException.ThrowIfNull(configure);
+
+        // Register the topology source
+        services.AddSingleton<ITopologySource, TSource>();
+        services.AddSingleton<TSource>();
+
+        // Build the handler mappings
+        var builder = new TopologyBuilder<TSource>();
+        configure(builder);
+
+        // Register the builder's mappings for use by TopologyConsumerHostedService
+        services.AddSingleton(builder);
+
+        // Register the hosted service that creates consumers from topology
+        services.AddHostedService<TopologyConsumerHostedService<TSource>>();
+
         return services;
     }
 }

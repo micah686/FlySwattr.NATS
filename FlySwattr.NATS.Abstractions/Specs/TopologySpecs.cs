@@ -60,3 +60,83 @@ public class DeadLetterPolicy
     public required StreamName TargetStream { get; init; }
     public required string TargetSubject { get; init; }
 }
+
+/// <summary>
+/// Specification for a NATS KV bucket to be provisioned.
+/// </summary>
+public class BucketSpec
+{
+    /// <summary>
+    /// The name of the KV bucket.
+    /// </summary>
+    public BucketName Name { get; set; } = BucketName.From("default");
+
+    /// <summary>
+    /// Storage type (File for persistence, Memory for speed).
+    /// Default: File
+    /// </summary>
+    public StorageType StorageType { get; set; } = StorageType.File;
+
+    /// <summary>
+    /// Maximum age of entries in the bucket. Zero means unlimited.
+    /// Default: 0 (unlimited)
+    /// </summary>
+    public TimeSpan MaxAge { get; set; } = TimeSpan.Zero;
+
+    /// <summary>
+    /// Maximum size of the bucket in bytes. -1 means unlimited.
+    /// Default: -1 (unlimited)
+    /// </summary>
+    public long MaxBytes { get; set; } = -1;
+
+    /// <summary>
+    /// Number of history entries to keep per key.
+    /// Default: 1
+    /// </summary>
+    public int History { get; set; } = 1;
+
+    /// <summary>
+    /// Number of replicas for the bucket.
+    /// Default: 1
+    /// </summary>
+    public int Replicas { get; set; } = 1;
+
+    /// <summary>
+    /// Optional description for the bucket.
+    /// </summary>
+    public string? Description { get; set; }
+}
+
+/// <summary>
+/// Specification for a NATS Object Store to be provisioned.
+/// </summary>
+public class ObjectStoreSpec
+{
+    /// <summary>
+    /// The name of the Object Store bucket.
+    /// </summary>
+    public BucketName Name { get; set; } = BucketName.From("default");
+
+    /// <summary>
+    /// Storage type (File for persistence, Memory for speed).
+    /// Default: File
+    /// </summary>
+    public StorageType StorageType { get; set; } = StorageType.File;
+
+    /// <summary>
+    /// Maximum size of the object store in bytes. -1 means unlimited.
+    /// Default: -1 (unlimited)
+    /// </summary>
+    public long MaxBytes { get; set; } = -1;
+
+    /// <summary>
+    /// Number of replicas for the object store.
+    /// Default: 1
+    /// </summary>
+    public int Replicas { get; set; } = 1;
+
+    /// <summary>
+    /// Optional description for the object store.
+    /// </summary>
+    public string? Description { get; set; }
+}

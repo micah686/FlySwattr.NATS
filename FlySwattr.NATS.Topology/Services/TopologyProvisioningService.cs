@@ -10,13 +10,18 @@ using Polly.Retry;
 namespace FlySwattr.NATS.Topology.Services;
 
 /// <summary>
-/// An <see cref="IHostedService"/> that provisions NATS topology (streams and consumers) on application startup.
+/// An <see cref="IHostedService"/> that provisions NATS topology (streams, consumers, buckets, and object stores) on application startup.
 /// Collects specifications from all registered <see cref="ITopologySource"/> implementations and ensures they exist.
-/// 
+///
 /// Implements a "Cold Start" protection pattern using a Polly retry policy to wait for NATS connection
 /// to become available before attempting JetStream management operations. This prevents application
 /// crash loops during infrastructure instability (e.g., Kubernetes sidecar startup delays).
-/// 
+///
+/// Automatically provisions "batteries included" infrastructure:
+/// - DLQ streams are auto-derived from consumer DeadLetterPolicy definitions
+/// - The fs-dlq-entries KV bucket is auto-created when any consumer has a DeadLetterPolicy
+/// - The payload offloading object store is auto-created when enabled
+///
 /// Signals <see cref="ITopologyReadySignal"/> when provisioning completes to coordinate dependent services.
 /// </summary>
 internal class TopologyProvisioningService : IHostedService
@@ -57,6 +62,10 @@ internal class TopologyProvisioningService : IHostedService
             if (sources.Count == 0)
             {
                 _logger.LogWarning("No ITopologySource implementations registered. No topology will be provisioned.");
+
+                // Even with no topology sources, we may need to provision auto-infrastructure
+                await ProvisionAutoInfrastructureAsync(hasConsumersWithDlq: false, cancellationToken);
+
                 _readySignal?.SignalReady();
                 return;
             }
@@ -66,11 +75,48 @@ internal class TopologyProvisioningService : IHostedService
             // Collect all specs
             var allStreams = sources.SelectMany(s => s.GetStreams()).ToList();
             var allConsumers = sources.SelectMany(s => s.GetConsumers()).ToList();
+            var allBuckets = sources.SelectMany(s => s.GetBuckets()).ToList();
+            var allObjectStores = sources.SelectMany(s => s.GetObjectStores()).ToList();
 
-            _logger.LogInformation("Provisioning {StreamCount} stream(s) and {ConsumerCount} consumer(s)...",
-                allStreams.Count, allConsumers.Count);
+            _logger.LogInformation(
+                "Provisioning {StreamCount} stream(s), {ConsumerCount} consumer(s), {BucketCount} bucket(s), and {ObjectStoreCount} object store(s)...",
+                allStreams.Count, allConsumers.Count, allBuckets.Count, allObjectStores.Count);
 
-            // Provision streams first (consumers depend on streams)
+            // Check if any consumer has a DLQ policy
+            var hasConsumersWithDlq = allConsumers.Any(c => c.DeadLetterPolicy != null);
+
+            // Provision auto-infrastructure first (DLQ bucket, payload offloading bucket)
+            await ProvisionAutoInfrastructureAsync(hasConsumersWithDlq, cancellationToken);
+
+            // Provision KV buckets from topology sources
+            foreach (var bucketSpec in allBuckets)
+            {
+                try
+                {
+                    await _topologyManager.EnsureBucketAsync(bucketSpec, cancellationToken);
+                }
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+                {
+                    _logger.LogError(ex, "Failed to provision KV bucket {BucketName}. Continuing with remaining topology.",
+                        bucketSpec.Name);
+                }
+            }
+
+            // Provision Object Stores from topology sources
+            foreach (var objectStoreSpec in allObjectStores)
+            {
+                try
+                {
+                    await _topologyManager.EnsureObjectStoreAsync(objectStoreSpec, cancellationToken);
+                }
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+                {
+                    _logger.LogError(ex, "Failed to provision Object Store {BucketName}. Continuing with remaining topology.",
+                        objectStoreSpec.Name);
+                }
+            }
+
+            // Provision streams (consumers depend on streams)
             foreach (var streamSpec in allStreams)
             {
                 try
@@ -85,7 +131,7 @@ internal class TopologyProvisioningService : IHostedService
                 }
             }
 
-            // Provision consumers
+            // Provision consumers (DLQ streams are auto-created by EnsureConsumerAsync)
             foreach (var consumerSpec in allConsumers)
             {
                 try
@@ -101,7 +147,7 @@ internal class TopologyProvisioningService : IHostedService
             }
 
             _logger.LogInformation("Topology provisioning completed.");
-            
+
             // Signal dependent services that topology is ready
             _readySignal?.SignalReady();
         }
@@ -115,6 +161,50 @@ internal class TopologyProvisioningService : IHostedService
             _logger.LogCritical(ex, "Topology provisioning failed with unrecoverable error.");
             _readySignal?.SignalFailed(ex);
             throw;
+        }
+    }
+
+    /// <summary>
+    /// Provisions "batteries included" auto-infrastructure like DLQ buckets and payload offloading buckets.
+    /// </summary>
+    private async Task ProvisionAutoInfrastructureAsync(bool hasConsumersWithDlq, CancellationToken cancellationToken)
+    {
+        // Auto-create DLQ KV bucket when any consumer has a DeadLetterPolicy
+        if (hasConsumersWithDlq && _options.AutoCreateDlqBucket)
+        {
+            _logger.LogInformation("Auto-creating DLQ entries bucket '{BucketName}' (consumers with DeadLetterPolicy detected)...",
+                _options.DlqBucketName);
+            try
+            {
+                await _topologyManager.EnsureBucketAsync(
+                    BucketName.From(_options.DlqBucketName),
+                    StorageType.File,
+                    cancellationToken);
+            }
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogError(ex, "Failed to auto-create DLQ bucket '{BucketName}'. DLQ functionality may be impaired.",
+                    _options.DlqBucketName);
+            }
+        }
+
+        // Auto-create payload offloading object store when configured
+        if (_options.AutoCreatePayloadOffloadingBucket && !string.IsNullOrEmpty(_options.PayloadOffloadingBucketName))
+        {
+            _logger.LogInformation("Auto-creating payload offloading bucket '{BucketName}'...",
+                _options.PayloadOffloadingBucketName);
+            try
+            {
+                await _topologyManager.EnsureObjectStoreAsync(
+                    BucketName.From(_options.PayloadOffloadingBucketName),
+                    StorageType.File,
+                    cancellationToken);
+            }
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogError(ex, "Failed to auto-create payload offloading bucket '{BucketName}'. Large payload handling may fail.",
+                    _options.PayloadOffloadingBucketName);
+            }
         }
     }
 

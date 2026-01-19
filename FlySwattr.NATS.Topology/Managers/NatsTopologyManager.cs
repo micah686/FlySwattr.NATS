@@ -295,64 +295,88 @@ internal class NatsTopologyManager : ITopologyManager
 
     public async Task EnsureBucketAsync(BucketName name, StorageType storageType, CancellationToken cancellationToken = default)
     {
+        await EnsureBucketAsync(new BucketSpec
+        {
+            Name = name,
+            StorageType = storageType
+        }, cancellationToken);
+    }
+
+    public async Task EnsureBucketAsync(BucketSpec spec, CancellationToken cancellationToken = default)
+    {
         try
         {
-             var config = new NatsKVConfig(name.Value)
+             var config = new NatsKVConfig(spec.Name.Value)
              {
-                 Storage = storageType == StorageType.Memory ? NatsKVStorageType.Memory : NatsKVStorageType.File
+                 Storage = spec.StorageType == StorageType.Memory ? NatsKVStorageType.Memory : NatsKVStorageType.File,
+                 MaxBytes = spec.MaxBytes,
+                 History = spec.History,
+                 Description = spec.Description,
+                 MaxAge = spec.MaxAge
              };
 
-             var lockKey = $"topology_lock_kv_bucket_{name.Value}";
+             var lockKey = $"topology_lock_kv_bucket_{spec.Name.Value}";
              await using var _ = await _lockProvider.CreateLock(lockKey).AcquireAsync(TimeSpan.FromSeconds(30), cancellationToken);
 
              // Create-first to avoid TOCTOU races during concurrent startups
              try
              {
                  await _kvContext.CreateStoreAsync(config, cancellationToken: cancellationToken);
-                 _logger.LogInformation("KV Bucket {Bucket} created.", name);
+                 _logger.LogInformation("KV Bucket {Bucket} created.", spec.Name);
              }
              catch (NatsJSApiException ex) when (IsResourceExistsError(ex))
              {
-                 _logger.LogDebug("KV Bucket {Bucket} already exists.", name);
+                 _logger.LogDebug("KV Bucket {Bucket} already exists.", spec.Name);
              }
 
-             _logger.LogInformation("KV Bucket {Bucket} ready.", name);
+             _logger.LogInformation("KV Bucket {Bucket} ready.", spec.Name);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error creating KV bucket {Bucket}", name);
+            _logger.LogError(ex, "Error creating KV bucket {Bucket}", spec.Name);
             throw;
         }
     }
 
     public async Task EnsureObjectStoreAsync(BucketName name, StorageType storageType, CancellationToken cancellationToken = default)
     {
+        await EnsureObjectStoreAsync(new ObjectStoreSpec
+        {
+            Name = name,
+            StorageType = storageType
+        }, cancellationToken);
+    }
+
+    public async Task EnsureObjectStoreAsync(ObjectStoreSpec spec, CancellationToken cancellationToken = default)
+    {
         try
         {
-             var config = new NatsObjConfig(name.Value)
+             var config = new NatsObjConfig(spec.Name.Value)
              {
-                 Storage = storageType == StorageType.Memory ? NatsObjStorageType.Memory : NatsObjStorageType.File
+                 Storage = spec.StorageType == StorageType.Memory ? NatsObjStorageType.Memory : NatsObjStorageType.File,
+                 MaxBytes = spec.MaxBytes,
+                 Description = spec.Description
              };
-             
-             var lockKey = $"topology_lock_obj_store_{name.Value}";
+
+             var lockKey = $"topology_lock_obj_store_{spec.Name.Value}";
              await using var _ = await _lockProvider.CreateLock(lockKey).AcquireAsync(TimeSpan.FromSeconds(30), cancellationToken);
-             
+
              // Create-first to avoid TOCTOU races during concurrent startups
              try
              {
                  await _objContext.CreateObjectStoreAsync(config, cancellationToken: cancellationToken);
-                 _logger.LogInformation("Object Store {Bucket} created.", name);
+                 _logger.LogInformation("Object Store {Bucket} created.", spec.Name);
              }
              catch (NatsJSApiException ex) when (IsResourceExistsError(ex))
              {
-                 _logger.LogDebug("Object Store {Bucket} already exists.", name);
+                 _logger.LogDebug("Object Store {Bucket} already exists.", spec.Name);
              }
-             
-             _logger.LogInformation("Object Store {Bucket} ready.", name);
+
+             _logger.LogInformation("Object Store {Bucket} ready.", spec.Name);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error creating Object Store {Bucket}", name);
+            _logger.LogError(ex, "Error creating Object Store {Bucket}", spec.Name);
             throw;
         }
     }
