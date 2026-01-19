@@ -11,7 +11,7 @@
     </ItemGroup>
 
     <ItemGroup>
-        <ProjectReference Include="..\..\FlySwattr.NATS.Abstractions\FlySwattr.NATS.Abstractions.csproj" />
+        <ProjectReference Include="..\..\FlySwattr.NATS\FlySwattr.NATS.csproj" />
     </ItemGroup>
 
 </Project>

@@ -26,7 +26,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton(sp => sp.GetRequiredService<IOptions<NatsConfiguration>>().Value);
 
         // 2. Serializers
-        services.AddSingleton<INatsSerializerRegistry, MemoryPackSerializerRegistry>();
+        services.AddSingleton<INatsSerializerRegistry, HybridSerializerRegistry>();
         services.AddSingleton<IMessageSerializer>(sp =>
         {
             var config = sp.GetRequiredService<NatsConfiguration>();

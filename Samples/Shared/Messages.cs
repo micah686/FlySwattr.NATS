@@ -3,35 +3,57 @@ using MemoryPack;
 namespace Shared;
 
 /// <summary>
-/// Published when a new order is placed.
-/// Demonstrates Pub/Sub pattern.
+/// Represents an order created event for pub/sub and JetStream messaging.
 /// </summary>
-/// <param name="OrderId">Unique identifier for the order</param>
-/// <param name="Sku">Stock keeping unit for the ordered item</param>
 [MemoryPackable]
-public partial record OrderPlacedEvent(Guid OrderId, string Sku);
+public partial record OrderCreatedEvent(
+    string OrderId,
+    string CustomerId,
+    decimal Amount,
+    DateTime CreatedAt);
 
 /// <summary>
-/// Request to check if an item is in stock.
-/// Demonstrates Request/Reply pattern.
+/// Represents a query for order information (request/reply pattern).
 /// </summary>
-/// <param name="Sku">Stock keeping unit to check</param>
 [MemoryPackable]
-public partial record CheckStockRequest(string Sku);
+public partial record OrderQuery(string OrderId);
 
 /// <summary>
-/// Response to a stock check request.
+/// Represents the response to an order query (request/reply pattern).
 /// </summary>
-/// <param name="Sku">Stock keeping unit</param>
-/// <param name="InStock">Whether the item is in stock</param>
-/// <param name="Quantity">Available quantity</param>
 [MemoryPackable]
-public partial record StockStatusResponse(string Sku, bool InStock, int Quantity);
+public partial record OrderQueryResponse(
+    string OrderId,
+    string CustomerId,
+    decimal Amount,
+    DateTime CreatedAt,
+    string Status);
 
 /// <summary>
-/// Command to ship an order.
-/// Demonstrates Queue Groups pattern for load balancing.
+/// Represents a task for queue group processing.
 /// </summary>
-/// <param name="OrderId">The order to ship</param>
 [MemoryPackable]
-public partial record ShipOrderCommand(Guid OrderId);
+public partial record WorkTask(
+    string TaskId,
+    string Description,
+    int Priority,
+    DateTime ScheduledAt);
+
+/// <summary>
+/// Represents a poison message that will intentionally fail processing.
+/// Used to demonstrate DLQ functionality.
+/// </summary>
+[MemoryPackable]
+public partial record PoisonMessage(
+    string Id,
+    string Reason,
+    DateTime CreatedAt);
+
+/// <summary>
+/// Represents configuration stored in KV Store.
+/// </summary>
+[MemoryPackable]
+public partial record AppConfiguration(
+    string Key,
+    string Value,
+    DateTime UpdatedAt);

@@ -89,6 +89,8 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
         var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var taskId = Guid.NewGuid();
 
+        _logger.LogInformation("Starting subscription for {Subject}", subject);
+
         var task = Task.Run(async () =>
         {
             var backoff = TimeSpan.FromSeconds(1);
@@ -97,9 +99,11 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
                 INatsSub<T>? sub = null;
                 try
                 {
+                    _logger.LogDebug("Attempting to subscribe to {Subject}", subject);
                     sub = await _connection.SubscribeCoreAsync<T>(subject, queueGroup: queueGroup, cancellationToken: token);
                     _subscriptions[taskId] = sub;
 
+                    _logger.LogDebug("Successfully subscribed to {Subject}", subject);
                     tcs.TrySetResult(true);
 
                     backoff = TimeSpan.FromSeconds(1);
@@ -108,6 +112,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
                     {
                         try
                         {
+                            _logger.LogDebug("Received message on {Subject}", msg.Subject);
                             var context = new MessageContext<T>(msg);
                             await handler(context);
                         }
@@ -116,9 +121,16 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
                             _logger.LogError(ex, "Error handling message {Subject}", subject);
                         }
                     }
+                    _logger.LogWarning("Subscription Msgs loop completed UNEXPECTEDLY for {Subject}. Token cancelled: {IsCancelled}", subject, token.IsCancellationRequested);
+                    
+                    if (!token.IsCancellationRequested)
+                    {
+                        await Task.Delay(1000, token);
+                    }
                 }
                 catch (OperationCanceledException)
                 {
+                    _logger.LogInformation("Subscription cancelled for {Subject}", subject);
                     break;
                 }
                 catch (Exception ex)
@@ -150,6 +162,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
                 }
             }
 
+            _logger.LogInformation("Background task finishing for {Subject}", subject);
             _subscriptions.TryRemove(taskId, out _);
             _backgroundTasks.TryRemove(taskId, out _);
             linkedCts.Dispose();
@@ -161,6 +174,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
         try
         {
              await tcs.Task.WaitAsync(TimeSpan.FromSeconds(30), token);
+             _logger.LogInformation("SubscribeAsync returning for {Subject}", subject);
         }
         catch (TimeoutException)
         {
@@ -169,7 +183,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
         }
         catch when (token.IsCancellationRequested)
         {
-            // ignore
+            _logger.LogWarning("SubscribeAsync cancelled for {Subject} during initial wait", subject);
         }
     }
 
@@ -253,6 +267,7 @@ internal class MessageContext<T> : IMessageContext<T>
 
     public async Task RespondAsync<TResponse>(TResponse response, CancellationToken cancellationToken = default)
     {
+         if (ReplyTo == null) return;
          await _msg.ReplyAsync(response, cancellationToken: cancellationToken);
     }
 }
