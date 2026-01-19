@@ -88,7 +88,21 @@ var coreSubTask = messageBus.SubscribeAsync<OrderCreatedEvent>(
     async context =>
     {
         Interlocked.Increment(ref messageCount);
-        var order = context.Message;
+
+        // Handle messages that can't be deserialized as OrderCreatedEvent
+        // (e.g., PoisonMessage published to orders.created for DLQ testing)
+        OrderCreatedEvent order;
+        try
+        {
+            order = context.Message;
+        }
+        catch (InvalidOperationException)
+        {
+            AnsiConsole.MarkupLine($"[yellow] (Core) Message #{messageCount}[/]");
+            AnsiConsole.MarkupLine($"  Subject: [cyan]{context.Subject}[/]");
+            AnsiConsole.MarkupLine($"  [grey](Message could not be deserialized as OrderCreatedEvent)[/]");
+            return;
+        }
 
         AnsiConsole.MarkupLine($"[green] (Core) Message #{messageCount}[/]");
         AnsiConsole.MarkupLine($"  Subject: [cyan]{context.Subject}[/]");
@@ -156,7 +170,43 @@ async Task StartJetStreamConsumerSafe(
             OrdersTopology.OrderProcessorConsumer,
             async context =>
             {
-                var order = context.Message;
+                // Handle messages that can't be deserialized as OrderCreatedEvent
+                // (e.g., PoisonMessage published to orders.created for DLQ testing)
+                OrderCreatedEvent order;
+                try
+                {
+                    order = context.Message;
+                }
+                catch (Exception ex) when (ex is InvalidOperationException or FlySwattr.NATS.Abstractions.Exceptions.NullMessagePayloadException)
+                {
+                    AnsiConsole.MarkupLine($"[yellow] (JetStream) Message (seq: {context.Sequence}) - deserialization failed[/]");
+                    AnsiConsole.MarkupLine($"  [grey](Message could not be deserialized as OrderCreatedEvent)[/]");
+                    AnsiConsole.MarkupLine($"  Delivery: {context.NumDelivered}");
+
+                    // For DLQ testing: simulate failure behavior for undeserializable messages
+                    if (simulateFails)
+                    {
+                        incrementFailedCount();
+                        if (context.NumDelivered >= 3)
+                        {
+                            AnsiConsole.MarkupLine($"  [red]Max deliveries reached - terminating message[/]");
+                            await context.TermAsync();
+                        }
+                        else
+                        {
+                            AnsiConsole.MarkupLine($"  [yellow]Requesting redelivery with 2s delay[/]");
+                            await context.NackAsync(delay: TimeSpan.FromSeconds(2));
+                        }
+                    }
+                    else
+                    {
+                        // In normal mode, acknowledge to prevent endless redelivery
+                        AnsiConsole.MarkupLine($"  [grey]Acknowledging unprocessable message[/]");
+                        await context.AckAsync();
+                    }
+                    return;
+                }
+
                 var shouldFail = simulateFails && order.OrderId.Contains("POISON", StringComparison.OrdinalIgnoreCase);
 
                 AnsiConsole.MarkupLine($"[yellow] (JetStream) Processing message (seq: {context.Sequence})[/]");

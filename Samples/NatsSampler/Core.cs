@@ -159,7 +159,21 @@ public class CoreOperations
                 async context =>
                 {
                     messageCount++;
-                    var order = context.Message;
+
+                    // Handle messages that can't be deserialized as OrderCreatedEvent
+                    // (e.g., PoisonMessage published to orders.created for DLQ testing)
+                    OrderCreatedEvent order;
+                    try
+                    {
+                        order = context.Message;
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        AnsiConsole.MarkupLine($"[yellow]Received message #{messageCount}:[/]");
+                        AnsiConsole.MarkupLine($"  Subject: [cyan]{context.Subject}[/]");
+                        AnsiConsole.MarkupLine($"  [grey](Message could not be deserialized as OrderCreatedEvent)[/]");
+                        return;
+                    }
 
                     AnsiConsole.MarkupLine($"[green]Received message #{messageCount}:[/]");
                     AnsiConsole.MarkupLine($"  Subject: [cyan]{context.Subject}[/]");
