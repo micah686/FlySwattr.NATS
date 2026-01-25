@@ -43,22 +43,29 @@ internal class NatsDlqStore : IDlqStore
 
             try
             {
-                // Ensure the DLQ bucket exists with File (Durable) storage.
-                // CreateStoreAsync is generally idempotent (Create or Update).
-                await _kvContext.CreateStoreAsync(new NatsKVConfig(BucketName) 
-                { 
-                    Storage = NatsKVStorageType.File,
-                    Description = "Dead Letter Queue Storage",
-                    History = 1
-                }, cancellationToken: cancellationToken);
-                
-                _logger.LogDebug("Ensured DLQ KV bucket {BucketName} exists", BucketName);
+                // First check if the bucket already exists to avoid conflict errors
+                try
+                {
+                    await _kvContext.GetStoreAsync(BucketName, cancellationToken: cancellationToken);
+                    _logger.LogDebug("DLQ KV bucket {BucketName} already exists", BucketName);
+                }
+                catch
+                {
+                    // If getting the store fails, assume it doesn't exist and try to create it
+                    await _kvContext.CreateStoreAsync(new NatsKVConfig(BucketName) 
+                    { 
+                        Storage = NatsKVStorageType.File,
+                        Description = "Dead Letter Queue Storage",
+                        History = 1
+                    }, cancellationToken: cancellationToken);
+                    
+                    _logger.LogDebug("Created DLQ KV bucket {BucketName}", BucketName);
+                }
             }
             catch (Exception ex)
             {
-                // Log and continue - if it exists with incompatible config, we might get an error,
-                // or if we lack permissions. We'll let the actual operations fail if needed.
-                _logger.LogWarning(ex, "Attempt to ensure DLQ bucket {BucketName} failed. Proceeding hoping it exists.", BucketName);
+                // Log and continue - if we still can't create it or get it, we'll let actual operations fail
+                _logger.LogWarning(ex, "Attempt to ensure DLQ bucket {BucketName} failed. Proceeding hoping it exists or is accessible.", BucketName);
             }
 
             _isInitialized = true;
