@@ -42,6 +42,10 @@ public class NatsDlqStoreTests
         // Arrange
         var entry = CreateTestEntry("msg-1");
 
+        // Force GetStoreAsync to fail so CreateStoreAsync is called
+        _kvContext.GetStoreAsync(BucketName, Arg.Any<CancellationToken>())
+            .Returns(ValueTask.FromException<INatsKVStore>(new Exception("Bucket not found")));
+
         // Act
         await _sut.StoreAsync(entry);
 
@@ -57,6 +61,10 @@ public class NatsDlqStoreTests
         // Arrange
         var entry1 = CreateTestEntry("msg-1");
         var entry2 = CreateTestEntry("msg-2");
+
+        // Force GetStoreAsync to fail so CreateStoreAsync is called
+        _kvContext.GetStoreAsync(BucketName, Arg.Any<CancellationToken>())
+            .Returns(ValueTask.FromException<INatsKVStore>(new Exception("Bucket not found")));
 
         // Act
         await _sut.StoreAsync(entry1);
