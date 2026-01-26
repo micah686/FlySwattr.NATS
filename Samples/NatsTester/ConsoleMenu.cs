@@ -8,13 +8,14 @@ public class ConsoleMenu
     private readonly CoreDemo _coreDemo;
     private readonly StoreDemo _storeDemo;
     private readonly JetStreamDemo _jetStreamDemo;
+    private readonly DlqDemo _dlqDemo;
 
-    public ConsoleMenu(CoreDemo coreDemo, StoreDemo storeDemo, JetStreamDemo jetStreamDemo)
+    public ConsoleMenu(CoreDemo coreDemo, StoreDemo storeDemo, JetStreamDemo jetStreamDemo, DlqDemo dlqDemo)
     {
         _coreDemo = coreDemo;
         _storeDemo = storeDemo;
         _jetStreamDemo = jetStreamDemo;
-
+        _dlqDemo = dlqDemo;
     }
 
     public async Task RunAsync()
@@ -59,6 +60,9 @@ public class ConsoleMenu
                 break;
             case "JetStream":
                 await _jetStreamDemo.ShowMenuAsync();
+                break;
+            case "DLQ (Dead Letter Queue)":
+                await _dlqDemo.ShowMenuAsync();
                 break;
         }
     }

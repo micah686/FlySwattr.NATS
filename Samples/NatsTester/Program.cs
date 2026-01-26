@@ -25,6 +25,7 @@ var host = Host.CreateDefaultBuilder(args)
         services.AddSingleton<CoreDemo>();
         services.AddSingleton<StoreDemo>();
         services.AddSingleton<JetStreamDemo>();
+        services.AddSingleton<DlqDemo>();
         services.AddSingleton<ConsoleMenu>();
     })
     .Build();
