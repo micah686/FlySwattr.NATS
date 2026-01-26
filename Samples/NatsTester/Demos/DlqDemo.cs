@@ -15,12 +15,14 @@ public class DlqDemo
     private readonly INatsJSContext _js;
     private readonly IJetStreamPublisher _publisher;
     private readonly IDlqStore _dlqStore;
+    private readonly IDlqRemediationService _remediationService;
 
-    public DlqDemo(INatsJSContext js, IJetStreamPublisher publisher, IDlqStore dlqStore)
+    public DlqDemo(INatsJSContext js, IJetStreamPublisher publisher, IDlqStore dlqStore, IDlqRemediationService remediationService)
     {
         _js = js;
         _publisher = publisher;
         _dlqStore = dlqStore;
+        _remediationService = remediationService;
     }
 
     public async Task ShowMenuAsync()
@@ -39,6 +41,9 @@ public class DlqDemo
                     {
                         "Simulate Poison Message",
                         "List DLQ Messages",
+                        "Replay Message",
+                        "Archive Message",
+                        "Delete Message",
                         "Back"
                     }));
 
@@ -53,6 +58,15 @@ public class DlqDemo
                         break;
                     case "List DLQ Messages":
                         await ListDlqMessagesAsync();
+                        break;
+                    case "Replay Message":
+                        await ReplayMessageAsync();
+                        break;
+                    case "Archive Message":
+                        await ArchiveMessageAsync();
+                        break;
+                    case "Delete Message":
+                        await DeleteMessageAsync();
                         break;
                 }
             }
@@ -80,6 +94,8 @@ public class DlqDemo
         // 3. Publish a "poison" message
         var messageId = $"poison-{Guid.NewGuid():N}";
         var poisonPayload = $"POISON_MESSAGE_{DateTime.UtcNow:HHmmss}";
+        // Store the payload bytes for DLQ storage (using UTF-8 encoding for this demo)
+        var payloadBytes = System.Text.Encoding.UTF8.GetBytes(poisonPayload);
 
         AnsiConsole.MarkupLine($"[blue]Publishing poison message with ID: {messageId}[/]");
         await _publisher.PublishAsync(DemoSubject, poisonPayload, messageId);
@@ -142,7 +158,9 @@ public class DlqDemo
                 DeliveryCount = deliveryCount,
                 StoredAt = DateTimeOffset.UtcNow,
                 ErrorReason = "Simulated poison message - processing intentionally failed",
-                Status = DlqMessageStatus.Pending
+                Status = DlqMessageStatus.Pending,
+                Payload = payloadBytes,
+                PayloadEncoding = "text/plain; charset=utf-8"
             };
 
             await _dlqStore.StoreAsync(dlqEntry);
@@ -200,6 +218,127 @@ public class DlqDemo
 
         AnsiConsole.MarkupLine($"[green]Found {entries.Count} message(s) in DLQ Store:[/]");
         AnsiConsole.Write(table);
+    }
+
+    private async Task ReplayMessageAsync()
+    {
+        var messageId = await SelectDlqMessageAsync("replay");
+        if (messageId == null) return;
+
+        if (!AnsiConsole.Confirm($"Replay message [yellow]{messageId}[/] to its original subject?"))
+        {
+            AnsiConsole.MarkupLine("[grey]Cancelled.[/]");
+            return;
+        }
+
+        AnsiConsole.MarkupLine("[blue]Replaying message...[/]");
+        var result = await _remediationService.ReplayAsync(messageId);
+
+        DisplayRemediationResult(result);
+    }
+
+    private async Task ArchiveMessageAsync()
+    {
+        var messageId = await SelectDlqMessageAsync("archive");
+        if (messageId == null) return;
+
+        var reason = AnsiConsole.Ask<string>("Archive reason (optional):", "");
+
+        if (!AnsiConsole.Confirm($"Archive message [yellow]{messageId}[/]?"))
+        {
+            AnsiConsole.MarkupLine("[grey]Cancelled.[/]");
+            return;
+        }
+
+        AnsiConsole.MarkupLine("[blue]Archiving message...[/]");
+        var result = await _remediationService.ArchiveAsync(messageId, string.IsNullOrWhiteSpace(reason) ? null : reason);
+
+        DisplayRemediationResult(result);
+    }
+
+    private async Task DeleteMessageAsync()
+    {
+        var messageId = await SelectDlqMessageAsync("delete");
+        if (messageId == null) return;
+
+        AnsiConsole.MarkupLine("[red]Warning: This will permanently delete the message from the DLQ store.[/]");
+        if (!AnsiConsole.Confirm($"Delete message [yellow]{messageId}[/]?", false))
+        {
+            AnsiConsole.MarkupLine("[grey]Cancelled.[/]");
+            return;
+        }
+
+        AnsiConsole.MarkupLine("[blue]Deleting message...[/]");
+        var result = await _remediationService.DeleteAsync(messageId);
+
+        DisplayRemediationResult(result);
+    }
+
+    private async Task<string?> SelectDlqMessageAsync(string action)
+    {
+        var entries = await _dlqStore.ListAsync(limit: 50);
+
+        if (entries.Count == 0)
+        {
+            AnsiConsole.MarkupLine("[yellow]No messages found in DLQ Store.[/]");
+            AnsiConsole.MarkupLine("[grey]Run 'Simulate Poison Message' to generate a DLQ entry first.[/]");
+            return null;
+        }
+
+        // Build a mapping of display text to hierarchical key
+        // The DLQ store uses keys in the format: {stream}.{consumer}.{id}
+        var entryMap = entries.ToDictionary(
+            e => $"{e.Id} ({e.OriginalStream}/{e.OriginalConsumer})",
+            e => BuildHierarchicalKey(e.OriginalStream, e.OriginalConsumer, e.Id));
+
+        var choices = entryMap.Keys.ToList();
+        choices.Add("Cancel");
+
+        var selection = AnsiConsole.Prompt(
+            new SelectionPrompt<string>()
+                .Title($"Select a message to [green]{action}[/]:")
+                .PageSize(10)
+                .AddChoices(choices));
+
+        if (selection == "Cancel") return null;
+
+        // Return the full hierarchical key for the selected entry
+        return entryMap[selection];
+    }
+
+    /// <summary>
+    /// Builds the hierarchical KV key matching NatsDlqStore format.
+    /// </summary>
+    private static string BuildHierarchicalKey(string stream, string consumer, string id)
+        => $"{SanitizeToken(stream)}.{SanitizeToken(consumer)}.{id}";
+
+    /// <summary>
+    /// Sanitizes a token for use in NATS KV keys by replacing reserved characters.
+    /// </summary>
+    private static string SanitizeToken(string token)
+        => token.Replace(".", "_").Replace("*", "_").Replace(">", "_");
+
+    private void DisplayRemediationResult(DlqRemediationResult result)
+    {
+        AnsiConsole.WriteLine();
+        if (result.Success)
+        {
+            AnsiConsole.MarkupLine($"[green]Success![/] Action: {result.Action}");
+            AnsiConsole.MarkupLine($"[grey]Message ID: {result.Id}[/]");
+            if (result.CompletedAt.HasValue)
+            {
+                AnsiConsole.MarkupLine($"[grey]Completed at: {result.CompletedAt.Value:yyyy-MM-dd HH:mm:ss}[/]");
+            }
+        }
+        else
+        {
+            AnsiConsole.MarkupLine($"[red]Failed![/] Action: {result.Action}");
+            AnsiConsole.MarkupLine($"[grey]Message ID: {result.Id}[/]");
+            if (!string.IsNullOrEmpty(result.ErrorMessage))
+            {
+                AnsiConsole.MarkupLine($"[red]Error: {Markup.Escape(result.ErrorMessage)}[/]");
+            }
+        }
     }
 
     private async Task EnsureStreamAsync(string streamName, string subject)
