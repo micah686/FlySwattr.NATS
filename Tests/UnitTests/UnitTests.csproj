@@ -39,7 +39,6 @@
     <ItemGroup>
       <Folder Include="Abstractions\" />
       <Folder Include="Caching\" />
-      <Folder Include="ControlPlane\" />
       <Folder Include="Core\" />
       <Folder Include="DistributedLock\" />
       <Folder Include="Hosting\" />
