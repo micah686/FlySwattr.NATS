@@ -1,0 +1,24 @@
+<Solution>
+  <Configurations>
+    <Platform Name="Any CPU" />
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Folder Name="/Samples/">
+    <Project Path="Samples/NatsTester/NatsTester.csproj" />
+    <Project Path="Samples/Service1/Service1.csproj" />
+    <Project Path="Samples/Service2/Service2.csproj" />
+  </Folder>
+  <Folder Name="/Tests/">
+    <Project Path="Tests/IntegrationTests/IntegrationTests.csproj" />
+    <Project Path="Tests/UnitTests/UnitTests.csproj" />
+  </Folder>
+  <Project Path="FlySwattr.NATS.Abstractions/FlySwattr.NATS.Abstractions.csproj" />
+  <Project Path="FlySwattr.NATS.Caching/FlySwattr.NATS.Caching.csproj" />
+  <Project Path="FlySwattr.NATS.Core/FlySwattr.NATS.Core.csproj" />
+  <Project Path="FlySwattr.NATS.DistributedLock/FlySwattr.NATS.DistributedLock.csproj" />
+  <Project Path="FlySwattr.NATS.Hosting/FlySwattr.NATS.Hosting.csproj" />
+  <Project Path="FlySwattr.NATS.Resilience/FlySwattr.NATS.Resilience.csproj" />
+  <Project Path="FlySwattr.NATS.Topology/FlySwattr.NATS.Topology.csproj" />
+  <Project Path="FlySwattr.NATS/FlySwattr.NATS.csproj" />
+</Solution>
