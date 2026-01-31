@@ -1,3 +1,0 @@
-Sample content created at 2026-01-19T08:28:23.9395975Z
-
-This is a test file for FlySwattr.NATS Object Store demo.
