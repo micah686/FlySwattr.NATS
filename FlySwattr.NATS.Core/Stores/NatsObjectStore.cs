@@ -268,6 +268,14 @@ internal class NatsObjectStore : IObjectStore, IAsyncDisposable
         try
         {
             var store = await GetStoreAsync(cancellationToken);
+
+            // Check bucket status first - ListAsync can hang on empty buckets
+            var status = await store.GetStatusAsync(cancellationToken);
+            if (status.Info.State.Messages == 0)
+            {
+                return [];
+            }
+
             var result = new List<ObjectInfo>();
             await foreach(var info in store.ListAsync(cancellationToken: cancellationToken))
             {
