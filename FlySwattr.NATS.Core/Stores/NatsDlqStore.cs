@@ -1,6 +1,8 @@
 using System.Text.Json;
 using FlySwattr.NATS.Abstractions;
 using Microsoft.Extensions.Logging;
+using NATS.Client.JetStream.Models;
+using NATS.Client.KeyValueStore;
 
 namespace FlySwattr.NATS.Core;
 
@@ -13,15 +15,65 @@ internal class NatsDlqStore : IDlqStore
 {
     private const string BucketName = "fs-dlq-entries";
     
+    private readonly INatsKVContext _kvContext;
     private readonly IKeyValueStore _store;
     private readonly ILogger<NatsDlqStore> _logger;
+    
+    private readonly SemaphoreSlim _initLock = new(1, 1);
+    private bool _isInitialized;
 
     public NatsDlqStore(
+        INatsKVContext kvContext,
         Func<string, IKeyValueStore> storeFactory,
         ILogger<NatsDlqStore> logger)
     {
+        _kvContext = kvContext;
         _store = storeFactory(BucketName);
         _logger = logger;
+    }
+
+    private async ValueTask EnsureInitializedAsync(CancellationToken cancellationToken)
+    {
+        if (_isInitialized) return;
+
+        await _initLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (_isInitialized) return;
+
+            try
+            {
+                // First check if the bucket already exists to avoid conflict errors
+                try
+                {
+                    await _kvContext.GetStoreAsync(BucketName, cancellationToken: cancellationToken);
+                    _logger.LogDebug("DLQ KV bucket {BucketName} already exists", BucketName);
+                }
+                catch
+                {
+                    // If getting the store fails, assume it doesn't exist and try to create it
+                    await _kvContext.CreateStoreAsync(new NatsKVConfig(BucketName) 
+                    { 
+                        Storage = NatsKVStorageType.File,
+                        Description = "Dead Letter Queue Storage",
+                        History = 1
+                    }, cancellationToken: cancellationToken);
+                    
+                    _logger.LogDebug("Created DLQ KV bucket {BucketName}", BucketName);
+                }
+            }
+            catch (Exception ex)
+            {
+                // Log and continue - if we still can't create it or get it, we'll let actual operations fail
+                _logger.LogWarning(ex, "Attempt to ensure DLQ bucket {BucketName} failed. Proceeding hoping it exists or is accessible.", BucketName);
+            }
+
+            _isInitialized = true;
+        }
+        finally
+        {
+            _initLock.Release();
+        }
     }
 
     /// <summary>
@@ -57,6 +109,8 @@ internal class NatsDlqStore : IDlqStore
         ArgumentNullException.ThrowIfNull(entry);
         ArgumentException.ThrowIfNullOrWhiteSpace(entry.Id);
 
+        await EnsureInitializedAsync(cancellationToken);
+
         try
         {
             var key = BuildKey(entry.OriginalStream, entry.OriginalConsumer, entry.Id);
@@ -77,6 +131,8 @@ internal class NatsDlqStore : IDlqStore
     public async Task<DlqMessageEntry?> GetAsync(string id, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
+
+        await EnsureInitializedAsync(cancellationToken);
 
         try
         {
@@ -104,6 +160,8 @@ internal class NatsDlqStore : IDlqStore
         int limit = 100,
         CancellationToken cancellationToken = default)
     {
+        await EnsureInitializedAsync(cancellationToken);
+
         try
         {
             var pattern = BuildFilterPattern(filterStream, filterConsumer);
@@ -139,6 +197,8 @@ internal class NatsDlqStore : IDlqStore
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
 
+        await EnsureInitializedAsync(cancellationToken);
+
         try
         {
             var entry = await GetAsync(id, cancellationToken);
@@ -167,6 +227,8 @@ internal class NatsDlqStore : IDlqStore
     public async Task<bool> DeleteAsync(string id, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
+
+        await EnsureInitializedAsync(cancellationToken);
 
         try
         {

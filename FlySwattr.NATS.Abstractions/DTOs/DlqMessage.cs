@@ -1,8 +1,11 @@
+using MemoryPack;
+
 // ReSharper disable CheckNamespace
 // ReSharper disable once IdentifierTypo
 namespace FlySwattr.NATS.Abstractions;
 
-public record DlqMessage
+[MemoryPackable]
+public partial record DlqMessage
 {
     public string OriginalStream { get; init; } = string.Empty;
     public string OriginalConsumer { get; init; } = string.Empty;

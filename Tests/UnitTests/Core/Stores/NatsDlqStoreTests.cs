@@ -2,6 +2,8 @@ using System.Text.Json;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core;
 using Microsoft.Extensions.Logging;
+using NATS.Client.JetStream.Models;
+using NATS.Client.KeyValueStore;
 using NSubstitute;
 using Shouldly;
 using TUnit.Core;
@@ -11,6 +13,7 @@ namespace UnitTests.Core.Stores;
 [Property("nTag", "Core")]
 public class NatsDlqStoreTests
 {
+    private readonly INatsKVContext _kvContext;
     private readonly IKeyValueStore _kvStore;
     private readonly ILogger<NatsDlqStore> _logger;
     private readonly NatsDlqStore _sut;
@@ -18,6 +21,7 @@ public class NatsDlqStoreTests
 
     public NatsDlqStoreTests()
     {
+        _kvContext = Substitute.For<INatsKVContext>();
         _kvStore = Substitute.For<IKeyValueStore>();
         _logger = Substitute.For<ILogger<NatsDlqStore>>();
         
@@ -27,8 +31,50 @@ public class NatsDlqStoreTests
             throw new ArgumentException($"Unexpected bucket name: {bucket}");
         };
 
-        _sut = new NatsDlqStore(storeFactory, _logger);
+        _sut = new NatsDlqStore(_kvContext, storeFactory, _logger);
     }
+
+    #region Initialization Tests
+
+    [Test]
+    public async Task StoreAsync_ShouldEnsureBucketExists_BeforeStoring()
+    {
+        // Arrange
+        var entry = CreateTestEntry("msg-1");
+
+        // Force GetStoreAsync to fail so CreateStoreAsync is called
+        _kvContext.GetStoreAsync(BucketName, Arg.Any<CancellationToken>())
+            .Returns(ValueTask.FromException<INatsKVStore>(new Exception("Bucket not found")));
+
+        // Act
+        await _sut.StoreAsync(entry);
+
+        // Assert
+        await _kvContext.Received(1).CreateStoreAsync(
+            Arg.Is<NatsKVConfig>(c => c.Bucket == BucketName && c.Storage == NatsKVStorageType.File), 
+            Arg.Any<CancellationToken>());
+    }
+
+    [Test]
+    public async Task StoreAsync_ShouldInitializeOnlyOnce()
+    {
+        // Arrange
+        var entry1 = CreateTestEntry("msg-1");
+        var entry2 = CreateTestEntry("msg-2");
+
+        // Force GetStoreAsync to fail so CreateStoreAsync is called
+        _kvContext.GetStoreAsync(BucketName, Arg.Any<CancellationToken>())
+            .Returns(ValueTask.FromException<INatsKVStore>(new Exception("Bucket not found")));
+
+        // Act
+        await _sut.StoreAsync(entry1);
+        await _sut.StoreAsync(entry2);
+
+        // Assert
+        await _kvContext.Received(1).CreateStoreAsync(Arg.Any<NatsKVConfig>(), Arg.Any<CancellationToken>());
+    }
+
+    #endregion
 
     #region StoreAsync Tests
 
