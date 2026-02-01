@@ -82,15 +82,27 @@ internal class ResilientJetStreamConsumer : IJetStreamConsumer
             ? WrapHandlerWithSemaphore(consumerKey, opts.MaxConcurrency.Value, handler)
             : handler;
 
-        // Wrap the consume call with bulkhead + circuit breaker
-        await bulkheadPipeline.ExecuteAsync(async ct =>
+        try
         {
-            await consumerPipeline.ExecuteAsync(async innerCt =>
+            // Wrap the consume call with bulkhead + circuit breaker
+            await bulkheadPipeline.ExecuteAsync(async ct =>
             {
-                await _inner.ConsumeAsync(
-                    stream, subject, effectiveHandler, opts, innerCt);
-            }, ct);
-        }, cancellationToken);
+                await consumerPipeline.ExecuteAsync(async innerCt =>
+                {
+                    await _inner.ConsumeAsync(
+                        stream, subject, effectiveHandler, opts, innerCt);
+                }, ct);
+            }, cancellationToken);
+        }
+        finally
+        {
+            // Clean up resources when consumer stops
+            if (opts.MaxConcurrency.HasValue)
+            {
+                _semaphoreManager.RemoveConsumerSemaphore(consumerKey);
+            }
+            _resilienceBuilder.InvalidatePipeline(consumerKey);
+        }
     }
 
     public async Task ConsumePullAsync<T>(
@@ -119,15 +131,27 @@ internal class ResilientJetStreamConsumer : IJetStreamConsumer
             ? WrapHandlerWithSemaphore(consumerKey, opts.MaxConcurrency.Value, handler)
             : handler;
 
-        // Wrap the consume call
-        await bulkheadPipeline.ExecuteAsync(async ct =>
+        try
         {
-            await consumerPipeline.ExecuteAsync(async innerCt =>
+            // Wrap the consume call
+            await bulkheadPipeline.ExecuteAsync(async ct =>
             {
-                await _inner.ConsumePullAsync(
-                    stream, consumer, effectiveHandler, opts, innerCt);
-            }, ct);
-        }, cancellationToken);
+                await consumerPipeline.ExecuteAsync(async innerCt =>
+                {
+                    await _inner.ConsumePullAsync(
+                        stream, consumer, effectiveHandler, opts, innerCt);
+                }, ct);
+            }, cancellationToken);
+        }
+        finally
+        {
+            // Clean up resources when consumer stops
+            if (opts.MaxConcurrency.HasValue)
+            {
+                _semaphoreManager.RemoveConsumerSemaphore(consumerKey);
+            }
+            _resilienceBuilder.InvalidatePipeline(consumerKey);
+        }
     }
 
     /// <summary>

@@ -88,9 +88,22 @@ internal class HierarchicalResilienceBuilder : IAsyncDisposable
         // Try to get existing pipeline and update last access time
         if (_pipelineCache.TryGetValue(consumerKey, out var existing))
         {
-            // Update last access time (atomic update)
-            _pipelineCache.TryUpdate(consumerKey, (existing.Pipeline, DateTime.UtcNow), existing);
-            return existing.Pipeline;
+            // Update last access time with retry loop for concurrent access
+            var cachedPipeline = existing.Pipeline;
+            var currentEntry = existing;
+            while (!_pipelineCache.TryUpdate(consumerKey, (cachedPipeline, DateTime.UtcNow), currentEntry))
+            {
+                // Another thread updated the entry - refetch and retry
+                if (!_pipelineCache.TryGetValue(consumerKey, out currentEntry))
+                {
+                    // Entry was removed - break and let the creation logic below handle it
+                    break;
+                }
+                // Use the pipeline from the current entry (should be the same)
+                cachedPipeline = currentEntry.Pipeline;
+            }
+            if (_pipelineCache.ContainsKey(consumerKey))
+                return cachedPipeline;
         }
 
         // Create new pipeline

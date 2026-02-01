@@ -22,6 +22,7 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
     private readonly ConcurrentDictionary<Guid, IDisposable> _backgroundServices = new();
     private readonly ConcurrentDictionary<Guid, CancellationTokenSource> _linkedTokenSources = new();
     private readonly CancellationTokenSource _cts = new();
+    private readonly Timer _cleanupTimer;
 
     public NatsJetStreamBus(
         INatsJSContext jsContext,
@@ -31,6 +32,18 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
         _jsContext = jsContext;
         _logger = logger;
         _serializer = serializer;
+        _cleanupTimer = new Timer(CleanupCompletedTasks, null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
+    }
+
+    private void CleanupCompletedTasks(object? state)
+    {
+        foreach (var kvp in _backgroundTasks)
+        {
+            if (kvp.Value.IsCompleted)
+            {
+                _backgroundTasks.TryRemove(kvp.Key, out _);
+            }
+        }
     }
 
     public Task PublishAsync<T>(string subject, T message, CancellationToken cancellationToken = default)
@@ -332,6 +345,7 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
         }
         _linkedTokenSources.Clear();
 
+        await _cleanupTimer.DisposeAsync();
         _cts.Dispose();
     }
 }

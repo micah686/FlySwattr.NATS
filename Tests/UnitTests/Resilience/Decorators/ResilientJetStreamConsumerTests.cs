@@ -72,22 +72,33 @@ public class ResilientJetStreamConsumerTests : IAsyncDisposable
     }
 
     [Test]
-    public async Task ConsumeAsync_ShouldApplyMaxConcurrency_WhenSpecified()
+    public async Task ConsumeAsync_ShouldCleanupSemaphore_WhenConsumerCompletes()
     {
         // Arrange
         var stream = StreamName.From("stream");
         var subject = SubjectName.From("subject");
         var maxConcurrency = 5;
         var options = new JetStreamConsumeOptions { MaxConcurrency = maxConcurrency };
+        var key = "stream/subject"; // Default key format in implementation
+        
+        // Set up mock to capture whether semaphore was created during consume
+        bool semaphoreExistedDuringConsume = false;
+        _inner.When(x => x.ConsumeAsync(
+            stream, subject, 
+            Arg.Any<Func<IJsMessageContext<object>, Task>>(), 
+            Arg.Any<JetStreamConsumeOptions>(), 
+            Arg.Any<CancellationToken>()))
+            .Do(_ => semaphoreExistedDuringConsume = _semaphoreManager.HasConsumerSemaphore(key));
         
         // Act
         await _sut.ConsumeAsync<object>(stream, subject, _ => Task.CompletedTask, options: options);
 
         // Assert
-        // Verify semaphore created
-        var key = "stream/subject"; // Default key format in implementation
-        _semaphoreManager.HasConsumerSemaphore(key).ShouldBeTrue();
-        _semaphoreManager.GetCurrentCount(key).ShouldBe(maxConcurrency);
+        // Semaphore should have existed during consumption
+        semaphoreExistedDuringConsume.ShouldBeTrue("Semaphore should exist during consumption");
+        
+        // After consumer completes, semaphore should be cleaned up (memory leak fix)
+        _semaphoreManager.HasConsumerSemaphore(key).ShouldBeFalse("Semaphore should be cleaned up after consumer completes");
         
         await _inner.Received(1).ConsumeAsync(
             stream, 

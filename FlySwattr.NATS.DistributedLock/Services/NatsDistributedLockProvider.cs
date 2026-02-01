@@ -76,17 +76,63 @@ internal class NatsDistributedLockProvider : IDistributedLockProvider
 
         public async ValueTask<IDistributedSynchronizationHandle?> TryAcquireAsync(TimeSpan timeout = default, CancellationToken cancellationToken = default)
         {
+            // Handle zero timeout - can't wait at all, just try once (no retries)
+            if (timeout == TimeSpan.Zero)
+            {
+                try
+                {
+                    var store = await EnsureBucketAndGetStoreAsync(cancellationToken);
+                    
+                    try
+                    {
+                        // Try to create the key atomically
+                        var revision = await store.CreateAsync(Name,
+                            System.Text.Encoding.UTF8.GetBytes(DateTime.UtcNow.ToString("O")),
+                            cancellationToken: cancellationToken);
+                        _logger.LogInformation("Acquired lock: {Key} (revision: {Revision})", Name, revision);
+                        return new NatsLockHandle(store, Name, _logger, _ttl, revision);
+                    }
+                    catch (NatsKVCreateException)
+                    {
+                        // Key exists - check if it's a tombstone (empty value = free lock)
+                        var entry = await store.GetEntryAsync<byte[]>(Name, cancellationToken: cancellationToken);
+                        if (entry.Value == null || entry.Value.Length == 0)
+                        {
+                            // Take ownership via UpdateAsync with revision check
+                            var newRevision = await store.UpdateAsync(
+                                Name,
+                                System.Text.Encoding.UTF8.GetBytes(DateTime.UtcNow.ToString("O")),
+                                entry.Revision,
+                                cancellationToken: cancellationToken);
+                            _logger.LogInformation("Acquired lock from tombstone: {Key} (revision: {Revision})", Name, newRevision);
+                            return new NatsLockHandle(store, Name, _logger, _ttl, newRevision);
+                        }
+                        // Non-empty value means lock is held, can't wait with zero timeout
+                        return null;
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    throw; // Propagate user cancellation
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Failed to acquire lock {Key} with zero timeout", Name);
+                    return null;
+                }
+            }
+
             // Build Polly retry pipeline with exponential backoff + jitter
             var retryPipeline = BuildRetryPipeline(timeout);
 
-            // Create a timeout cancellation token to enforce the timeout
-            using var timeoutCts = timeout > TimeSpan.Zero && timeout != Timeout.InfiniteTimeSpan
+            // Create a timeout cancellation token to enforce the timeout (null for infinite)
+            CancellationTokenSource? timeoutCts = timeout != Timeout.InfiniteTimeSpan
                 ? new CancellationTokenSource(timeout)
-                : new CancellationTokenSource();
+                : null;
 
-            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
-                cancellationToken,
-                timeoutCts.Token);
+            using var linkedCts = timeoutCts != null
+                ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token)
+                : CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
 
             try
             {
@@ -173,7 +219,7 @@ internal class NatsDistributedLockProvider : IDistributedLockProvider
                     }
                 }, linkedCts.Token);
             }
-            catch (OperationCanceledException) when (timeoutCts.Token.IsCancellationRequested)
+            catch (OperationCanceledException) when (timeoutCts?.Token.IsCancellationRequested == true)
             {
                 // Timeout occurred
                 _logger.LogWarning("Lock acquisition for {Key} timed out after {Timeout}", Name, timeout);
@@ -190,6 +236,10 @@ internal class NatsDistributedLockProvider : IDistributedLockProvider
                 // Unexpected error that escaped the retry pipeline
                 _logger.LogError(ex, "Unexpected error in lock acquisition for {Key}", Name);
                 throw;
+            }
+            finally
+            {
+                timeoutCts?.Dispose();
             }
         }
 
