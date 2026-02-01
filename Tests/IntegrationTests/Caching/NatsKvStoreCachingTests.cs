@@ -196,11 +196,8 @@ public class NatsKvStoreBasicCrudTests
         
         // Give a tiny bit of time for async cache removal to complete (Fire-and-forget in WatchAsync wrapper?)
         // In CachingKeyValueStore: await _cache.RemoveAsync(...) inside the handler.
-        // Since we await the handler in WatchAsync loop, it should be done when we proceed?
-        // Actually, the handler provided by test is awaited. The wrapper awaits cache removal BEFORE calling handler?
-        // Let's check wrapper logic again.
-        // await _inner.WatchAsync... async (change) => { await _cache.RemoveAsync...; await handler(change); }
-        // Yes, removal happens BEFORE handler.
+        // The handler provided by test is awaited. The wrapper awaits cache removal BEFORE calling handler.
+        // The CachingKeyValueStore wrapper ensures cache invalidation occurs before the handler is invoked.
         // So when tcs is set in handler, cache is already removed.
 
         // Get via Caching Store -> Should miss cache and fetch "v2"

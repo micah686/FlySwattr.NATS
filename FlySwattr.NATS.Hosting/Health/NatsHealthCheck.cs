@@ -26,9 +26,8 @@ internal class NatsHealthCheck : IHealthCheck
         {
             await _jsContext.GetAccountInfoAsync(cancellationToken);
 
-            // Fix MED-3: Removed hardcoded stream check.
             // Verification of JetStream availability via GetAccountInfoAsync is sufficient for liveness.
-            // Existence of specific streams is a deployment concern.
+            // Existence of specific streams is a deployment concern and shouldn't fail the general health check.
 
             return HealthCheckResult.Healthy("NATS connection is open and JetStream is responding.");
         }

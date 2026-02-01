@@ -350,7 +350,7 @@ internal class BasicNatsConsumerService<T> : BackgroundService
                     catch (Exception ex)
                     {
                         _logger.LogError(ex, "Error processing message from {Stream}/{Consumer}", _stream, _consumerName);
-                        // Optional: Nack on failure if not already handled
+                        // Handler is responsible for Ack/Nak. Auto-Nak is disabled to prevent interference.
                         // await msg.NakAsync(cancellationToken: stoppingToken);
                     }
                 }

@@ -23,7 +23,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
         _connection = connection;
         _logger = logger;
 
-        // Use events instead of polling (MED-6)
+        // Use events for connection state monitoring to avoid polling overhead.
         _connection.ConnectionOpened += OnConnectionEvent;
         _connection.ConnectionDisconnected += OnConnectionEvent;
         _connection.ReconnectFailed += OnConnectionEvent;
@@ -37,7 +37,6 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
             // Capture state synchronously to avoid race
             var state = _connection.ConnectionState;
             
-            // Invoke event handlers asynchronously
             // Invoke event handlers asynchronously
             if (ConnectionStateChanged != null)
             {
