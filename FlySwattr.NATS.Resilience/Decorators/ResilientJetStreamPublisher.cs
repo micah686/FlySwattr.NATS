@@ -69,13 +69,7 @@ internal class ResilientJetStreamPublisher : IJetStreamPublisher
         _compositePipeline = resilienceBuilder.GetPipeline("publisher:global", globalPipeline);
     }
 
-    public Task PublishAsync<T>(string subject, T message, CancellationToken cancellationToken = default)
-    {
-        // Pass through to the overload - inner publisher will enforce messageId requirement
-        return PublishAsync(subject, message, null, cancellationToken);
-    }
-
-    public async Task PublishAsync<T>(string subject, T message, string? messageId, CancellationToken cancellationToken = default)
+    public async Task PublishAsync<T>(string subject, T message, string? messageId, MessageHeaders? headers = null, CancellationToken cancellationToken = default)
     {
         // Pass the messageId through - the inner publisher will validate and enforce the requirement.
         // This is critical: the retry pipeline MUST use the same messageId for all attempts
@@ -83,7 +77,7 @@ internal class ResilientJetStreamPublisher : IJetStreamPublisher
         // the entire purpose of both retries AND idempotency.
         await _compositePipeline.ExecuteAsync(async ct =>
         {
-            await _inner.PublishAsync(subject, message, messageId, ct);
+            await _inner.PublishAsync(subject, message, messageId, headers, ct);
         }, cancellationToken);
     }
 
