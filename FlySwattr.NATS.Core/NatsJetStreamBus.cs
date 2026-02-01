@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Abstractions.Exceptions;
+using FlySwattr.NATS.Core.Telemetry;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using NATS.Client.Core;
@@ -50,6 +52,15 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
                 nameof(messageId));
         }
 
+        using var activity = NatsTelemetry.ActivitySource.StartActivity($"{subject} publish", ActivityKind.Producer);
+        if (activity != null)
+        {
+            activity.SetTag(NatsTelemetry.MessagingSystem, NatsTelemetry.MessagingSystemName);
+            activity.SetTag(NatsTelemetry.MessagingDestinationName, subject);
+            activity.SetTag(NatsTelemetry.MessagingOperation, "publish");
+            activity.SetTag(NatsTelemetry.MessagingMessageId, messageId);
+        }
+
         var natsHeaders = new NatsHeaders
         {
             ["Content-Type"] = _serializer.GetContentType<T>(),
@@ -64,6 +75,8 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
                 natsHeaders[header.Key] = header.Value;
             }
         }
+        
+        NatsTelemetry.InjectTraceContext(activity, natsHeaders);
 
         // Pass the message directly to NATS.Net - let the configured MemoryPackSerializerRegistry
         // handle serialization. Do NOT pre-serialize here as that causes double-serialization.
@@ -339,6 +352,19 @@ internal class BasicNatsConsumerService<T> : BackgroundService
                 {
                     try
                     {
+                        var parentContext = NatsTelemetry.ExtractTraceContext(msg.Headers);
+                        using var activity = NatsTelemetry.ActivitySource.StartActivity($"{_stream} receive", ActivityKind.Consumer, parentContext);
+
+                        if (activity != null)
+                        {
+                            activity.SetTag(NatsTelemetry.MessagingSystem, NatsTelemetry.MessagingSystemName);
+                            activity.SetTag(NatsTelemetry.MessagingDestinationName, _stream);
+                            activity.SetTag(NatsTelemetry.MessagingOperation, "receive");
+                            activity.SetTag(NatsTelemetry.NatsStream, _stream);
+                            activity.SetTag(NatsTelemetry.NatsConsumer, _consumerName);
+                            activity.SetTag(NatsTelemetry.NatsSubject, msg.Subject);
+                        }
+
                         var context = new JsMessageContext<T>(msg);
                         await _handler(context);
                         // Auto-ack if not acked by handler? 

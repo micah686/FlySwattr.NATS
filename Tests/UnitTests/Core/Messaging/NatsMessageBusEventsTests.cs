@@ -118,7 +118,8 @@ public class NatsMessageBusEventsTests : IAsyncDisposable
         // Connection is called but with a cancelled token
         await _connection.Received(1).PublishAsync(
             Arg.Any<string>(), 
-            Arg.Any<string>(), 
+            Arg.Any<string>(),
+            headers: Arg.Any<NatsHeaders>(),
             cancellationToken: Arg.Is<CancellationToken>(ct => ct.IsCancellationRequested));
     }
     

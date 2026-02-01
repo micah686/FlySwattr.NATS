@@ -40,7 +40,11 @@ public class NatsMessageBusTests : IAsyncDisposable
         await _bus.PublishAsync(subject, message);
 
         // Assert
-        await _connection.Received(1).PublishAsync(subject, message, cancellationToken: Arg.Any<CancellationToken>());
+        await _connection.Received(1).PublishAsync(
+            subject, 
+            message, 
+            headers: Arg.Any<NatsHeaders>(),
+            cancellationToken: Arg.Any<CancellationToken>());
     }
 
     [Test]

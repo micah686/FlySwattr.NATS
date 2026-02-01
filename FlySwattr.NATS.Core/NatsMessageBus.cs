@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using FlySwattr.NATS.Abstractions;
+using FlySwattr.NATS.Core.Telemetry;
 using Microsoft.Extensions.Logging;
 using NATS.Client.Core;
 
@@ -64,20 +66,41 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
 
     public async Task PublishAsync<T>(string subject, T message, CancellationToken cancellationToken = default)
     {
-        await _connection.PublishAsync(subject, message, cancellationToken: cancellationToken);
+        using var activity = NatsTelemetry.ActivitySource.StartActivity($"{subject} publish", ActivityKind.Producer);
+        if (activity != null)
+        {
+            activity.SetTag(NatsTelemetry.MessagingSystem, NatsTelemetry.MessagingSystemName);
+            activity.SetTag(NatsTelemetry.MessagingDestinationName, subject);
+            activity.SetTag(NatsTelemetry.MessagingOperation, "publish");
+        }
+
+        var natsHeaders = new NatsHeaders();
+        NatsTelemetry.InjectTraceContext(activity, natsHeaders);
+        
+        await _connection.PublishAsync(subject, message, headers: natsHeaders, cancellationToken: cancellationToken);
     }
 
     public async Task PublishAsync<T>(string subject, T message, MessageHeaders? headers, CancellationToken cancellationToken = default)
     {
-        NatsHeaders? natsHeaders = null;
+        using var activity = NatsTelemetry.ActivitySource.StartActivity($"{subject} publish", ActivityKind.Producer);
+        if (activity != null)
+        {
+            activity.SetTag(NatsTelemetry.MessagingSystem, NatsTelemetry.MessagingSystemName);
+            activity.SetTag(NatsTelemetry.MessagingDestinationName, subject);
+            activity.SetTag(NatsTelemetry.MessagingOperation, "publish");
+        }
+        
+        var natsHeaders = new NatsHeaders();
         if (headers?.Headers.Count > 0)
         {
-            natsHeaders = new NatsHeaders();
             foreach (var kvp in headers.Headers)
             {
                 natsHeaders.Add(kvp.Key, kvp.Value);
             }
         }
+        
+        NatsTelemetry.InjectTraceContext(activity, natsHeaders);
+        
         await _connection.PublishAsync(subject, message, headers: natsHeaders, cancellationToken: cancellationToken);
     }
 
@@ -109,6 +132,21 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
 
                     await foreach (var msg in sub.Msgs.ReadAllAsync(token))
                     {
+                        var parentContext = NatsTelemetry.ExtractTraceContext(msg.Headers);
+                        using var activity = NatsTelemetry.ActivitySource.StartActivity($"{subject} receive", ActivityKind.Consumer, parentContext);
+                        
+                        if (activity != null)
+                        {
+                            activity.SetTag(NatsTelemetry.MessagingSystem, NatsTelemetry.MessagingSystemName);
+                            activity.SetTag(NatsTelemetry.MessagingDestinationName, subject);
+                            activity.SetTag(NatsTelemetry.MessagingOperation, "receive");
+                            activity.SetTag(NatsTelemetry.NatsSubject, msg.Subject);
+                            if (msg.ReplyTo != null)
+                            {
+                                activity.SetTag(NatsTelemetry.MessagingConversationId, msg.ReplyTo);
+                            }
+                        }
+
                         try
                         {
                             _logger.LogDebug("Received message on {Subject}", msg.Subject);
@@ -117,6 +155,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
                         }
                         catch (Exception ex)
                         {
+                            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
                             _logger.LogError(ex, "Error handling message {Subject}", subject);
                         }
                     }
@@ -188,13 +227,26 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
 
     public async Task<TResponse?> RequestAsync<TRequest, TResponse>(string subject, TRequest request, TimeSpan timeout, CancellationToken cancellationToken = default)
     {
+        using var activity = NatsTelemetry.ActivitySource.StartActivity($"{subject} request", ActivityKind.Client);
+        if (activity != null)
+        {
+            activity.SetTag(NatsTelemetry.MessagingSystem, NatsTelemetry.MessagingSystemName);
+            activity.SetTag(NatsTelemetry.MessagingDestinationName, subject);
+            activity.SetTag(NatsTelemetry.MessagingOperation, "request");
+        }
+
+        var natsHeaders = new NatsHeaders();
+        NatsTelemetry.InjectTraceContext(activity, natsHeaders);
+
         var reply = await _connection.RequestAsync<TRequest, TResponse>(
             subject,
             request,
+            headers: natsHeaders,
             replyOpts: new NatsSubOpts { Timeout = timeout },
             cancellationToken: cancellationToken);
         return reply.Data;
     }
+
 
     public async ValueTask DisposeAsync()
     {

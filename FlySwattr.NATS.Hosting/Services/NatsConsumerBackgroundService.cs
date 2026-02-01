@@ -1,8 +1,10 @@
 using System.Threading.Channels;
+using System.Diagnostics;
 using CommunityToolkit.HighPerformance;
 using CommunityToolkit.HighPerformance.Buffers;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Abstractions.Exceptions;
+using FlySwattr.NATS.Core.Telemetry;
 using FlySwattr.NATS.Hosting.Health;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -191,18 +193,37 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
         {
             await foreach (var context in reader.ReadAllAsync(token))
             {
+                var parentContext = NatsTelemetry.ExtractTraceContext(context.Headers);
+                using var activity = NatsTelemetry.ActivitySource.StartActivity($"{_streamName} process", ActivityKind.Consumer, parentContext);
+
+                if (activity != null)
+                {
+                    activity.SetTag(NatsTelemetry.MessagingSystem, NatsTelemetry.MessagingSystemName);
+                    activity.SetTag(NatsTelemetry.MessagingDestinationName, _streamName);
+                    activity.SetTag(NatsTelemetry.MessagingOperation, "process");
+                    activity.SetTag(NatsTelemetry.NatsStream, _streamName);
+                    activity.SetTag(NatsTelemetry.NatsConsumer, _consumerName);
+                    activity.SetTag(NatsTelemetry.NatsSubject, context.Subject);
+                    if (context.ReplyTo != null)
+                    {
+                        activity.SetTag(NatsTelemetry.MessagingConversationId, context.ReplyTo);
+                    }
+                }
+
                 try
                 {
                     await ExecuteHandlerWithResilienceAsync(context, token);
                 }
                 catch (NullMessagePayloadException ex)
                 {
+                    activity?.SetStatus(ActivityStatusCode.Error, "Null payload");
                     LogNullPayloadTermination(_streamName, _consumerName, ex);
                     try { await context.TermAsync(token); } catch { /* best effort */ }
                     continue;
                 }
                 catch (InvalidOperationException ex) when (ex.Message.Contains("null"))
                 {
+                    activity?.SetStatus(ActivityStatusCode.Error, "Null payload");
                     LogNullPayloadTermination(_streamName, _consumerName, ex);
                     try { await context.TermAsync(token); } catch { /* best effort */ }
                     continue;
@@ -213,6 +234,7 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
                 }
                 catch (Exception ex)
                 {
+                    activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
                     try
                     {
                         var configuredLimit = _consumer.Info.Config.MaxDeliver;
