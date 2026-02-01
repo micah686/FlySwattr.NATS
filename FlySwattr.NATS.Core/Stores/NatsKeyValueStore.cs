@@ -159,7 +159,16 @@ internal class NatsKeyValueStore : IKeyValueStore, IAsyncDisposable
                         Revision: entry.Revision
                     );
 
-                    await handler(changeEvent);
+                    try
+                    {
+                        await handler(changeEvent);
+                    }
+                    catch (Exception handlerEx)
+                    {
+                        // Log handler exception but continue watching - don't let a single
+                        // handler failure terminate the entire watch
+                        _logger.LogError(handlerEx, "KV watch handler failed for key {Key} in bucket {Bucket}; continuing watch", entry.Key, _bucket);
+                    }
                 }
             }
             catch (OperationCanceledException)

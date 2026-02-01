@@ -300,14 +300,32 @@ internal class NatsObjectStore : IObjectStore, IAsyncDisposable
                 var store = await GetStoreAsync(cancellationToken);
                 await foreach(var change in store.WatchAsync(cancellationToken: cancellationToken))
                 {
-                    await handler(MapToObjectInfo(change));
+                    try
+                    {
+                        await handler(MapToObjectInfo(change));
+                    }
+                    catch (Exception handlerEx)
+                    {
+                        // Log handler exception but continue watching - don't let a single
+                        // handler failure terminate the entire watch
+                        _logger.LogError(handlerEx, "Object store watch handler failed for bucket {Bucket}; continuing watch", _bucket);
+                    }
                 }
                 return;
             }
             catch (NatsJSApiException ex) when (ex.Error.Code is 503 or 504)
             {
                 InvalidateCache();
-                try { await Task.Delay(1000, cancellationToken); } catch { }
+                _logger.LogWarning(ex, "Object store watch for bucket {Bucket} dropped due to transient error; retrying in 1s", _bucket);
+                try
+                {
+                    await Task.Delay(1000, cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Cancellation requested during delay - exit watch loop
+                    break;
+                }
             }
             catch (Exception ex)
             {

@@ -20,6 +20,7 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
 
     private readonly ConcurrentDictionary<Guid, Task> _backgroundTasks = new();
     private readonly ConcurrentDictionary<Guid, IDisposable> _backgroundServices = new();
+    private readonly ConcurrentDictionary<Guid, CancellationTokenSource> _linkedTokenSources = new();
     private readonly CancellationTokenSource _cts = new();
 
     public NatsJetStreamBus(
@@ -134,37 +135,24 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
             );
 
             var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
-            await service.StartAsync(linkedCts.Token);
-
             var taskId = Guid.NewGuid();
+
+            // Store the CTS so it can be properly disposed during shutdown
+            _linkedTokenSources.TryAdd(taskId, linkedCts);
+
+            await service.StartAsync(linkedCts.Token);
             _backgroundServices.TryAdd(taskId, service);
 
             if (service.ExecuteTask is Task task && !task.IsCompleted)
             {
-                _backgroundTasks.TryAdd(taskId, task);
-
-                _ = task.ContinueWith(async t =>
-                {
-                    try
-                    {
-                        _backgroundTasks.TryRemove(taskId, out _);
-                        _backgroundServices.TryRemove(taskId, out var svc);
-                        if (svc is IDisposable disposable)
-                        {
-                            await StopAndDisposeServiceAsync(disposable);
-                        }
-
-                        if (t.IsFaulted)
-                            _logger.LogError(t.Exception, "Background consumer faulted");
-                    }
-                    finally
-                    {
-                        linkedCts.Dispose();
-                    }
-                }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
+                // Wrap the task with cleanup logic that properly handles exceptions
+                var wrappedTask = WrapTaskWithCleanupAsync(task, taskId, linkedCts);
+                _backgroundTasks.TryAdd(taskId, wrappedTask);
             }
             else
             {
+                // Task completed synchronously - clean up immediately
+                _linkedTokenSources.TryRemove(taskId, out _);
                 _backgroundServices.TryRemove(taskId, out _);
                 await StopAndDisposeServiceAsync(service);
                 linkedCts.Dispose();
@@ -207,37 +195,24 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
             );
 
             var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
-            await service.StartAsync(linkedCts.Token);
-
             var taskId = Guid.NewGuid();
+
+            // Store the CTS so it can be properly disposed during shutdown
+            _linkedTokenSources.TryAdd(taskId, linkedCts);
+
+            await service.StartAsync(linkedCts.Token);
             _backgroundServices.TryAdd(taskId, service);
 
             if (service.ExecuteTask is Task task && !task.IsCompleted)
             {
-                _backgroundTasks.TryAdd(taskId, task);
-
-                _ = task.ContinueWith(async t =>
-                {
-                    try
-                    {
-                        _backgroundTasks.TryRemove(taskId, out _);
-                        _backgroundServices.TryRemove(taskId, out var svc);
-                        if (svc is IDisposable disposable)
-                        {
-                            await StopAndDisposeServiceAsync(disposable);
-                        }
-
-                        if (t.IsFaulted)
-                            _logger.LogError(t.Exception, "Background pull consumer faulted");
-                    }
-                    finally
-                    {
-                        linkedCts.Dispose();
-                    }
-                }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default).Unwrap();
+                // Wrap the task with cleanup logic that properly handles exceptions
+                var wrappedTask = WrapTaskWithCleanupAsync(task, taskId, linkedCts);
+                _backgroundTasks.TryAdd(taskId, wrappedTask);
             }
             else
             {
+                // Task completed synchronously - clean up immediately
+                _linkedTokenSources.TryRemove(taskId, out _);
                 _backgroundServices.TryRemove(taskId, out _);
                 await StopAndDisposeServiceAsync(service);
                 linkedCts.Dispose();
@@ -251,6 +226,42 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
                 stream.Value,
                 consumer.Value);
             throw;
+        }
+    }
+
+    private async Task WrapTaskWithCleanupAsync(Task task, Guid taskId, CancellationTokenSource linkedCts)
+    {
+        try
+        {
+            await task;
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected during shutdown - don't log as error
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Background consumer faulted");
+        }
+        finally
+        {
+            // Clean up resources
+            _backgroundTasks.TryRemove(taskId, out _);
+            _linkedTokenSources.TryRemove(taskId, out _);
+
+            if (_backgroundServices.TryRemove(taskId, out var svc) && svc is IDisposable disposable)
+            {
+                await StopAndDisposeServiceAsync(disposable);
+            }
+
+            try
+            {
+                linkedCts.Dispose();
+            }
+            catch (ObjectDisposedException)
+            {
+                // Already disposed - ignore
+            }
         }
     }
 
@@ -306,6 +317,20 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
 
         await Task.WhenAll(stopTasks);
         _backgroundServices.Clear();
+
+        // Dispose any remaining linked token sources
+        foreach (var cts in _linkedTokenSources.Values)
+        {
+            try
+            {
+                cts.Dispose();
+            }
+            catch (ObjectDisposedException)
+            {
+                // Already disposed - ignore
+            }
+        }
+        _linkedTokenSources.Clear();
 
         _cts.Dispose();
     }

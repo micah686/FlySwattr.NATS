@@ -262,7 +262,13 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested)
                 {
+                    // Consumer is shutting down - ack abandoned intentionally
                     LogAckAbandonedDuringShutdown(_streamName, _consumerName);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Ack timeout (5 seconds exceeded) - not a shutdown
+                    LogAckTimeout(_streamName, _consumerName);
                 }
                 catch (Exception ex)
                 {
@@ -313,6 +319,9 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Ack abandoned during shutdown for {StreamName}/{ConsumerName}")]
     private partial void LogAckAbandonedDuringShutdown(string streamName, string consumerName);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Ack timed out after 5 seconds for {StreamName}/{ConsumerName}")]
+    private partial void LogAckTimeout(string streamName, string consumerName);
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "Ack failed for processed message {StreamName}/{ConsumerName}: {ErrorMessage}")]
     private partial void LogAckFailed(string streamName, string consumerName, string errorMessage);
