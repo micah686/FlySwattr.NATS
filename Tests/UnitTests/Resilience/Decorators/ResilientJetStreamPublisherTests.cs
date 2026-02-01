@@ -48,7 +48,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         await _sut.PublishAsync(subject, message, messageId);
 
         // Assert
-        await _inner.Received(1).PublishAsync(subject, message, messageId, Arg.Any<CancellationToken>());
+        await _inner.Received(1).PublishAsync(subject, message, messageId, null, Arg.Any<CancellationToken>());
     }
 
     [Test]
@@ -60,7 +60,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         var messageId = "msg-123";
 
         // Fail once then succeed
-        _inner.PublishAsync(subject, message, messageId, Arg.Any<CancellationToken>())
+        _inner.PublishAsync(subject, message, messageId, Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(
                 x => throw new TimeoutException("Simulated timeout"),
                 x => Task.CompletedTask
@@ -70,7 +70,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         await _sut.PublishAsync(subject, message, messageId);
 
         // Assert
-        await _inner.Received(2).PublishAsync(subject, message, messageId, Arg.Any<CancellationToken>());
+        await _inner.Received(2).PublishAsync(subject, message, messageId, null, Arg.Any<CancellationToken>());
     }
 
     [Test]
@@ -82,7 +82,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         var originalMessageId = "idempotency-key-abc123";
         var capturedMessageIds = new List<string?>();
 
-        _inner.PublishAsync(subject, message, Arg.Any<string?>(), Arg.Any<CancellationToken>())
+        _inner.PublishAsync(subject, message, Arg.Any<string?>(), Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(
                 x => { capturedMessageIds.Add(x.ArgAt<string?>(2)); throw new TimeoutException("Retry 1"); },
                 x => { capturedMessageIds.Add(x.ArgAt<string?>(2)); throw new TimeoutException("Retry 2"); },
@@ -110,7 +110,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
 
         // Fail 3 times (max retries), then succeed on 4th (if allowed) - but we have 3 max retries
         // So with initial + 3 retries = 4 total calls max
-        _inner.PublishAsync(subject, message, Arg.Any<string?>(), Arg.Any<CancellationToken>())
+        _inner.PublishAsync(subject, message, Arg.Any<string?>(), Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(
                 x => throw new TimeoutException("Attempt 1"),
                 x => throw new TimeoutException("Attempt 2"),
@@ -123,9 +123,10 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
 
         // Assert - verify ALL calls used the SAME messageId (critical for deduplication)
         await _inner.Received(4).PublishAsync(
-            subject, 
-            message, 
+            subject,
+            message,
             Arg.Is<string?>(id => id == businessKeyId), // Must be exactly the original ID
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>());
     }
 
@@ -147,7 +148,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         var message = "payload";
         var messageId = "msg-no-responders";
 
-        _inner.PublishAsync(subject, message, messageId, Arg.Any<CancellationToken>())
+        _inner.PublishAsync(subject, message, messageId, Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(x => throw new NATS.Client.Core.NatsNoRespondersException());
 
         // Act & Assert - should throw immediately without retrying
@@ -155,7 +156,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
             async () => await _sut.PublishAsync(subject, message, messageId));
 
         // Verify only 1 call was made (no retries)
-        await _inner.Received(1).PublishAsync(subject, message, messageId, Arg.Any<CancellationToken>());
+        await _inner.Received(1).PublishAsync(subject, message, messageId, null, Arg.Any<CancellationToken>());
     }
 
     /// <summary>
@@ -172,7 +173,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         var messageId = "msg-io-retry";
 
         // Fail with IOException (driver layer), then succeed
-        _inner.PublishAsync(subject, message, messageId, Arg.Any<CancellationToken>())
+        _inner.PublishAsync(subject, message, messageId, Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(
                 x => throw new System.IO.IOException("Connection reset by peer"),
                 x => Task.CompletedTask
@@ -182,7 +183,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         await _sut.PublishAsync(subject, message, messageId);
 
         // Assert - should have retried once
-        await _inner.Received(2).PublishAsync(subject, message, messageId, Arg.Any<CancellationToken>());
+        await _inner.Received(2).PublishAsync(subject, message, messageId, null, Arg.Any<CancellationToken>());
     }
 
     /// <summary>
@@ -202,7 +203,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         var messageId = "msg-duration-test";
 
         // Fail consistently with transient errors to exhaust all retries
-        _inner.PublishAsync(subject, message, messageId, Arg.Any<CancellationToken>())
+        _inner.PublishAsync(subject, message, messageId, Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(x => throw new TimeoutException("Simulated timeout"));
 
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
@@ -227,7 +228,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         await Assert.That(stopwatch.Elapsed.TotalSeconds).IsLessThan(15);
 
         // Should have made 4 attempts (initial + 3 retries)
-        await _inner.Received(4).PublishAsync(subject, message, messageId, Arg.Any<CancellationToken>());
+        await _inner.Received(4).PublishAsync(subject, message, messageId, null, Arg.Any<CancellationToken>());
     }
 
     #endregion
@@ -280,7 +281,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         var message = "payload";
 
         // All inner calls fail with TimeoutException
-        inner.PublishAsync(subject, message, Arg.Any<string?>(), Arg.Any<CancellationToken>())
+        inner.PublishAsync(subject, message, Arg.Any<string?>(), Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(x => throw new TimeoutException("Simulated failure"));
 
         // Make multiple publish calls to trip the circuit
@@ -303,9 +304,10 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         // Critical assertion: inner publisher should NOT have been called
         // because the circuit breaker rejected the call before it reached the inner publisher
         await inner.DidNotReceive().PublishAsync(
-            Arg.Any<string>(), 
-            Arg.Any<string>(), 
-            Arg.Any<string?>(), 
+            Arg.Any<string>(),
+            Arg.Any<string>(),
+            Arg.Any<string?>(),
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>());
     }
 
@@ -358,7 +360,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
 
         // All inner calls throw OperationCanceledException
         // This exception should NOT count toward circuit breaker failure rate
-        inner.PublishAsync(subject, message, Arg.Any<string?>(), Arg.Any<CancellationToken>())
+        inner.PublishAsync(subject, message, Arg.Any<string?>(), Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(x => throw new OperationCanceledException("User cancelled"));
 
         // Make many publish calls - far more than needed to trip a normal circuit
@@ -371,7 +373,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
 
         // Clear the mock and reconfigure for success
         inner.ClearReceivedCalls();
-        inner.PublishAsync(subject, message, "msg-success", Arg.Any<CancellationToken>())
+        inner.PublishAsync(subject, message, "msg-success", Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(Task.CompletedTask);
 
         // Act - This call should succeed because circuit is still CLOSED
@@ -380,7 +382,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
 
         // Assert - The final call succeeded (no BrokenCircuitException)
         // This proves OperationCanceledException didn't trip the circuit
-        await inner.Received(1).PublishAsync(subject, message, "msg-success", Arg.Any<CancellationToken>());
+        await inner.Received(1).PublishAsync(subject, message, "msg-success", Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>());
     }
 
     /// <summary>
@@ -421,7 +423,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         var message = "payload";
 
         // Phase 1: Multiple cancellations - should NOT trip circuit
-        inner.PublishAsync(subject, message, Arg.Any<string?>(), Arg.Any<CancellationToken>())
+        inner.PublishAsync(subject, message, Arg.Any<string?>(), Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(x => throw new OperationCanceledException("User cancelled"));
 
         for (int i = 0; i < 10; i++)
@@ -431,7 +433,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         }
 
         // Phase 2: Real failures - SHOULD trip circuit after enough calls
-        inner.PublishAsync(subject, message, Arg.Any<string?>(), Arg.Any<CancellationToken>())
+        inner.PublishAsync(subject, message, Arg.Any<string?>(), Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(x => throw new TimeoutException("Network timeout"));
 
         // Make enough calls to trip the circuit (5 calls should be plenty)
@@ -451,9 +453,10 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
 
         // Inner was not called because circuit rejected the request
         await inner.DidNotReceive().PublishAsync(
-            Arg.Any<string>(), 
-            Arg.Any<string>(), 
-            Arg.Any<string?>(), 
+            Arg.Any<string>(),
+            Arg.Any<string>(),
+            Arg.Any<string?>(),
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>());
     }
 
@@ -474,7 +477,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         var message = "payload";
         var messageId = "msg-invalid-args";
 
-        _inner.PublishAsync(subject, message, messageId, Arg.Any<CancellationToken>())
+        _inner.PublishAsync(subject, message, messageId, Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(x => throw new ArgumentException("Invalid subject format"));
 
         // Act & Assert - should throw immediately without retrying
@@ -482,7 +485,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
             async () => await _sut.PublishAsync(subject, message, messageId));
 
         // Verify only 1 call was made (no retries for non-transient exceptions)
-        await _inner.Received(1).PublishAsync(subject, message, messageId, Arg.Any<CancellationToken>());
+        await _inner.Received(1).PublishAsync(subject, message, messageId, null, Arg.Any<CancellationToken>());
     }
 
     /// <summary>
@@ -497,7 +500,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         var message = "payload";
         var messageId = "msg-invalid-op";
 
-        _inner.PublishAsync(subject, message, messageId, Arg.Any<CancellationToken>())
+        _inner.PublishAsync(subject, message, messageId, Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(x => throw new InvalidOperationException("Stream does not exist"));
 
         // Act & Assert
@@ -505,7 +508,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
             async () => await _sut.PublishAsync(subject, message, messageId));
 
         // Verify only 1 call was made
-        await _inner.Received(1).PublishAsync(subject, message, messageId, Arg.Any<CancellationToken>());
+        await _inner.Received(1).PublishAsync(subject, message, messageId, null, Arg.Any<CancellationToken>());
     }
 
     #endregion
@@ -551,7 +554,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         var messageId = "msg-custom-retry";
         var callCount = 0;
 
-        inner.PublishAsync(subject, message, messageId, Arg.Any<CancellationToken>())
+        inner.PublishAsync(subject, message, messageId, Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(x =>
             {
                 callCount++;
@@ -609,7 +612,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         var message = "payload";
         var messageId = "msg-min-retry";
 
-        inner.PublishAsync(subject, message, messageId, Arg.Any<CancellationToken>())
+        inner.PublishAsync(subject, message, messageId, Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(x => throw new TimeoutException("Failure"));
 
         // Act
@@ -617,7 +620,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
             async () => await sut.PublishAsync(subject, message, messageId));
 
         // Assert: Should have made exactly 2 calls (initial + 1 retry)
-        await inner.Received(2).PublishAsync(subject, message, messageId, Arg.Any<CancellationToken>());
+        await inner.Received(2).PublishAsync(subject, message, messageId, Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>());
     }
 
     #endregion
@@ -664,7 +667,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         var capturedIds = new List<string?>();
         var attemptCount = 0;
 
-        inner.PublishAsync(subject, message, Arg.Any<string?>(), Arg.Any<CancellationToken>())
+        inner.PublishAsync(subject, message, Arg.Any<string?>(), Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(x =>
             {
                 capturedIds.Add(x.ArgAt<string?>(2));
@@ -725,7 +728,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         };
         var attemptIndex = 0;
 
-        inner.PublishAsync(subject, message, Arg.Any<string?>(), Arg.Any<CancellationToken>())
+        inner.PublishAsync(subject, message, Arg.Any<string?>(), Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(x =>
             {
                 capturedIds.Add(x.ArgAt<string?>(2));
@@ -790,7 +793,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         var subject = "test.subject";
         var message = "payload";
 
-        inner.PublishAsync(subject, message, Arg.Any<string?>(), Arg.Any<CancellationToken>())
+        inner.PublishAsync(subject, message, Arg.Any<string?>(), Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(x => throw new TimeoutException("Failure"));
 
         // Make 3 publish calls = 6 inner calls (less than MinimumThroughput=10 for global CB)
@@ -802,14 +805,14 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
 
         // Clear and reconfigure to succeed
         inner.ClearReceivedCalls();
-        inner.PublishAsync(subject, message, "msg-should-succeed", Arg.Any<CancellationToken>())
+        inner.PublishAsync(subject, message, "msg-should-succeed", Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(Task.CompletedTask);
 
         // Act - Circuit should still be closed because global CB MinimumThroughput (10) not met
         await sut.PublishAsync(subject, message, "msg-should-succeed");
 
         // Assert - Call went through (circuit still closed)
-        await inner.Received(1).PublishAsync(subject, message, "msg-should-succeed", Arg.Any<CancellationToken>());
+        await inner.Received(1).PublishAsync(subject, message, "msg-should-succeed", Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>());
     }
 
     #endregion
@@ -830,25 +833,8 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         // Act
         await _sut.PublishAsync(subject, message, null);
 
-        // Assert
-        await _inner.Received(1).PublishAsync(subject, message, null, Arg.Any<CancellationToken>());
-    }
-
-    /// <summary>
-    /// Verifies that the overload without messageId also passes null to inner (not a generated ID).
-    /// </summary>
-    [Test]
-    public async Task PublishAsync_OverloadWithoutMessageId_ShouldPassNullNotGenerated()
-    {
-        // Arrange
-        var subject = "test.subject";
-        var message = "payload";
-
-        // Act
-        await _sut.PublishAsync(subject, message);
-
-        // Assert: Should pass null, not generate a GUID
-        await _inner.Received(1).PublishAsync(subject, message, null, Arg.Any<CancellationToken>());
+        // Assert: Should pass null messageId and null headers to inner publisher
+        await _inner.Received(1).PublishAsync(subject, message, null, null, Arg.Any<CancellationToken>());
     }
 
     #endregion

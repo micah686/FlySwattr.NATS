@@ -272,9 +272,10 @@ public class ChaosEngineeringTests
         // Simulate: First call fails with timeout, second succeeds
         var callCount = 0;
         mockPublisher.PublishAsync(
-            Arg.Any<string>(), 
-            Arg.Any<object>(), 
-            Arg.Any<string?>(), 
+            Arg.Any<string>(),
+            Arg.Any<object>(),
+            Arg.Any<string?>(),
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>())
             .Returns(x =>
             {
@@ -302,7 +303,7 @@ public class ChaosEngineeringTests
         // Act
         await retryPipeline.ExecuteAsync(async ct =>
         {
-            await mockPublisher.PublishAsync("orders.created", new { OrderId = 123 }, fixedMessageId, ct);
+            await mockPublisher.PublishAsync("orders.created", new { OrderId = 123 }, fixedMessageId, cancellationToken: ct);
         });
 
         // Assert

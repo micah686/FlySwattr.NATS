@@ -77,7 +77,7 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
                     var prefix = isValidationFailure ? "dlq-validation" : "dlq";
                     var dlqMessageId = $"{prefix}-{streamName}-{consumerName}-{context.Sequence}";
                     
-                    await _dlqPublisher.PublishAsync(policy.TargetSubject, dlqMessage, dlqMessageId, cancellationToken);
+                    await _dlqPublisher.PublishAsync(policy.TargetSubject, dlqMessage, dlqMessageId, cancellationToken: cancellationToken);
 
                     if (_notificationService != null)
                     {

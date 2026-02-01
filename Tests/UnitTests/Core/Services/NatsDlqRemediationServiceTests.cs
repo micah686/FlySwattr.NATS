@@ -63,6 +63,7 @@ public class NatsDlqRemediationServiceTests
             entry.OriginalSubject,
             Arg.Is<byte[]>(p => p.SequenceEqual(inlinePayload)),
             Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>());
         
         // Object store should NOT be called for inline payloads
@@ -113,6 +114,7 @@ public class NatsDlqRemediationServiceTests
             entry.OriginalSubject,
             Arg.Is<byte[]>(p => p.SequenceEqual(offloadedPayload)),
             Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>());
     }
 
@@ -182,6 +184,7 @@ public class NatsDlqRemediationServiceTests
             Arg.Any<string>(),
             Arg.Any<byte[]>(),
             Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>());
     }
 
@@ -220,7 +223,7 @@ public class NatsDlqRemediationServiceTests
         _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<CancellationToken>())
             .Returns(true);
 
-        _publisher.PublishAsync(Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+        _publisher.PublishAsync(Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<string>(), Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(callInfo =>
             {
                 capturedMessageId = callInfo.ArgAt<string>(2);
@@ -253,7 +256,7 @@ public class NatsDlqRemediationServiceTests
         _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<CancellationToken>())
             .Returns(true);
 
-        _publisher.PublishAsync(Arg.Any<string>(), Arg.Any<TestPayload>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+        _publisher.PublishAsync(Arg.Any<string>(), Arg.Any<TestPayload>(), Arg.Any<string>(), Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(callInfo =>
             {
                 capturedMessageId = callInfo.ArgAt<string>(2);
@@ -280,7 +283,7 @@ public class NatsDlqRemediationServiceTests
         _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<CancellationToken>())
             .Returns(true);
 
-        _publisher.PublishAsync(Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+        _publisher.PublishAsync(Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<string>(), Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(callInfo =>
             {
                 capturedMessageIds.Add(callInfo.ArgAt<string>(2));
@@ -314,7 +317,7 @@ public class NatsDlqRemediationServiceTests
         _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<CancellationToken>())
             .Returns(true);
 
-        _publisher.PublishAsync(Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+        _publisher.PublishAsync(Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<string>(), Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .ThrowsAsync(new IOException("NATS connection lost"));
 
         // Act
@@ -345,7 +348,7 @@ public class NatsDlqRemediationServiceTests
         _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<CancellationToken>())
             .Returns(true);
 
-        _publisher.PublishAsync(Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+        _publisher.PublishAsync(Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<string>(), Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .ThrowsAsync(expectedException);
 
         // Act
@@ -395,6 +398,7 @@ public class NatsDlqRemediationServiceTests
             Arg.Any<string>(),
             Arg.Any<byte[]>(),
             Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>());
     }
 
@@ -410,7 +414,7 @@ public class NatsDlqRemediationServiceTests
         _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<CancellationToken>())
             .Returns(true);
 
-        _publisher.PublishAsync(Arg.Any<string>(), Arg.Any<TestPayload>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+        _publisher.PublishAsync(Arg.Any<string>(), Arg.Any<TestPayload>(), Arg.Any<string>(), Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .ThrowsAsync(new TimeoutException("Publish timeout"));
 
         // Act
@@ -447,7 +451,7 @@ public class NatsDlqRemediationServiceTests
         _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<CancellationToken>())
             .Returns(true);
 
-        _publisher.PublishAsync(Arg.Any<string>(), Arg.Any<TestPayload>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+        _publisher.PublishAsync(Arg.Any<string>(), Arg.Any<TestPayload>(), Arg.Any<string>(), Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(callInfo =>
             {
                 capturedPayload = callInfo.ArgAt<TestPayload>(1);
@@ -478,7 +482,7 @@ public class NatsDlqRemediationServiceTests
         _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<CancellationToken>())
             .Returns(true);
 
-        _publisher.PublishAsync(Arg.Any<string>(), Arg.Any<TestPayload>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
+        _publisher.PublishAsync(Arg.Any<string>(), Arg.Any<TestPayload>(), Arg.Any<string>(), Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(callInfo =>
             {
                 capturedSubject = callInfo.ArgAt<string>(0);
@@ -514,6 +518,7 @@ public class NatsDlqRemediationServiceTests
             Arg.Any<string>(),
             Arg.Is<TestPayload>(p => p != null),
             Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>());
     }
 

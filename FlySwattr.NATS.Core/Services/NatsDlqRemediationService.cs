@@ -139,7 +139,7 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
             {
                 // Use a deterministic message ID for idempotency
                 var replayMessageId = $"replay-modified-{id}-{DateTimeOffset.UtcNow.Ticks}";
-                await _publisher.PublishAsync(entry.OriginalSubject, modifiedPayload, replayMessageId, cancellationToken);
+                await _publisher.PublishAsync(entry.OriginalSubject, modifiedPayload, replayMessageId, cancellationToken: cancellationToken);
 
                 // Mark as resolved
                 await _dlqStore.UpdateStatusAsync(id, DlqMessageStatus.Resolved, cancellationToken);
@@ -251,7 +251,7 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
         
         // Note: This publishes the raw bytes as the payload. The receiving consumer
         // must be able to handle this format (typically MemoryPack or JSON bytes)
-        await _publisher.PublishAsync(subject, payload, messageId, cancellationToken);
+        await _publisher.PublishAsync(subject, payload, messageId, cancellationToken: cancellationToken);
     }
 
     // Source-generated logging methods

@@ -115,26 +115,34 @@ public partial class PayloadOffloadingIntegrationTests
         var stream = await js.GetStreamAsync(streamName);
         ((long)stream.Info.State.Messages).ShouldBe(1L);
 
-        // Act - Consume and hydrate
+        // Create OffloadingJetStreamConsumer for transparent hydration
+        var offloadingConsumer = new OffloadingJetStreamConsumer(
+            innerBus,
+            objectStore,
+            serializer,
+            Options.Create(offloadOptions),
+            new ConsoleLogger<OffloadingJetStreamConsumer>());
+
+        // Act - Consume using OffloadingJetStreamConsumer (transparent hydration)
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        LargePayloadEvent? receivedMessage = null;
+        var tcs = new TaskCompletionSource<LargePayloadEvent>();
 
-        await foreach (var msg in consumer.FetchAsync<ClaimCheckMessage>(
-            new NatsJSFetchOpts { MaxMsgs = 1, Expires = TimeSpan.FromSeconds(5) },
-            cancellationToken: cts.Token))
-        {
-            if (msg.Data != null)
+        await offloadingConsumer.ConsumePullAsync<LargePayloadEvent>(
+            StreamName.From(streamName),
+            ConsumerName.From(consumerName),
+            async context =>
             {
-                // Hydrate from object store
-                var objectKey = msg.Data.ObjectStoreRef.Replace("objstore://", "");
-                using var memoryStream = new MemoryStream();
-                await objectStore.GetAsync(objectKey, memoryStream);
-                receivedMessage = serializer.Deserialize<LargePayloadEvent>(memoryStream.ToArray());
-                await msg.AckAsync();
-            }
-        }
+                // The message is transparently hydrated - we receive LargePayloadEvent, not ClaimCheckMessage
+                tcs.TrySetResult(context.Message);
+                await context.AckAsync();
+            },
+            new JetStreamConsumeOptions { BatchSize = 1 },
+            cts.Token);
 
-        // Assert - Verify round-trip
+        // Wait for the message to be received
+        var receivedMessage = await tcs.Task.WaitAsync(cts.Token);
+
+        // Assert - Verify round-trip with transparent hydration
         receivedMessage.ShouldNotBeNull();
         receivedMessage.EventId.ShouldBe(originalMessage.EventId);
         receivedMessage.Data.Length.ShouldBe(payloadSize);
@@ -307,8 +315,10 @@ public partial class PayloadOffloadingIntegrationTests
     #region Test 4: Metadata Preservation
 
     /// <summary>
-    /// Ensure that Message IDs are preserved when the payload is moved to the Object Store.
-    /// This verifies that JetStream deduplication still works on the claim check message.
+    /// Ensure that custom headers (Trace-Id, User-Id) and Message IDs are preserved
+    /// when the payload is moved to the Object Store.
+    /// This verifies that JetStream deduplication still works on the claim check message
+    /// and that custom headers are accessible on the consumer side.
     /// </summary>
     [Test]
     public async Task PayloadOffloading_ShouldPreserveHeadersAndId_WhenOffloaded()
@@ -339,7 +349,7 @@ public partial class PayloadOffloadingIntegrationTests
         });
 
         var consumerName = "metadata-processor";
-        var consumer = await js.CreateOrUpdateConsumerAsync(streamName, new ConsumerConfig(consumerName)
+        await js.CreateOrUpdateConsumerAsync(streamName, new ConsumerConfig(consumerName)
         {
             DurableName = consumerName,
             AckPolicy = ConsumerConfigAckPolicy.Explicit
@@ -378,6 +388,8 @@ public partial class PayloadOffloadingIntegrationTests
         var originalMessage = new LargePayloadEvent("EVT-META-001", largeData, "Metadata test");
         var businessMessageId = "Order-12345-Created-v1";
 
+        // === PART 1: Verify Message ID is preserved (deduplication works) ===
+
         // Act - Publish first time
         await offloadingPublisher.PublishAsync(subject, originalMessage, businessMessageId);
 
@@ -389,24 +401,34 @@ public partial class PayloadOffloadingIntegrationTests
         var stream = await js.GetStreamAsync(streamName);
         ((long)stream.Info.State.Messages).ShouldBe(1L);
 
-        // Act - Consume and verify content
+        // Create OffloadingJetStreamConsumer for transparent hydration
+        var offloadingConsumer = new OffloadingJetStreamConsumer(
+            innerBus,
+            objectStore,
+            serializer,
+            Options.Create(offloadOptions),
+            new ConsoleLogger<OffloadingJetStreamConsumer>());
+
+        // Act - Consume using OffloadingJetStreamConsumer (transparent hydration)
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        LargePayloadEvent? receivedMessage = null;
+        var tcs = new TaskCompletionSource<LargePayloadEvent>();
 
-        await foreach (var msg in consumer.FetchAsync<ClaimCheckMessage>(
-            new NatsJSFetchOpts { MaxMsgs = 1, Expires = TimeSpan.FromSeconds(5) },
-            cancellationToken: cts.Token))
-        {
-            if (msg.Data != null)
+        await offloadingConsumer.ConsumePullAsync<LargePayloadEvent>(
+            StreamName.From(streamName),
+            ConsumerName.From(consumerName),
+            async context =>
             {
-                var objectKey = msg.Data.ObjectStoreRef.Replace("objstore://", "");
-                using var memoryStream = new MemoryStream();
-                await objectStore.GetAsync(objectKey, memoryStream);
-                receivedMessage = serializer.Deserialize<LargePayloadEvent>(memoryStream.ToArray());
-                await msg.AckAsync();
-            }
-        }
+                // The message is transparently hydrated
+                tcs.TrySetResult(context.Message);
+                await context.AckAsync();
+            },
+            new JetStreamConsumeOptions { BatchSize = 1 },
+            cts.Token);
 
+        // Wait for the message to be received
+        var receivedMessage = await tcs.Task.WaitAsync(cts.Token);
+
+        // Assert - Verify payload is correctly hydrated
         receivedMessage.ShouldNotBeNull();
         receivedMessage.EventId.ShouldBe(originalMessage.EventId);
         receivedMessage.Data.ShouldBe(originalMessage.Data);
@@ -424,6 +446,136 @@ public partial class PayloadOffloadingIntegrationTests
         // Assert - Object store still has only 1 object (no orphan from failed duplicate)
         storedObjects = (await objectStore.ListAsync()).ToList();
         storedObjects.Count.ShouldBe(1);
+    }
+
+    /// <summary>
+    /// Verify that custom headers (Trace-Id, User-Id) are preserved through the claim check process.
+    /// This tests the header-based claim check approach where the X-ClaimCheck-Ref header
+    /// references the offloaded payload.
+    /// </summary>
+    [Test]
+    public async Task PayloadOffloading_ShouldPreserveCustomHeaders_WhenUsingHeaderBasedClaimCheck()
+    {
+        // Arrange
+        await using var fixture = new NatsContainerFixture();
+        await fixture.InitializeAsync();
+
+        var opts = new NatsOpts
+        {
+            Url = fixture.ConnectionString,
+            SerializerRegistry = HybridSerializerRegistry.Default
+        };
+        await using var conn = new NatsConnection(opts);
+        await conn.ConnectAsync();
+
+        var js = new NatsJSContext(conn);
+        var objContext = new NatsObjContext(js);
+
+        var streamName = $"OFFLOAD_HEADERS_{Guid.NewGuid():N}";
+        var subject = "offload.headers.test";
+
+        await js.CreateStreamAsync(new StreamConfig(streamName, [subject])
+        {
+            Storage = StreamConfigStorage.Memory
+        });
+
+        var consumerName = "headers-processor";
+        await js.CreateOrUpdateConsumerAsync(streamName, new ConsumerConfig(consumerName)
+        {
+            DurableName = consumerName,
+            AckPolicy = ConsumerConfigAckPolicy.Explicit
+        });
+
+        var bucketName = $"payload-headers-{Guid.NewGuid():N}";
+        await objContext.CreateObjectStoreAsync(new NatsObjConfig(bucketName)
+        {
+            Storage = NatsObjStorageType.Memory
+        });
+
+        var serializer = new HybridNatsSerializer();
+        await using var innerBus = new NatsJetStreamBus(js, new ConsoleLogger<NatsJetStreamBus>(), serializer);
+
+        var offloadOptions = new PayloadOffloadingOptions
+        {
+            ThresholdBytes = 100, // Low threshold to trigger offload
+            ObjectKeyPrefix = "claimcheck",
+            ClaimCheckHeaderName = "X-ClaimCheck-Ref"
+        };
+
+        await using var objectStore = new NatsObjectStore(
+            objContext,
+            bucketName,
+            new ConsoleLogger<NatsObjectStore>());
+
+        // Create a large payload and manually upload to object store
+        var largeData = new byte[500];
+        Random.Shared.NextBytes(largeData);
+        var originalMessage = new LargePayloadEvent("EVT-HEADERS-001", largeData, "Custom headers test");
+        var objectKey = $"claimcheck/{subject}/{Guid.NewGuid():N}";
+
+        // Upload payload to object store manually
+        var bufferWriter = new System.Buffers.ArrayBufferWriter<byte>();
+        serializer.Serialize(bufferWriter, originalMessage);
+        using var payloadStream = new MemoryStream(bufferWriter.WrittenMemory.ToArray());
+        await objectStore.PutAsync(objectKey, payloadStream);
+
+        // Create custom headers including the claim check reference and custom user headers
+        var customHeaders = new NatsHeaders
+        {
+            { "X-ClaimCheck-Ref", $"objstore://{objectKey}" },
+            { "Trace-Id", "trace-abc-123" },
+            { "User-Id", "user-456" },
+            { "Nats-Msg-Id", "header-based-msg-001" }
+        };
+
+        // Publish a lightweight placeholder message with headers (the actual payload is in object store)
+        // In real scenarios, this would be done by the OffloadingJetStreamPublisher
+        await js.PublishAsync(subject, new LargePayloadEvent("placeholder", [], "placeholder"), opts: new NatsJSPubOpts
+        {
+            MsgId = customHeaders["Nats-Msg-Id"]
+        }, headers: customHeaders);
+
+        // Create OffloadingJetStreamConsumer for transparent hydration
+        var offloadingConsumer = new OffloadingJetStreamConsumer(
+            innerBus,
+            objectStore,
+            serializer,
+            Options.Create(offloadOptions),
+            new ConsoleLogger<OffloadingJetStreamConsumer>());
+
+        // Act - Consume using OffloadingJetStreamConsumer
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var tcs = new TaskCompletionSource<(LargePayloadEvent Message, MessageHeaders Headers)>();
+
+        await offloadingConsumer.ConsumePullAsync<LargePayloadEvent>(
+            StreamName.From(streamName),
+            ConsumerName.From(consumerName),
+            async context =>
+            {
+                // Capture both the hydrated message and headers
+                tcs.TrySetResult((context.Message, context.Headers));
+                await context.AckAsync();
+            },
+            new JetStreamConsumeOptions { BatchSize = 1 },
+            cts.Token);
+
+        // Wait for the message to be received
+        var (receivedMessage, receivedHeaders) = await tcs.Task.WaitAsync(cts.Token);
+
+        // Assert - Verify payload was correctly hydrated from object store
+        receivedMessage.ShouldNotBeNull();
+        receivedMessage.EventId.ShouldBe(originalMessage.EventId, "Message should be hydrated from object store, not the placeholder");
+        receivedMessage.Data.ShouldBe(originalMessage.Data);
+
+        // Assert - Verify custom headers are preserved
+        receivedHeaders.ShouldNotBeNull();
+        receivedHeaders.Headers.ShouldContainKey("Trace-Id");
+        receivedHeaders.Headers["Trace-Id"].ShouldBe("trace-abc-123");
+        receivedHeaders.Headers.ShouldContainKey("User-Id");
+        receivedHeaders.Headers["User-Id"].ShouldBe("user-456");
+        
+        // The X-ClaimCheck-Ref header should also be present (used for resolution)
+        receivedHeaders.Headers.ShouldContainKey("X-ClaimCheck-Ref");
     }
 
     #endregion

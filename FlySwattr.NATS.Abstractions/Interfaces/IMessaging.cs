@@ -56,19 +56,18 @@ public interface IMessageBus
 /// </summary>
 public interface IJetStreamPublisher
 {
-
     /// <summary>
-    /// Publishes a message to a JetStream subject with a caller-supplied message ID for server-side 
+    /// Publishes a message to a JetStream subject with a caller-supplied message ID for server-side
     /// de-duplication across retries and restarts.
     /// </summary>
     /// <remarks>
     /// <para>
     /// <b>IMPORTANT:</b> The <paramref name="messageId"/> is REQUIRED for proper application-level idempotency.
-    /// Use a business-key-derived ID (e.g., "Order123-Created", "Payment-{TransactionId}-Processed") that 
+    /// Use a business-key-derived ID (e.g., "Order123-Created", "Payment-{TransactionId}-Processed") that
     /// remains stable across retries.
     /// </para>
     /// <para>
-    /// NATS JetStream uses this ID for de-duplication within its configurable deduplication window 
+    /// NATS JetStream uses this ID for de-duplication within its configurable deduplication window
     /// (typically 2 minutes). If the same message ID is published multiple times within this window,
     /// only the first publish is persisted.
     /// </para>
@@ -86,10 +85,11 @@ public interface IJetStreamPublisher
     /// <b>Required.</b> A stable, business-key-derived message ID for JetStream de-duplication.
     /// Must be non-null and non-empty. Examples: "Order-123-Created", "Payment-{txnId}-Processed".
     /// </param>
+    /// <param name="headers">Optional headers to include with the message.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>A task representing the asynchronous operation.</returns>
     /// <exception cref="ArgumentException">Thrown when <paramref name="messageId"/> is null or whitespace.</exception>
-    Task PublishAsync<T>(string subject, T message, string? messageId, CancellationToken cancellationToken = default);
+    Task PublishAsync<T>(string subject, T message, string? messageId, MessageHeaders? headers = null, CancellationToken cancellationToken = default);
 }
 
 /// <summary>

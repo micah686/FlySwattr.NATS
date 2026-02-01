@@ -33,17 +33,17 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
         _logger = logger;
     }
 
-    public Task PublishAsync<T>(string subject, T message, CancellationToken cancellationToken = default)
+    public async Task PublishAsync<T>(string subject, T message, string? messageId, MessageHeaders? headers = null, CancellationToken cancellationToken = default)
     {
         // Enforce messageId requirement at decorator level for consistency
-        throw new ArgumentException(
-            "A messageId must be provided for JetStream publishing to ensure application-level idempotency. " +
-            "Use a business-key-derived ID (e.g., 'Order123-Created') to enable proper de-duplication across retries.",
-            nameof(message));
-    }
+        if (string.IsNullOrWhiteSpace(messageId))
+        {
+            throw new ArgumentException(
+                "A messageId must be provided for JetStream publishing to ensure application-level idempotency. " +
+                "Use a business-key-derived ID (e.g., 'Order123-Created') to enable proper de-duplication across retries.",
+                nameof(messageId));
+        }
 
-    public async Task PublishAsync<T>(string subject, T message, string? messageId, CancellationToken cancellationToken = default)
-    {
         // Serialize the message to determine its size
         var bufferWriter = new ArrayBufferWriter<byte>();
         _serializer.Serialize(bufferWriter, message);
@@ -51,25 +51,27 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
 
         if (payload.Length > _options.ThresholdBytes)
         {
-            await PublishWithOffloadingAsync(subject, message, payload, messageId, cancellationToken);
+            await PublishWithOffloadingAsync(subject, message, payload, messageId, headers, cancellationToken);
         }
         else
         {
             // Under threshold - pass through to inner publisher
-            await _inner.PublishAsync(subject, message, messageId, cancellationToken);
+            await _inner.PublishAsync(subject, message, messageId, headers, cancellationToken);
         }
     }
 
     private async Task PublishWithOffloadingAsync<T>(
-        string subject, 
-        T message, 
-        ReadOnlyMemory<byte> payload, 
+        string subject,
+        T message,
+        ReadOnlyMemory<byte> payload,
         string? messageId,
+        MessageHeaders? headers,
         CancellationToken cancellationToken)
     {
         // Generate a unique object key
         var objectKey = $"{_options.ObjectKeyPrefix}/{subject}/{Guid.NewGuid():N}";
-        
+        var claimCheckRef = $"objstore://{objectKey}";
+
         _logger.LogDebug(
             "Offloading large payload ({Size} bytes) to object store with key {ObjectKey}",
             payload.Length,
@@ -82,16 +84,31 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
         // Create a claim check wrapper message with the reference
         var claimCheck = new ClaimCheckMessage
         {
-            ObjectStoreRef = $"objstore://{objectKey}",
+            ObjectStoreRef = claimCheckRef,
             OriginalType = typeof(T).AssemblyQualifiedName ?? typeof(T).FullName ?? typeof(T).Name,
             OriginalSize = payload.Length
         };
 
+        // Build headers with the claim check reference
+        var claimCheckHeaders = new Dictionary<string, string>
+        {
+            [_options.ClaimCheckHeaderName] = claimCheckRef
+        };
+
+        // Merge any existing headers
+        if (headers != null)
+        {
+            foreach (var header in headers.Headers)
+            {
+                claimCheckHeaders[header.Key] = header.Value;
+            }
+        }
+
         try
         {
             // Publish the claim check wrapper instead of the original message
-            await _inner.PublishAsync(subject, claimCheck, messageId, cancellationToken);
-            
+            await _inner.PublishAsync(subject, claimCheck, messageId, new MessageHeaders(claimCheckHeaders), cancellationToken);
+
             _logger.LogInformation(
                 "Published large message ({Size} bytes) to {Subject} via claim check {ObjectKey}",
                 payload.Length,
@@ -104,7 +121,7 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
             _logger.LogWarning(
                 "Publish failed after uploading payload to object store. Attempting to clean up orphaned object {ObjectKey}",
                 objectKey);
-            
+
             try
             {
                 await _objectStore.DeleteAsync(objectKey, cancellationToken);
@@ -118,7 +135,7 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
                     "Failed to clean up orphaned object {ObjectKey}. Manual cleanup may be required.",
                     objectKey);
             }
-            
+
             throw; // Re-throw the original publish exception
         }
     }
@@ -128,7 +145,8 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
 /// Internal marker message used for claim check references.
 /// This is published instead of the original large payload.
 /// </summary>
-internal class ClaimCheckMessage
+[MemoryPack.MemoryPackable]
+internal partial class ClaimCheckMessage
 {
     /// <summary>
     /// Reference to the offloaded payload in object store (e.g., "objstore://claimcheck/subject/guid")

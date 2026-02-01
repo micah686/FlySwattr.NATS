@@ -74,7 +74,7 @@ public class OffloadingJetStreamPublisherTests
         await sut.PublishAsync("test.subject", message, "msg-123");
 
         // Assert: Inner publisher called with original message, NOT ClaimCheckMessage
-        await _innerPublisher.Received(1).PublishAsync("test.subject", message, "msg-123", Arg.Any<CancellationToken>());
+        await _innerPublisher.Received(1).PublishAsync("test.subject", message, "msg-123", Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>());
         
         // Assert: Object store should NOT be called
         await _objectStore.DidNotReceive().PutAsync(Arg.Any<string>(), Arg.Any<Stream>(), Arg.Any<CancellationToken>());
@@ -93,7 +93,7 @@ public class OffloadingJetStreamPublisherTests
         await sut.PublishAsync("test.subject", message, "msg-123");
 
         // Assert: Inner publisher called with original message (not offloaded)
-        await _innerPublisher.Received(1).PublishAsync("test.subject", message, "msg-123", Arg.Any<CancellationToken>());
+        await _innerPublisher.Received(1).PublishAsync("test.subject", message, "msg-123", Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>());
         
         // Assert: Object store should NOT be called
         await _objectStore.DidNotReceive().PutAsync(Arg.Any<string>(), Arg.Any<Stream>(), Arg.Any<CancellationToken>());
@@ -124,10 +124,11 @@ public class OffloadingJetStreamPublisherTests
         // Assert: Inner publisher called with ClaimCheckMessage wrapper
         await _innerPublisher.Received(1).PublishAsync(
             "test.subject",
-            Arg.Is<ClaimCheckMessage>(c => 
+            Arg.Is<ClaimCheckMessage>(c =>
                 c.ObjectStoreRef.StartsWith("objstore://claimcheck/test.subject/") &&
                 c.OriginalSize == payloadSize),
             "msg-123",
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>());
     }
 
@@ -166,10 +167,11 @@ public class OffloadingJetStreamPublisherTests
         // Assert: ClaimCheckMessage should contain the full type name
         await _innerPublisher.Received(1).PublishAsync(
             "test.subject",
-            Arg.Is<ClaimCheckMessage>(c => 
-                c.OriginalType != null && 
+            Arg.Is<ClaimCheckMessage>(c =>
+                c.OriginalType != null &&
                 c.OriginalType.Contains("MessageWithVeryLongNamespaceThatExceedsNormalLengthsForTestingPurposes")),
             "msg-123",
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>());
     }
 
@@ -196,9 +198,10 @@ public class OffloadingJetStreamPublisherTests
         
         // Inner publisher throws exception after PutAsync succeeds
         _innerPublisher.PublishAsync(
-            Arg.Any<string>(), 
-            Arg.Any<ClaimCheckMessage>(), 
-            Arg.Any<string?>(), 
+            Arg.Any<string>(),
+            Arg.Any<ClaimCheckMessage>(),
+            Arg.Any<string?>(),
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>())
             .ThrowsAsync(new InvalidOperationException("Simulated publish failure"));
         
@@ -234,9 +237,10 @@ public class OffloadingJetStreamPublisherTests
         
         // Inner publisher throws
         _innerPublisher.PublishAsync(
-            Arg.Any<string>(), 
-            Arg.Any<ClaimCheckMessage>(), 
-            Arg.Any<string?>(), 
+            Arg.Any<string>(),
+            Arg.Any<ClaimCheckMessage>(),
+            Arg.Any<string?>(),
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>())
             .ThrowsAsync(new InvalidOperationException("Simulated publish failure"));
         
@@ -298,7 +302,7 @@ public class OffloadingJetStreamPublisherTests
         await sut.PublishAsync("test.subject", message, "msg-1mb-exact");
 
         // Assert: Message passes through (NOT offloaded) because condition is strictly greater-than
-        await _innerPublisher.Received(1).PublishAsync("test.subject", message, "msg-1mb-exact", Arg.Any<CancellationToken>());
+        await _innerPublisher.Received(1).PublishAsync("test.subject", message, "msg-1mb-exact", Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>());
         await _objectStore.DidNotReceive().PutAsync(Arg.Any<string>(), Arg.Any<Stream>(), Arg.Any<CancellationToken>());
     }
 
@@ -354,6 +358,7 @@ public class OffloadingJetStreamPublisherTests
             "test.subject",
             Arg.Is<ClaimCheckMessage>(c => c.OriginalSize == payloadSize),
             "msg-1mb-plus-one",
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>());
     }
 
@@ -387,34 +392,7 @@ public class OffloadingJetStreamPublisherTests
             "test.subject",
             Arg.Any<ClaimCheckMessage>(),
             Arg.Is<string?>(id => id == businessKeyMessageId),
-            Arg.Any<CancellationToken>());
-    }
-
-    /// <summary>
-    /// Verifies that null messageId is also correctly passed through.
-    /// While the inner publisher may enforce messageId requirement, this decorator should not modify it.
-    /// </summary>
-    [Test]
-    public async Task PublishAsync_WhenOffloading_WithNullMessageId_ShouldPassNullToInnerPublisher()
-    {
-        // Arrange
-        var payloadSize = _options.ThresholdBytes + 1;
-        SetupSerializerToReturnPayloadOfSize(payloadSize);
-        var message = new TestMessage { Data = "test" };
-
-        _objectStore.PutAsync(Arg.Any<string>(), Arg.Any<Stream>(), Arg.Any<CancellationToken>())
-            .Returns("stored-key");
-
-        var sut = CreateSut();
-
-        // Act
-        await sut.PublishAsync("test.subject", message, null);
-
-        // Assert: null messageId should be passed through unchanged
-        await _innerPublisher.Received(1).PublishAsync(
-            "test.subject",
-            Arg.Any<ClaimCheckMessage>(),
-            Arg.Is<string?>(id => id == null),
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>());
     }
 
@@ -442,6 +420,7 @@ public class OffloadingJetStreamPublisherTests
             Arg.Any<string>(),
             Arg.Any<ClaimCheckMessage>(),
             Arg.Any<string?>(),
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>())
             .Returns(x =>
             {
@@ -493,6 +472,7 @@ public class OffloadingJetStreamPublisherTests
             Arg.Any<string>(),
             Arg.Any<ClaimCheckMessage>(),
             Arg.Any<string?>(),
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>())
             .Returns(x =>
             {
@@ -528,7 +508,7 @@ public class OffloadingJetStreamPublisherTests
 
         // Act & Assert
         var exception = await Should.ThrowAsync<ArgumentException>(
-            async () => await sut.PublishAsync("test.subject", message));
+            async () => await sut.PublishAsync("test.subject", message, messageId: null));
 
         exception.Message.ShouldContain("messageId must be provided");
     }

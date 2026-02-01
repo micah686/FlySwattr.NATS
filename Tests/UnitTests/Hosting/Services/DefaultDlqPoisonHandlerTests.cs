@@ -97,9 +97,10 @@ public class DefaultDlqPoisonHandlerTests
         
         // Simulate DLQ store failure
         _publisher.PublishAsync(
-            Arg.Any<string>(), 
-            Arg.Any<DlqMessage>(), 
-            Arg.Any<string>(), 
+            Arg.Any<string>(),
+            Arg.Any<DlqMessage>(),
+            Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>())
             .ThrowsAsync(new IOException("NATS KV store full"));
 
@@ -135,9 +136,10 @@ public class DefaultDlqPoisonHandlerTests
         _serializer.GetContentType<TestMessage>().Returns("application/json");
         
         _publisher.PublishAsync(
-            Arg.Any<string>(), 
-            Arg.Any<DlqMessage>(), 
-            Arg.Any<string>(), 
+            Arg.Any<string>(),
+            Arg.Any<DlqMessage>(),
+            Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>())
             .Returns(Task.CompletedTask);
 
@@ -183,9 +185,10 @@ public class DefaultDlqPoisonHandlerTests
 
         DlqMessage? capturedDlqMessage = null;
         _publisher.PublishAsync(
-            Arg.Any<string>(), 
-            Arg.Any<DlqMessage>(), 
-            Arg.Any<string>(), 
+            Arg.Any<string>(),
+            Arg.Any<DlqMessage>(),
+            Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>())
             .Returns(callInfo =>
             {
@@ -245,9 +248,10 @@ public class DefaultDlqPoisonHandlerTests
 
         DlqMessage? capturedDlqMessage = null;
         _publisher.PublishAsync(
-            Arg.Any<string>(), 
-            Arg.Any<DlqMessage>(), 
-            Arg.Any<string>(), 
+            Arg.Any<string>(),
+            Arg.Any<DlqMessage>(),
+            Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>())
             .Returns(callInfo =>
             {
@@ -297,9 +301,10 @@ public class DefaultDlqPoisonHandlerTests
         _serializer.GetContentType<TestMessage>().Returns("application/json");
         
         _publisher.PublishAsync(
-            Arg.Any<string>(), 
-            Arg.Any<DlqMessage>(), 
-            Arg.Any<string>(), 
+            Arg.Any<string>(),
+            Arg.Any<DlqMessage>(),
+            Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>())
             .Returns(Task.CompletedTask);
 
@@ -320,6 +325,7 @@ public class DefaultDlqPoisonHandlerTests
             "dlq.orders",
             Arg.Any<DlqMessage>(),
             Arg.Is<string>(id => id.StartsWith("dlq-validation-")),
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>());
         await context.Received(1).TermAsync(Arg.Any<CancellationToken>());
     }
@@ -349,9 +355,10 @@ public class DefaultDlqPoisonHandlerTests
         // Assert - should terminate, not NAK
         await _context.Received(1).TermAsync(Arg.Any<CancellationToken>());
         await _publisher.DidNotReceive().PublishAsync(
-            Arg.Any<string>(), 
-            Arg.Any<DlqMessage>(), 
-            Arg.Any<string>(), 
+            Arg.Any<string>(),
+            Arg.Any<DlqMessage>(),
+            Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>());
     }
 
@@ -379,12 +386,13 @@ public class DefaultDlqPoisonHandlerTests
 
         // Assert - NAK with exponential backoff (2^(2-1) = 2 seconds)
         await context.Received(1).NackAsync(
-            Arg.Is<TimeSpan>(ts => ts.TotalSeconds >= 1 && ts.TotalSeconds <= 3), 
+            Arg.Is<TimeSpan>(ts => ts.TotalSeconds >= 1 && ts.TotalSeconds <= 3),
             Arg.Any<CancellationToken>());
         await _publisher.DidNotReceive().PublishAsync(
-            Arg.Any<string>(), 
-            Arg.Any<DlqMessage>(), 
-            Arg.Any<string>(), 
+            Arg.Any<string>(),
+            Arg.Any<DlqMessage>(),
+            Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>());
     }
 
@@ -405,9 +413,10 @@ public class DefaultDlqPoisonHandlerTests
         _serializer.GetContentType<TestMessage>().Returns("application/json");
         
         _publisher.PublishAsync(
-            Arg.Any<string>(), 
-            Arg.Any<DlqMessage>(), 
-            Arg.Any<string>(), 
+            Arg.Any<string>(),
+            Arg.Any<DlqMessage>(),
+            Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>())
             .Returns(Task.CompletedTask);
 
@@ -428,6 +437,7 @@ public class DefaultDlqPoisonHandlerTests
             "dlq.orders",
             Arg.Any<DlqMessage>(),
             "dlq-orders-stream-orders-consumer-12345",
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>());
     }
 
@@ -470,9 +480,10 @@ public class DefaultDlqPoisonHandlerTests
 
         DlqMessage? capturedDlqMessage = null;
         _publisher.PublishAsync(
-            Arg.Any<string>(), 
-            Arg.Any<DlqMessage>(), 
-            Arg.Any<string>(), 
+            Arg.Any<string>(),
+            Arg.Any<DlqMessage>(),
+            Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>())
             .Returns(callInfo =>
             {
@@ -534,9 +545,10 @@ public class DefaultDlqPoisonHandlerTests
 
         DlqMessage? capturedDlqMessage = null;
         _publisher.PublishAsync(
-            Arg.Any<string>(), 
-            Arg.Any<DlqMessage>(), 
-            Arg.Any<string>(), 
+            Arg.Any<string>(),
+            Arg.Any<DlqMessage>(),
+            Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>())
             .Returns(callInfo =>
             {

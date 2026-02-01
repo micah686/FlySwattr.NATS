@@ -38,7 +38,7 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
             nameof(message));
     }
 
-    public async Task PublishAsync<T>(string subject, T message, string? messageId, CancellationToken cancellationToken = default)
+    public async Task PublishAsync<T>(string subject, T message, string? messageId, MessageHeaders? headers = null, CancellationToken cancellationToken = default)
     {
         // Require a caller-provided message ID for true application-level idempotency.
         // Auto-generating GUIDs would defeat JetStream's deduplication on retries.
@@ -50,19 +50,28 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
                 nameof(messageId));
         }
 
-        var headers = new NatsHeaders
+        var natsHeaders = new NatsHeaders
         {
             ["Content-Type"] = _serializer.GetContentType<T>(),
             ["Nats-Msg-Id"] = messageId
         };
+
+        // Merge custom headers if provided
+        if (headers != null)
+        {
+            foreach (var header in headers.Headers)
+            {
+                natsHeaders[header.Key] = header.Value;
+            }
+        }
 
         // Pass the message directly to NATS.Net - let the configured MemoryPackSerializerRegistry
         // handle serialization. Do NOT pre-serialize here as that causes double-serialization.
         var ack = await _jsContext.PublishAsync(
             subject,
             message,
-            headers: headers,
-            opts: new NatsJSPubOpts { MsgId = messageId }, 
+            headers: natsHeaders,
+            opts: new NatsJSPubOpts { MsgId = messageId },
             cancellationToken: cancellationToken);
 
         ack.EnsureSuccess();
