@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Abstractions.Exceptions;
 using FlySwattr.NATS.Core.Telemetry;
@@ -56,6 +57,8 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
 
     public async Task PublishAsync<T>(string subject, T message, string? messageId, MessageHeaders? headers = null, CancellationToken cancellationToken = default)
     {
+        var stopwatch = Stopwatch.StartNew();
+        
         // Require a caller-provided message ID for true application-level idempotency.
         // Auto-generating GUIDs would defeat JetStream's deduplication on retries.
         if (string.IsNullOrWhiteSpace(messageId))
@@ -102,6 +105,12 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
             cancellationToken: cancellationToken);
 
         ack.EnsureSuccess();
+        
+        // Record metrics
+        stopwatch.Stop();
+        var tags = new TagList { { NatsTelemetry.MessagingDestinationName, subject } };
+        NatsTelemetry.MessagesPublished.Add(1, tags);
+        NatsTelemetry.PublishDuration.Record(stopwatch.Elapsed.TotalMilliseconds, tags);
 
         _logger.LogDebug("Published JetStream message to {Subject} with MsgId {MsgId}", subject, messageId);
     }
@@ -389,6 +398,14 @@ internal class BasicNatsConsumerService<T> : BackgroundService
 
                 await foreach (var msg in _consumer.ConsumeAsync<T>(opts: opts, cancellationToken: stoppingToken))
                 {
+                    var handlerStopwatch = Stopwatch.StartNew();
+                    var tags = new TagList 
+                    { 
+                        { NatsTelemetry.MessagingDestinationName, _stream },
+                        { NatsTelemetry.NatsStream, _stream },
+                        { NatsTelemetry.NatsConsumer, _consumerName }
+                    };
+                    
                     try
                     {
                         var parentContext = NatsTelemetry.ExtractTraceContext(msg.Headers);
@@ -406,17 +423,28 @@ internal class BasicNatsConsumerService<T> : BackgroundService
 
                         var context = new JsMessageContext<T>(msg);
                         await _handler(context);
-                        // Auto-ack if not acked by handler? 
-                        // The pattern usually relies on the handler to ack. 
-                        // But for safety, we could check. 
-                        // However, standard NATS pattern is explicit ack.
-                        // We will leave it to the handler as per the original design intent.
+                        
+                        // Record success metrics
+                        NatsTelemetry.MessagesReceived.Add(1, tags);
                     }
                     catch (Exception ex)
                     {
                         _logger.LogError(ex, "Error processing message from {Stream}/{Consumer}", _stream, _consumerName);
-                        // Handler is responsible for Ack/Nak. Auto-Nak is disabled to prevent interference.
-                        // await msg.NakAsync(cancellationToken: stoppingToken);
+                        
+                        // Record failure metrics
+                        var errorTags = new TagList 
+                        { 
+                            { NatsTelemetry.MessagingDestinationName, _stream },
+                            { NatsTelemetry.NatsStream, _stream },
+                            { NatsTelemetry.NatsConsumer, _consumerName },
+                            { "error.type", ex.GetType().Name }
+                        };
+                        NatsTelemetry.MessagesFailed.Add(1, errorTags);
+                    }
+                    finally
+                    {
+                        handlerStopwatch.Stop();
+                        NatsTelemetry.MessageProcessingDuration.Record(handlerStopwatch.Elapsed.TotalMilliseconds, tags);
                     }
                 }
             }

@@ -1,6 +1,9 @@
+using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
 using FlySwattr.NATS.Abstractions;
+using FlySwattr.NATS.Core.Telemetry;
 using Microsoft.Extensions.Logging;
 using NATS.Client.Core;
 using NATS.Client.JetStream;
@@ -72,6 +75,9 @@ internal class NatsKeyValueStore : IKeyValueStore, IAsyncDisposable
 
     public async Task PutAsync<T>(string key, T value, CancellationToken cancellationToken = default)
     {
+        var stopwatch = Stopwatch.StartNew();
+        var tags = new TagList { { "operation", "put" }, { "bucket", _bucket } };
+        
         try
         {
             var store = await GetStoreAsync(cancellationToken);
@@ -87,10 +93,18 @@ internal class NatsKeyValueStore : IKeyValueStore, IAsyncDisposable
             _logger.LogError(ex, "Error putting key {Key} to bucket {Bucket}", key, _bucket);
             throw;
         }
+        finally
+        {
+            stopwatch.Stop();
+            NatsTelemetry.KvOperationDuration.Record(stopwatch.Elapsed.TotalMilliseconds, tags);
+        }
     }
 
     public async Task<T?> GetAsync<T>(string key, CancellationToken cancellationToken = default)
     {
+        var stopwatch = Stopwatch.StartNew();
+        var tags = new TagList { { "operation", "get" }, { "bucket", _bucket } };
+        
         try
         {
             var store = await GetStoreAsync(cancellationToken);
@@ -111,10 +125,18 @@ internal class NatsKeyValueStore : IKeyValueStore, IAsyncDisposable
             _logger.LogError(ex, "Error getting key {Key} from bucket {Bucket}", key, _bucket);
             throw;
         }
+        finally
+        {
+            stopwatch.Stop();
+            NatsTelemetry.KvOperationDuration.Record(stopwatch.Elapsed.TotalMilliseconds, tags);
+        }
     }
 
     public async Task DeleteAsync(string key, CancellationToken cancellationToken = default)
     {
+        var stopwatch = Stopwatch.StartNew();
+        var tags = new TagList { { "operation", "delete" }, { "bucket", _bucket } };
+        
         try
         {
             var store = await GetStoreAsync(cancellationToken);
@@ -129,6 +151,11 @@ internal class NatsKeyValueStore : IKeyValueStore, IAsyncDisposable
         {
             _logger.LogError(ex, "Error deleting key {Key} from bucket {Bucket}", key, _bucket);
             throw;
+        }
+        finally
+        {
+            stopwatch.Stop();
+            NatsTelemetry.KvOperationDuration.Record(stopwatch.Elapsed.TotalMilliseconds, tags);
         }
     }
 

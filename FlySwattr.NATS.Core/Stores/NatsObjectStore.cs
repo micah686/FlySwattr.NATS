@@ -1,5 +1,8 @@
+using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using System.Net.Sockets;
 using FlySwattr.NATS.Abstractions;
+using FlySwattr.NATS.Core.Telemetry;
 using Microsoft.Extensions.Logging;
 using NATS.Client.Core;
 using NATS.Client.JetStream;
@@ -114,6 +117,9 @@ internal class NatsObjectStore : IObjectStore, IAsyncDisposable
 
     public async Task<string> PutAsync(string key, Stream data, CancellationToken cancellationToken = default)
     {
+        var stopwatch = Stopwatch.StartNew();
+        var tags = new TagList { { "operation", "put" }, { "bucket", _bucket } };
+        
         try
         {
             return await ExecuteWithRetryAsync(async token =>
@@ -139,10 +145,18 @@ internal class NatsObjectStore : IObjectStore, IAsyncDisposable
             _logger.LogError(ex, "Error uploading object {Key} to bucket {Bucket}", key, _bucket);
             throw;
         }
+        finally
+        {
+            stopwatch.Stop();
+            NatsTelemetry.ObjectStoreOperationDuration.Record(stopwatch.Elapsed.TotalMilliseconds, tags);
+        }
     }
 
     public async Task GetAsync(string key, Stream target, CancellationToken cancellationToken = default)
     {
+        var stopwatch = Stopwatch.StartNew();
+        var tags = new TagList { { "operation", "get" }, { "bucket", _bucket } };
+        
         try
         {
             await ExecuteWithRetryAsync(async token =>
@@ -168,10 +182,18 @@ internal class NatsObjectStore : IObjectStore, IAsyncDisposable
             _logger.LogError(ex, "Error downloading object {Key} to stream from bucket {Bucket}", key, _bucket);
             throw;
         }
+        finally
+        {
+            stopwatch.Stop();
+            NatsTelemetry.ObjectStoreOperationDuration.Record(stopwatch.Elapsed.TotalMilliseconds, tags);
+        }
     }
 
     public async Task DeleteAsync(string key, CancellationToken cancellationToken = default)
     {
+        var stopwatch = Stopwatch.StartNew();
+        var tags = new TagList { { "operation", "delete" }, { "bucket", _bucket } };
+        
         try
         {
             await ExecuteWithRetryAsync(async token =>
@@ -193,6 +215,11 @@ internal class NatsObjectStore : IObjectStore, IAsyncDisposable
         {
             _logger.LogError(ex, "Error deleting object {Key} from bucket {Bucket}", key, _bucket);
             throw;
+        }
+        finally
+        {
+            stopwatch.Stop();
+            NatsTelemetry.ObjectStoreOperationDuration.Record(stopwatch.Elapsed.TotalMilliseconds, tags);
         }
     }
 
@@ -265,6 +292,9 @@ internal class NatsObjectStore : IObjectStore, IAsyncDisposable
 
     public async Task<IEnumerable<ObjectInfo>> ListAsync(bool showDeleted = false, CancellationToken cancellationToken = default)
     {
+        var stopwatch = Stopwatch.StartNew();
+        var tags = new TagList { { "operation", "list" }, { "bucket", _bucket } };
+        
         try
         {
             var store = await GetStoreAsync(cancellationToken);
@@ -288,6 +318,11 @@ internal class NatsObjectStore : IObjectStore, IAsyncDisposable
         {
             _logger.LogError(ex, "Error listing objects in bucket {Bucket}", _bucket);
             throw;
+        }
+        finally
+        {
+            stopwatch.Stop();
+            NatsTelemetry.ObjectStoreOperationDuration.Record(stopwatch.Elapsed.TotalMilliseconds, tags);
         }
     }
 

@@ -50,7 +50,63 @@ By referencing this package, you get access to the full power of the FlySwattr e
 *   **Caching:** L1 (Memory) + L2 (NATS KV) caching with "Stale-While-Revalidate" protection using `FusionCache`.
 *   **Topology Management:** Declarative "Infrastructure-as-Code" for Streams and Consumers.
 *   **Distributed Locking:** Concurrency control primitives backed by NATS KV.
-*   **Observability:** Health checks, Dead Letter Queue (DLQ) monitoring, and structured logging.
+*   **Observability:** OpenTelemetry tracing and metrics, Health checks, Dead Letter Queue (DLQ) monitoring, and structured logging.
+
+## 📊 OpenTelemetry Integration
+
+FlySwattr.NATS includes built-in OpenTelemetry instrumentation for both distributed tracing and metrics.
+
+### Setup
+
+```csharp
+// Program.cs
+builder.Services.AddOpenTelemetry()
+    .WithTracing(tracing => tracing
+        .AddFlySwattrNatsInstrumentation()  // Add NATS tracing
+        .AddOtlpExporter())
+    .WithMetrics(metrics => metrics
+        .AddFlySwattrNatsInstrumentation()  // Add NATS metrics
+        .AddOtlpExporter());
+```
+
+### Distributed Tracing
+
+Tracing is automatically enabled for all messaging operations:
+
+- **Publish operations** - Spans created for Core and JetStream publishing
+- **Subscribe/Consume operations** - Spans created for message processing
+- **Request/Reply** - Full trace propagation across request-response cycles
+- **Context Propagation** - Trace context automatically propagated via `traceparent`/`tracestate` headers
+
+**Span Attributes:**
+| Attribute | Description |
+|-----------|-------------|
+| `messaging.system` | Always `nats` |
+| `messaging.destination.name` | Subject or stream name |
+| `messaging.operation` | `publish`, `receive`, `send` |
+| `messaging.message.id` | Message ID (JetStream) |
+| `messaging.nats.stream` | Stream name (JetStream) |
+| `messaging.nats.consumer` | Consumer name (JetStream) |
+
+### Metrics
+
+The following metrics are automatically recorded:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `flyswattr.nats.messages.published` | Counter | Messages published |
+| `flyswattr.nats.messages.received` | Counter | Messages received/processed |
+| `flyswattr.nats.messages.failed` | Counter | Message processing failures |
+| `flyswattr.nats.publish.duration` | Histogram | Publish operation duration (ms) |
+| `flyswattr.nats.message.processing.duration` | Histogram | Handler execution time (ms) |
+| `flyswattr.nats.kv.operation.duration` | Histogram | KV store operation duration (ms) |
+| `flyswattr.nats.objectstore.operation.duration` | Histogram | Object Store operation duration (ms) |
+
+**Metric Tags:**
+- `messaging.destination.name` - Subject or stream
+- `messaging.nats.stream` - Stream name (JetStream)
+- `messaging.nats.consumer` - Consumer name (JetStream)
+- `error.type` - Exception type (failure metrics only)
 
 ## 🔧 Complete Configuration Reference
 
@@ -100,6 +156,16 @@ builder.Services.AddEnterpriseNATSMessaging(opts =>
     opts.EnableDistributedLock = true;         // Default: true (NATS KV-backed locks)
     opts.EnableTopologyProvisioning = true;    // Default: true (auto-create streams/consumers)
     opts.EnableDlqAdvisoryListener = true;     // Default: true (monitor MAX_DELIVERIES events)
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // TELEMETRY (OpenTelemetry Integration)
+    // Distributed tracing and metrics for observability
+    // ═══════════════════════════════════════════════════════════════════════
+
+    opts.Telemetry.EnableTracing = true;               // Default: true (create spans for messaging ops)
+    opts.Telemetry.EnableMetrics = true;               // Default: true (record counters/histograms)
+    opts.Telemetry.IncludeDestinationNameInTags = true; // Default: true (subject name in metrics)
+    opts.Telemetry.IncludeBucketNameInTags = true;     // Default: true (bucket name in KV/ObjectStore metrics)
 
     // ═══════════════════════════════════════════════════════════════════════
     // PAYLOAD OFFLOADING (Claim Check Pattern)

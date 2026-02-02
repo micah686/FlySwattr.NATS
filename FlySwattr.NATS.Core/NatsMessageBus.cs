@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core.Telemetry;
 using Microsoft.Extensions.Logging;
@@ -66,6 +67,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
 
     public async Task PublishAsync<T>(string subject, T message, CancellationToken cancellationToken = default)
     {
+        var stopwatch = Stopwatch.StartNew();
         using var activity = NatsTelemetry.ActivitySource.StartActivity($"{subject} publish", ActivityKind.Producer);
         if (activity != null)
         {
@@ -78,10 +80,17 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
         NatsTelemetry.InjectTraceContext(activity, natsHeaders);
         
         await _connection.PublishAsync(subject, message, headers: natsHeaders, cancellationToken: cancellationToken);
+        
+        // Record metrics
+        stopwatch.Stop();
+        var tags = new TagList { { NatsTelemetry.MessagingDestinationName, subject } };
+        NatsTelemetry.MessagesPublished.Add(1, tags);
+        NatsTelemetry.PublishDuration.Record(stopwatch.Elapsed.TotalMilliseconds, tags);
     }
 
     public async Task PublishAsync<T>(string subject, T message, MessageHeaders? headers, CancellationToken cancellationToken = default)
     {
+        var stopwatch = Stopwatch.StartNew();
         using var activity = NatsTelemetry.ActivitySource.StartActivity($"{subject} publish", ActivityKind.Producer);
         if (activity != null)
         {
@@ -117,6 +126,12 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
         NatsTelemetry.InjectTraceContext(activity, natsHeaders);
         
         await _connection.PublishAsync(subject, message, headers: natsHeaders, cancellationToken: cancellationToken);
+        
+        // Record metrics
+        stopwatch.Stop();
+        var tags = new TagList { { NatsTelemetry.MessagingDestinationName, subject } };
+        NatsTelemetry.MessagesPublished.Add(1, tags);
+        NatsTelemetry.PublishDuration.Record(stopwatch.Elapsed.TotalMilliseconds, tags);
     }
 
     public async Task SubscribeAsync<T>(string subject, Func<IMessageContext<T>, Task> handler, string? queueGroup = null, CancellationToken cancellationToken = default)
@@ -162,16 +177,30 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
                             }
                         }
 
+                        var handlerStopwatch = Stopwatch.StartNew();
+                        var handlerTags = new TagList { { NatsTelemetry.MessagingDestinationName, subject } };
                         try
                         {
                             _logger.LogDebug("Received message on {Subject}", msg.Subject);
                             var context = new MessageContext<T>(msg);
                             await handler(context);
+                            
+                            // Record success metrics
+                            NatsTelemetry.MessagesReceived.Add(1, handlerTags);
                         }
                         catch (Exception ex)
                         {
                             activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
                             _logger.LogError(ex, "Error handling message {Subject}", subject);
+                            
+                            // Record failure metrics
+                            var errorTags = new TagList { { NatsTelemetry.MessagingDestinationName, subject }, { "error.type", ex.GetType().Name } };
+                            NatsTelemetry.MessagesFailed.Add(1, errorTags);
+                        }
+                        finally
+                        {
+                            handlerStopwatch.Stop();
+                            NatsTelemetry.MessageProcessingDuration.Record(handlerStopwatch.Elapsed.TotalMilliseconds, handlerTags);
                         }
                     }
                     _logger.LogWarning("Subscription Msgs loop completed UNEXPECTEDLY for {Subject}. Token cancelled: {IsCancelled}", subject, token.IsCancellationRequested);

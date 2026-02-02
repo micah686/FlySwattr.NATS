@@ -78,6 +78,11 @@ public class EnterpriseNatsOptions
     public TopologyStartupOptions TopologyStartup { get; } = new();
 
     /// <summary>
+    /// Telemetry configuration for OpenTelemetry tracing and metrics.
+    /// </summary>
+    public TelemetryOptions Telemetry { get; } = new();
+
+    /// <summary>
     /// Object store bucket name for claim check payloads.
     /// Default: "claim-checks"
     /// </summary>
@@ -130,6 +135,56 @@ public class EnterpriseNatsOptions
     /// Default: true (when topology provisioning is enabled)
     /// </summary>
     public bool EnableDlqAdvisoryListener { get; set; } = true;
+}
+
+/// <summary>
+/// Configuration options for OpenTelemetry tracing and metrics.
+/// </summary>
+public class TelemetryOptions
+{
+    /// <summary>
+    /// Enable OpenTelemetry tracing instrumentation.
+    /// When enabled, spans are created for messaging operations (publish, subscribe, consume).
+    /// Default: true
+    /// </summary>
+    /// <remarks>
+    /// <para>Tracing is useful for distributed request correlation and latency analysis.</para>
+    /// <para>Disable if you're not using OpenTelemetry or need to minimize overhead.</para>
+    /// </remarks>
+    public bool EnableTracing { get; set; } = true;
+
+    /// <summary>
+    /// Enable OpenTelemetry metrics instrumentation.
+    /// When enabled, counters and histograms are recorded for messaging and store operations.
+    /// Default: true
+    /// </summary>
+    /// <remarks>
+    /// <para>Metrics provide insights into throughput, latency, and error rates.</para>
+    /// <para>Disable if you're not using OpenTelemetry metrics or need to minimize overhead.</para>
+    /// </remarks>
+    public bool EnableMetrics { get; set; } = true;
+
+    /// <summary>
+    /// Include the bucket name as a tag in KV and Object Store metrics.
+    /// When disabled, bucket names are redacted to reduce metric cardinality.
+    /// Default: true
+    /// </summary>
+    /// <remarks>
+    /// <para>Enable for detailed per-bucket monitoring.</para>
+    /// <para>Disable if you have many dynamically named buckets to prevent metric explosion.</para>
+    /// </remarks>
+    public bool IncludeBucketNameInTags { get; set; } = true;
+
+    /// <summary>
+    /// Include the subject/destination name as a tag in messaging metrics.
+    /// When disabled, subject names are redacted to reduce metric cardinality.
+    /// Default: true
+    /// </summary>
+    /// <remarks>
+    /// <para>Enable for detailed per-subject/destination monitoring.</para>
+    /// <para>Disable if you have many dynamic subjects (e.g., user-specific) to prevent metric explosion.</para>
+    /// </remarks>
+    public bool IncludeDestinationNameInTags { get; set; } = true;
 }
 
 /// <summary>

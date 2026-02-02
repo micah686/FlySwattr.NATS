@@ -21,6 +21,7 @@
         <PackageReference Include="NATS.Net" Version="2.7.0" />
         <PackageReference Include="Polly.Testing" Version="8.5.0" />
         <PackageReference Include="Vogen" Version="8.0.4" />
+        <PackageReference Include="OpenTelemetry.Api" Version="1.*" />
     </ItemGroup>
 
 
