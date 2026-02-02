@@ -8,15 +8,15 @@ However, FlySwattr provides two robust ways to handle concurrency without modify
 
 ## Option 1: Safe Concurrency via Distributed Locks (Recommended for Simplicity)
 
-If you prefer to stick strictly to the `IKeyValueStore` abstraction, you can ensure data consistency by serializing access to a specific key using `IDistributedLock`. While this is technically *Pessimistic* Concurrency (locking), it achieves the goal of preventing lost updates.
+If you prefer to stick strictly to the `IKeyValueStore` abstraction, you can ensure data consistency by serializing access to a specific key using `IDistributedLockProvider`. While this is technically *Pessimistic* Concurrency (locking), it achieves the goal of preventing lost updates.
 
 ### Implementation
 
-Inject `IDistributedLockProvider` alongside your store.
+Inject `IDistributedLockProvider` alongside your store. FlySwattr registers this automatically when you call `AddEnterpriseNATSMessaging()` or `AddFlySwattrNatsDistributedLock()`.
 
 ```csharp
 using FlySwattr.NATS.Abstractions;
-using FlySwattr.NATS.DistributedLock;
+using Medallion.Threading;
 
 public class JobStateService
 {
@@ -24,7 +24,7 @@ public class JobStateService
     private readonly IDistributedLockProvider _lockProvider;
 
     public JobStateService(
-        Func<string, IKeyValueStore> storeFactory, 
+        Func<string, IKeyValueStore> storeFactory,
         IDistributedLockProvider lockProvider)
     {
         _store = storeFactory("jobs-bucket");
@@ -35,7 +35,9 @@ public class JobStateService
     {
         // 1. Acquire a lock for the specific Job ID
         // This ensures no other process can modify this job while we are working on it.
-        await using var handle = await _lockProvider.AcquireLockAsync($"lock:{jobId}", TimeSpan.FromSeconds(5));
+        await using var handle = await _lockProvider.AcquireLockAsync(
+            $"lock:{jobId}",
+            TimeSpan.FromSeconds(5));
 
         if (handle == null)
         {
@@ -50,7 +52,7 @@ public class JobStateService
 
         // 4. Save the new state
         await _store.PutAsync(jobId, state);
-        
+
         // Lock is released automatically when 'handle' is disposed
     }
 }
@@ -80,7 +82,7 @@ public class OptimisticJobStateService
 
     public async Task UpdateJobStateOptimisticallyAsync(string jobId, Action<JobState> updateAction)
     {
-        var bucket = await _kvContext.CreateStoreAsync("jobs-bucket"); // Gets or creates implementation
+        var bucket = await _kvContext.CreateStoreAsync("jobs-bucket");
 
         var retry = 3;
         while (retry-- > 0)
@@ -89,14 +91,14 @@ public class OptimisticJobStateService
             {
                 // 1. Get the Entry, which includes the Value AND the Revision
                 var entry = await bucket.GetEntryAsync<JobState>(jobId);
-                
+
                 // Handle "Not Found" case if necessary
-                if (entry.Value == null) 
+                if (entry.Value == null)
                 {
                     // Handle creation logic or throw
                     var newState = new JobState();
                     updateAction(newState);
-                    await bucket.PutAsync(jobId, newState); 
+                    await bucket.PutAsync(jobId, newState);
                     return;
                 }
 
@@ -109,9 +111,9 @@ public class OptimisticJobStateService
                 await bucket.UpdateAsync(jobId, currentState, entry.Revision);
                 return; // Success!
             }
-            catch (NatsKVConflictException)
+            catch (NatsKVWrongLastRevisionException)
             {
-                // 4. Concurrency detected!
+                // 4. Concurrency conflict detected!
                 // The record was modified by someone else since our GetEntryAsync()
                 // Loop to reload and try again.
                 continue;
@@ -123,9 +125,17 @@ public class OptimisticJobStateService
 }
 ```
 
+**Note:** The exception type is `NatsKVWrongLastRevisionException` in NATS.Net v2.x.
+
 ## Summary
 
 | Strategy | Pros | Cons |
 |:--- |:--- |:--- |
-| **Distributed Lock** | Simple, uses `IKeyValueStore`, guaranteed order. | Adding latency due to locking mechanism. |
+| **Distributed Lock** | Simple, uses `IKeyValueStore`, guaranteed order. | Adds latency due to locking mechanism. |
 | **Native OCC** | High performance, no locks, standard pattern. | Requires `INatsKVContext` dependency instead of `IKeyValueStore`. |
+
+## When to Use Which
+
+- **Distributed Lock**: Best for operations that are infrequent or where simplicity is paramount. Also useful when you need to coordinate across multiple keys or resources.
+
+- **Native OCC**: Best for high-throughput scenarios where contention is expected to be low and you want to minimize latency. Ideal for single-key updates with retry logic.
