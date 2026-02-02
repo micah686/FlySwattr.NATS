@@ -34,6 +34,10 @@ public class HybridNatsSerializer : IMessageSerializer
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
             WriteIndented = false
         };
+        if (maxPayloadSize <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxPayloadSize), "Max payload size must be greater than zero.");
+        }
         _maxPayloadSize = maxPayloadSize;
     }
 

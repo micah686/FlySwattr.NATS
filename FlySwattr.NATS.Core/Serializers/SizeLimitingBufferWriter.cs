@@ -16,7 +16,12 @@ internal class SizeLimitingBufferWriter : IBufferWriter<byte>
 
     public void Advance(int count)
     {
-        if (_currentSize + count > _maxSize)
+        if (count < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(count), "Count cannot be negative.");
+        }
+        
+        if (_currentSize > _maxSize - count) // Check for overflow and limit exceeded
         {
             throw new InvalidOperationException($"Serialization exceeded maximum payload size of {_maxSize} bytes.");
         }

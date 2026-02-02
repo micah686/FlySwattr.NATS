@@ -101,7 +101,7 @@ public class NatsDlqStoreTests
     {
         // Arrange
         var entry = CreateTestEntry("msg-1", "orders.v2.stream", "consumer");
-        var expectedKey = "orders_v2_stream.consumer.msg-1";
+        var expectedKey = "orders_dot_v2_dot_stream.consumer.msg-1";
 
         // Act
         await _sut.StoreAsync(entry);

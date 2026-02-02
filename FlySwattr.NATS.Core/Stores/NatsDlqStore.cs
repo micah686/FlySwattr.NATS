@@ -87,7 +87,7 @@ internal class NatsDlqStore : IDlqStore
     /// Sanitizes a token for use in NATS KV keys by replacing reserved characters.
     /// </summary>
     private static string SanitizeToken(string token) 
-        => token.Replace(".", "_").Replace("*", "_").Replace(">", "_");
+        => token.Replace(".", "_dot_").Replace("*", "_star_").Replace(">", "_gt_");
     
     /// <summary>
     /// Builds the NATS wildcard pattern for filtering keys.

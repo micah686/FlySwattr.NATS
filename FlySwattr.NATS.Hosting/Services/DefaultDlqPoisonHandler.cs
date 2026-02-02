@@ -130,7 +130,7 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
             if (bufferWriter.WrittenCount > MaxDlqPayloadSize && _objectStore != null)
             {
                 // Offload to object store
-                var objectKey = $"dlq-payload/{streamName}/{consumerName}/{context.Sequence}-{DateTimeOffset.UtcNow.Ticks}";
+                var objectKey = $"dlq-payload/{streamName}/{consumerName}/{context.Sequence}-{Guid.NewGuid():N}";
                 using var payloadStream = bufferWriter.WrittenMemory.AsStream();
                 await _objectStore.PutAsync(objectKey, payloadStream, token);
 

@@ -141,7 +141,7 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
             var service = new BasicNatsConsumerService<T>(
                 consumer,
                 stream.Value,
-                consumerName ?? consumer.Info.Name,
+                consumerName ?? consumer.Info?.Name ?? "unknown_consumer",
                 handler,
                 _logger,
                 effectiveParallelism

@@ -10,6 +10,16 @@ namespace FlySwattr.NATS.Topology.Managers;
 
 internal class NatsTopologyManager : ITopologyManager
 {
+    private static readonly TimeSpan TopologyLockTimeout = TimeSpan.FromSeconds(60);
+
+    private static void ValidateNatsName(string name, string type)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            throw new ArgumentException($"{type} name cannot be null or whitespace", nameof(name));
+        
+        if (name.Contains(' ') || name.Contains('.') || name.Contains('*') || name.Contains('>'))
+            throw new ArgumentException($"{type} name '{name}' contains invalid characters (spaces, wildcards, or dots not allowed in this context)", nameof(name));
+    }
     private readonly INatsJSContext _jsContext;
     private readonly INatsKVContext _kvContext;
     private readonly INatsObjContext _objContext;
@@ -68,10 +78,11 @@ internal class NatsTopologyManager : ITopologyManager
                 NumReplicas = spec.Replicas
             };
 
+            ValidateNatsName(spec.Name.Value, "Stream");
             _logger.LogInformation("Ensuring stream {Stream}...", spec.Name);
 
             var lockKey = $"topology_lock_stream_{spec.Name.Value}";
-            await using var _ = await _lockProvider.CreateLock(lockKey).AcquireAsync(TimeSpan.FromSeconds(30), cancellationToken);
+            await using var _ = await _lockProvider.CreateLock(lockKey).AcquireAsync(TopologyLockTimeout, cancellationToken);
 
             var existingStream = await GetOrDefaultAsync(() => 
                 _jsContext.GetStreamAsync(spec.Name.Value, cancellationToken: cancellationToken));
@@ -191,10 +202,11 @@ internal class NatsTopologyManager : ITopologyManager
                 Backoff = backoff,
             };
 
+            ValidateNatsName(spec.DurableName.Value, "Consumer");
             _logger.LogInformation("Ensuring consumer {Stream}/{Consumer}...", spec.StreamName, spec.DurableName);
 
             var lockKey = $"topology_lock_consumer_{spec.StreamName.Value}_{spec.DurableName.Value}";
-            await using var _ = await _lockProvider.CreateLock(lockKey).AcquireAsync(TimeSpan.FromSeconds(30), cancellationToken);
+            await using var _ = await _lockProvider.CreateLock(lockKey).AcquireAsync(TopologyLockTimeout, cancellationToken);
 
             try
             {
@@ -316,7 +328,7 @@ internal class NatsTopologyManager : ITopologyManager
              };
 
              var lockKey = $"topology_lock_kv_bucket_{spec.Name.Value}";
-             await using var _ = await _lockProvider.CreateLock(lockKey).AcquireAsync(TimeSpan.FromSeconds(30), cancellationToken);
+             await using var _ = await _lockProvider.CreateLock(lockKey).AcquireAsync(TopologyLockTimeout, cancellationToken);
 
              // Create-first to avoid TOCTOU races during concurrent startups
              try
@@ -359,7 +371,7 @@ internal class NatsTopologyManager : ITopologyManager
              };
 
              var lockKey = $"topology_lock_obj_store_{spec.Name.Value}";
-             await using var _ = await _lockProvider.CreateLock(lockKey).AcquireAsync(TimeSpan.FromSeconds(30), cancellationToken);
+             await using var _ = await _lockProvider.CreateLock(lockKey).AcquireAsync(TopologyLockTimeout, cancellationToken);
 
              // Create-first to avoid TOCTOU races during concurrent startups
              try
