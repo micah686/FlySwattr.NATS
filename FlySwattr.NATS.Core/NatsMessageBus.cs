@@ -258,7 +258,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
         _connection.ConnectionDisconnected -= OnConnectionEvent;
         _connection.ReconnectFailed -= OnConnectionEvent;
 
-        _cts.Cancel();
+        await _cts.CancelAsync();
         
         var subscriptionsSnapshot = _subscriptions.ToArray();
 

@@ -206,7 +206,7 @@ internal partial class DlqAdvisoryListenerService : BackgroundService
                 MessageId: advisory.Id,
                 OriginalStream: advisory.Stream,
                 OriginalConsumer: advisory.Consumer,
-                OriginalSubject: $"{advisory.Stream}.{advisory.Consumer}", // Approximate subject
+                OriginalSubject: advisory.Subject ?? advisory.Stream, // Use actual subject from advisory, fallback to stream
                 OriginalSequence: advisory.StreamSeq,
                 DeliveryCount: advisory.Deliveries,
                 ErrorReason: "MaxDeliver limit exceeded (server-side advisory)",

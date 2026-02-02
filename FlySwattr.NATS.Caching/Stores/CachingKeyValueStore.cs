@@ -97,6 +97,7 @@ internal class CachingKeyValueStore : IKeyValueStore
         // Wrap the handler to invalidate cache on external changes
         await _inner.WatchAsync<T>(key, async (change) => 
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (change.Key != null)
             {
                 // Invalidate cache on any change so subsequent reads get fresh data

@@ -26,5 +26,6 @@ public record ConsumerMaxDeliveriesAdvisory(
     [property: JsonPropertyName("consumer")] string Consumer,
     [property: JsonPropertyName("stream_seq")] ulong StreamSeq,
     [property: JsonPropertyName("deliveries")] int Deliveries,
-    [property: JsonPropertyName("domain")] string? Domain = null
+    [property: JsonPropertyName("domain")] string? Domain = null,
+    [property: JsonPropertyName("subject")] string? Subject = null
 );
