@@ -115,6 +115,10 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
                 subject,
                 objectKey);
         }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
         catch
         {
             // Compensating action: clean up the orphaned payload from object store

@@ -81,16 +81,11 @@ internal class OffloadingJetStreamConsumer : IJetStreamConsumer
 
         // Check if the message itself is a ClaimCheckMessage
         // This handles the case where the message was serialized as ClaimCheckMessage
-        try
+        // Check if the message itself is a ClaimCheckMessage
+        // This handles the case where the message was serialized as ClaimCheckMessage
+        if (context.Message is ClaimCheckMessage claimCheck)
         {
-            if (context.Message is ClaimCheckMessage claimCheck)
-            {
-                return await ResolveFromClaimCheckMessageAsync<T>(context, claimCheck, cancellationToken);
-            }
-        }
-        catch
-        {
-            // Not a ClaimCheckMessage - pass through
+            return await ResolveFromClaimCheckMessageAsync<T>(context, claimCheck, cancellationToken);
         }
 
         // Not a claim check message - return original context

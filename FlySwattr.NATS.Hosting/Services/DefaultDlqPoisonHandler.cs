@@ -104,7 +104,7 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
         {
             // Transient failure, NAK with exponential backoff
             LogHandlerFailedWithNak(streamName, consumerName, context.NumDelivered, exception);
-            var backoffSeconds = Math.Min(30, Math.Pow(2, context.NumDelivered - 1));
+            var backoffSeconds = Math.Min(30, Math.Pow(2, Math.Clamp((int)context.NumDelivered - 1, 0, 30)));
             try { await context.NackAsync(TimeSpan.FromSeconds(backoffSeconds), cancellationToken); } catch { /* best effort */ }
         }
     }

@@ -373,6 +373,7 @@ internal class NatsDistributedLockProvider : IDistributedLockProvider
 
         private async Task HeartbeatLoopAsync(TimeSpan interval, CancellationToken ct)
         {
+            int consecutiveFailures = 0;
             while (!ct.IsCancellationRequested)
             {
                 try
@@ -389,6 +390,7 @@ internal class NatsDistributedLockProvider : IDistributedLockProvider
                     
                     // Update our tracked revision for the next heartbeat
                     _currentRevision = newRevision;
+                    consecutiveFailures = 0; // Reset on success
                 }
                 catch (OperationCanceledException) 
                 { 
@@ -415,7 +417,17 @@ internal class NatsDistributedLockProvider : IDistributedLockProvider
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "Lock heartbeat failed for {Key}", _key);
+                    consecutiveFailures++;
+                    if (consecutiveFailures >= 3)
+                    {
+                        _logger.LogWarning(ex, "Lock heartbeat failed 3 times conservatively for {Key}. Assuming lock lost.", _key);
+                        await _handleLostCts.CancelAsync();
+                        break;
+                    }
+                    else
+                    {
+                         _logger.LogWarning(ex, "Lock heartbeat failed for {Key} (Attempt {Count}/3)", _key, consecutiveFailures);
+                    }
                 }
             }
         }
@@ -430,9 +442,10 @@ internal class NatsDistributedLockProvider : IDistributedLockProvider
                 {
                     await DisposeAsync();
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
-                    // Lock will auto-release via TTL; swallow exception
+                    // Lock will auto-release via TTL; log exception
+                    _logger.LogWarning(ex, "Fire-and-forget dispose failed for lock {Key}", _key);
                 }
             });
         }

@@ -60,7 +60,7 @@ internal class HierarchicalResilienceBuilder : IAsyncDisposable
         if (_disposed) return;
 
         var threshold = DateTime.UtcNow - _evictionThreshold;
-        foreach (var key in _pipelineCache.Keys)
+        foreach (var key in _pipelineCache.Keys.ToArray())
         {
             if (_pipelineCache.TryGetValue(key, out var entry) && entry.LastAccess < threshold)
             {

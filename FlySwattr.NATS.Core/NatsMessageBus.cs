@@ -95,6 +95,21 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
         {
             foreach (var kvp in headers.Headers)
             {
+                if (string.IsNullOrWhiteSpace(kvp.Key))
+                {
+                    throw new ArgumentException("Header key cannot be null or whitespace", nameof(headers));
+                }
+                
+                if (kvp.Key.Contains(':') || kvp.Key.Any(char.IsControl))
+                {
+                    throw new ArgumentException($"Invalid header key '{kvp.Key}'. Keys cannot contain colons or control characters.", nameof(headers));
+                }
+                
+                if (kvp.Value == null)
+                {
+                    throw new ArgumentException($"Header value for '{kvp.Key}' cannot be null", nameof(headers));
+                }
+
                 natsHeaders.Add(kvp.Key, kvp.Value);
             }
         }
