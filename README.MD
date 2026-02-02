@@ -482,7 +482,7 @@ FlySwattr.NATS (Orchestration)
 
 ## License
 
-MIT
+AGPL-3.0
 
 ## Contributing
 
