@@ -2,6 +2,9 @@
 
 An enterprise-grade wrapper library for [NATS.Net](https://github.com/nats-io/nats.net), providing a production-ready messaging platform with advanced features including JetStream support, resilience patterns, topology management, dead-letter queues (DLQ), payload offloading, caching, and distributed locking.
 
+### AI Notice:
+This library has been generated with AI, but also partially reviewed by hand for issues.
+
 ## Features
 
 - **Core NATS Messaging** - Publish/subscribe, request-response patterns with automatic reconnection
