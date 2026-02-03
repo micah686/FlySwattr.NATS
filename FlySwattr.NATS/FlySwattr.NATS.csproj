@@ -6,6 +6,9 @@
         <Nullable>enable</Nullable>
         <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
         <GenerateDocumentationFile>true</GenerateDocumentationFile>
+        <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+        <Authors>micah686</Authors>
+        <PackageProjectUrl>https://github.com/micah686/FlySwattr.NATS</PackageProjectUrl>
     </PropertyGroup>
 
     <ItemGroup>
