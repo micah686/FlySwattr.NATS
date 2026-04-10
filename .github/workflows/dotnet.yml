@@ -17,7 +17,7 @@ jobs:
     steps:
     - uses: actions/checkout@v6
     - name: Setup .NET
-      uses: actions/setup-dotnet@v4
+      uses: actions/setup-dotnet@v5
       with:
         dotnet-version: 10.0.x
     - name: Restore dependencies
@@ -26,5 +26,5 @@ jobs:
       run: dotnet build Github_CI.slnx --configuration Release --no-restore
     - name: Run Unit Tests
       run: dotnet test --project Tests/UnitTests/UnitTests.csproj --configuration Release --no-build --no-restore --verbosity normal --retry-failed-tests 3
-#    - name: Run Integration Tests
-#      run: dotnet test --project Tests/IntegrationTests/IntegrationTests.csproj --configuration Release --no-build --no-restore --verbosity normal --retry-failed-tests 3
+    - name: Run Integration Tests
+      run: dotnet test --project Tests/IntegrationTests/IntegrationTests.csproj --configuration Release --no-build --no-restore --verbosity normal --retry-failed-tests 3
