@@ -37,13 +37,20 @@ public interface IDlqStore
         CancellationToken cancellationToken = default);
     
     /// <summary>
-    /// Updates the status of a DLQ entry.
+    /// Updates the status of a DLQ entry using optimistic concurrency.
     /// </summary>
     /// <param name="id">The unique identifier of the DLQ entry.</param>
     /// <param name="status">The new status to set.</param>
+    /// <param name="expectedRevision">
+    /// Optional expected KV revision. When provided, the update will only succeed if the entry is still at this revision.
+    /// </param>
     /// <param name="cancellationToken">Cancellation token.</param>
-    /// <returns>True if the entry was found and updated, false otherwise.</returns>
-    Task<bool> UpdateStatusAsync(string id, DlqMessageStatus status, CancellationToken cancellationToken = default);
+    /// <returns>The outcome of the update attempt and the new revision when successful.</returns>
+    Task<DlqEntryUpdateResult> UpdateStatusAsync(
+        string id,
+        DlqMessageStatus status,
+        ulong? expectedRevision = null,
+        CancellationToken cancellationToken = default);
     
     /// <summary>
     /// Deletes a DLQ entry by its unique identifier.

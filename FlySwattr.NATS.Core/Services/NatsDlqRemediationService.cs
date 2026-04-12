@@ -1,4 +1,3 @@
-using System.Text.Json;
 using FlySwattr.NATS.Abstractions;
 using Microsoft.Extensions.Logging;
 
@@ -10,6 +9,9 @@ namespace FlySwattr.NATS.Core.Services;
 /// </summary>
 internal partial class NatsDlqRemediationService : IDlqRemediationService
 {
+    private const string ContentTypeHeader = "Content-Type";
+    private const string MessageIdHeader = "Nats-Msg-Id";
+
     private readonly IDlqStore _dlqStore;
     private readonly IJetStreamPublisher _publisher;
     private readonly IMessageSerializer _serializer;
@@ -62,7 +64,10 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
     }
 
     /// <inheritdoc />
-    public async Task<DlqRemediationResult> ReplayAsync(string id, CancellationToken cancellationToken = default)
+    public async Task<DlqRemediationResult> ReplayAsync(
+        string id,
+        DlqReplayMode replayMode = DlqReplayMode.Idempotent,
+        CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
         
@@ -75,8 +80,17 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
                 return new DlqRemediationResult(false, id, DlqRemediationAction.NotFound, "DLQ entry not found");
             }
 
-            // Mark as processing
-            await _dlqStore.UpdateStatusAsync(id, DlqMessageStatus.Processing, cancellationToken);
+            var processingResult = await _dlqStore.UpdateStatusAsync(
+                id,
+                DlqMessageStatus.Processing,
+                entry.StoreRevision,
+                cancellationToken);
+
+            if (!processingResult.Succeeded)
+            {
+                return CreateStatusUpdateFailureResult(id, processingResult, "mark entry as processing");
+            }
+
             LogProcessing(id, entry.OriginalSubject);
 
             try
@@ -90,21 +104,27 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
                     return new DlqRemediationResult(false, id, DlqRemediationAction.Failed, errorMsg);
                 }
 
-                // Publish to original subject using raw bytes
-                // Use a deterministic message ID for idempotency: replay-{originalId}
-                var replayMessageId = $"replay-{id}-{DateTimeOffset.UtcNow.Ticks}";
-                await PublishRawAsync(entry.OriginalSubject, payload, replayMessageId, cancellationToken);
+                var replayMessageId = CreateReplayMessageId(id, replayMode);
+                await PublishReplayAsync(entry, payload, replayMessageId, cancellationToken);
 
-                // Mark as resolved
-                await _dlqStore.UpdateStatusAsync(id, DlqMessageStatus.Resolved, cancellationToken);
+                var resolvedResult = await _dlqStore.UpdateStatusAsync(
+                    id,
+                    DlqMessageStatus.Resolved,
+                    processingResult.Revision,
+                    cancellationToken);
+
+                if (!resolvedResult.Succeeded)
+                {
+                    return CreateStatusUpdateFailureResult(id, resolvedResult, "mark entry as resolved after replay");
+                }
+
                 LogReplayed(id, entry.OriginalSubject);
 
                 return new DlqRemediationResult(true, id, DlqRemediationAction.Replayed, CompletedAt: DateTimeOffset.UtcNow);
             }
             catch (Exception ex)
             {
-                // Revert to pending on failure
-                await _dlqStore.UpdateStatusAsync(id, DlqMessageStatus.Pending, cancellationToken);
+                await TryRevertToPendingAsync(id, processingResult.Revision, cancellationToken);
                 LogReplayException(id, ex);
                 return new DlqRemediationResult(false, id, DlqRemediationAction.Failed, ex.Message);
             }
@@ -117,7 +137,11 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
     }
 
     /// <inheritdoc />
-    public async Task<DlqRemediationResult> ReplayWithModificationAsync<T>(string id, T modifiedPayload, CancellationToken cancellationToken = default)
+    public async Task<DlqRemediationResult> ReplayWithModificationAsync<T>(
+        string id,
+        T modifiedPayload,
+        DlqReplayMode replayMode = DlqReplayMode.Idempotent,
+        CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
         ArgumentNullException.ThrowIfNull(modifiedPayload);
@@ -131,26 +155,47 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
                 return new DlqRemediationResult(false, id, DlqRemediationAction.NotFound, "DLQ entry not found");
             }
 
-            // Mark as processing
-            await _dlqStore.UpdateStatusAsync(id, DlqMessageStatus.Processing, cancellationToken);
+            var processingResult = await _dlqStore.UpdateStatusAsync(
+                id,
+                DlqMessageStatus.Processing,
+                entry.StoreRevision,
+                cancellationToken);
+
+            if (!processingResult.Succeeded)
+            {
+                return CreateStatusUpdateFailureResult(id, processingResult, "mark entry as processing");
+            }
+
             LogProcessingModified(id, entry.OriginalSubject, typeof(T).Name);
 
             try
             {
-                // Use a deterministic message ID for idempotency
-                var replayMessageId = $"replay-modified-{id}-{DateTimeOffset.UtcNow.Ticks}";
-                await _publisher.PublishAsync(entry.OriginalSubject, modifiedPayload, replayMessageId, cancellationToken: cancellationToken);
+                var replayMessageId = CreateReplayMessageId(id, replayMode, modified: true);
+                await _publisher.PublishAsync(
+                    entry.OriginalSubject,
+                    modifiedPayload,
+                    replayMessageId,
+                    CreateReplayHeaders(entry),
+                    cancellationToken);
 
-                // Mark as resolved
-                await _dlqStore.UpdateStatusAsync(id, DlqMessageStatus.Resolved, cancellationToken);
+                var resolvedResult = await _dlqStore.UpdateStatusAsync(
+                    id,
+                    DlqMessageStatus.Resolved,
+                    processingResult.Revision,
+                    cancellationToken);
+
+                if (!resolvedResult.Succeeded)
+                {
+                    return CreateStatusUpdateFailureResult(id, resolvedResult, "mark entry as resolved after replay");
+                }
+
                 LogReplayedModified(id, entry.OriginalSubject);
 
                 return new DlqRemediationResult(true, id, DlqRemediationAction.Replayed, CompletedAt: DateTimeOffset.UtcNow);
             }
             catch (Exception ex)
             {
-                // Revert to pending on failure
-                await _dlqStore.UpdateStatusAsync(id, DlqMessageStatus.Pending, cancellationToken);
+                await TryRevertToPendingAsync(id, processingResult.Revision, cancellationToken);
                 LogReplayException(id, ex);
                 return new DlqRemediationResult(false, id, DlqRemediationAction.Failed, ex.Message);
             }
@@ -176,7 +221,17 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
                 return new DlqRemediationResult(false, id, DlqRemediationAction.NotFound, "DLQ entry not found");
             }
 
-            await _dlqStore.UpdateStatusAsync(id, DlqMessageStatus.Archived, cancellationToken);
+            var updateResult = await _dlqStore.UpdateStatusAsync(
+                id,
+                DlqMessageStatus.Archived,
+                entry.StoreRevision,
+                cancellationToken);
+
+            if (!updateResult.Succeeded)
+            {
+                return CreateStatusUpdateFailureResult(id, updateResult, "archive entry");
+            }
+
             LogArchived(id, reason);
 
             return new DlqRemediationResult(true, id, DlqRemediationAction.Archived, CompletedAt: DateTimeOffset.UtcNow);
@@ -242,16 +297,120 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
         return entry.Payload;
     }
 
-    private async Task PublishRawAsync(string subject, byte[] payload, string messageId, CancellationToken cancellationToken)
+    private async Task PublishReplayAsync(
+        DlqMessageEntry entry,
+        byte[] payload,
+        string messageId,
+        CancellationToken cancellationToken)
     {
-        // For raw bytes, we need to deserialize first then republish
-        // This is a limitation - we don't know the original type
-        // For now, we publish as-is using a generic approach
-        // The consumer will need to handle the deserialization
-        
-        // Note: This publishes the raw bytes as the payload. The receiving consumer
-        // must be able to handle this format (typically MemoryPack or JSON bytes)
-        await _publisher.PublishAsync(subject, payload, messageId, cancellationToken: cancellationToken);
+        var headers = CreateReplayHeaders(entry);
+        var runtimeType = ResolveRuntimeType(entry.OriginalMessageType);
+
+        if (runtimeType == null || runtimeType == typeof(byte[]))
+        {
+            await _publisher.PublishAsync(entry.OriginalSubject, payload, messageId, headers, cancellationToken);
+            return;
+        }
+
+        var deserialized = DeserializePayload(payload, runtimeType);
+        await PublishTypedAsync(entry.OriginalSubject, deserialized, runtimeType, messageId, headers, cancellationToken);
+    }
+
+    private async Task TryRevertToPendingAsync(string id, ulong? expectedRevision, CancellationToken cancellationToken)
+    {
+        if (expectedRevision == null)
+        {
+            return;
+        }
+
+        var revertResult = await _dlqStore.UpdateStatusAsync(id, DlqMessageStatus.Pending, expectedRevision, cancellationToken);
+        if (!revertResult.Succeeded)
+        {
+            LogReplayFailed(id, $"Failed to revert status to Pending due to {revertResult.Outcome}");
+        }
+    }
+
+    private DlqRemediationResult CreateStatusUpdateFailureResult(string id, DlqEntryUpdateResult result, string action)
+    {
+        var message = result.Outcome switch
+        {
+            DlqEntryUpdateOutcome.NotFound => $"Unable to {action}: DLQ entry not found",
+            DlqEntryUpdateOutcome.Conflict => $"Unable to {action}: DLQ entry was modified concurrently",
+            _ => $"Unable to {action}"
+        };
+
+        LogReplayFailed(id, message);
+        return new DlqRemediationResult(false, id, DlqRemediationAction.Failed, message);
+    }
+
+    private static string CreateReplayMessageId(string id, DlqReplayMode replayMode, bool modified = false)
+    {
+        var prefix = modified ? "replay-modified" : "replay";
+        return replayMode switch
+        {
+            DlqReplayMode.Idempotent => $"{prefix}-{id}",
+            DlqReplayMode.NewEvent => $"{prefix}-{id}-{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}-{Guid.NewGuid():N}",
+            _ => throw new ArgumentOutOfRangeException(nameof(replayMode), replayMode, "Unknown replay mode")
+        };
+    }
+
+    private static Type? ResolveRuntimeType(string? originalMessageType)
+    {
+        if (string.IsNullOrWhiteSpace(originalMessageType))
+        {
+            return null;
+        }
+
+        return Type.GetType(originalMessageType, throwOnError: false)
+               ?? AppDomain.CurrentDomain.GetAssemblies()
+                   .Select(a => a.GetType(originalMessageType, throwOnError: false, ignoreCase: false))
+                   .FirstOrDefault(t => t != null);
+    }
+
+    private object DeserializePayload(byte[] payload, Type runtimeType)
+    {
+        var deserializeMethod = typeof(IMessageSerializer)
+            .GetMethod(nameof(IMessageSerializer.Deserialize))
+            ?.MakeGenericMethod(runtimeType)
+            ?? throw new InvalidOperationException("Unable to resolve serializer deserialize method.");
+
+        return deserializeMethod.Invoke(_serializer, [new ReadOnlyMemory<byte>(payload)])
+               ?? throw new InvalidOperationException($"Serializer returned null for type {runtimeType.FullName}.");
+    }
+
+    private Task PublishTypedAsync(
+        string subject,
+        object payload,
+        Type payloadType,
+        string messageId,
+        MessageHeaders? headers,
+        CancellationToken cancellationToken)
+    {
+        var publishMethod = typeof(IJetStreamPublisher)
+            .GetMethods()
+            .Single(m =>
+                m.Name == nameof(IJetStreamPublisher.PublishAsync) &&
+                m.IsGenericMethodDefinition &&
+                m.GetParameters().Length == 5)
+            .MakeGenericMethod(payloadType);
+
+        return (Task)(publishMethod.Invoke(_publisher, [subject, payload, messageId, headers, cancellationToken])
+            ?? throw new InvalidOperationException("Unable to invoke typed replay publish."));
+    }
+
+    private static MessageHeaders? CreateReplayHeaders(DlqMessageEntry entry)
+    {
+        if (entry.OriginalHeaders == null || entry.OriginalHeaders.Count == 0)
+        {
+            return null;
+        }
+
+        var headers = entry.OriginalHeaders
+            .Where(kvp => !string.Equals(kvp.Key, ContentTypeHeader, StringComparison.OrdinalIgnoreCase))
+            .Where(kvp => !string.Equals(kvp.Key, MessageIdHeader, StringComparison.OrdinalIgnoreCase))
+            .ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+
+        return headers.Count == 0 ? null : new MessageHeaders(headers);
     }
 
     // Source-generated logging methods

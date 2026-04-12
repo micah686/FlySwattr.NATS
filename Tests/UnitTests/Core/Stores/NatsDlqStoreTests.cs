@@ -2,6 +2,7 @@ using System.Text.Json;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core;
 using Microsoft.Extensions.Logging;
+using NATS.Client.Core;
 using NATS.Client.JetStream.Models;
 using NATS.Client.KeyValueStore;
 using NSubstitute;
@@ -14,7 +15,7 @@ namespace UnitTests.Core.Stores;
 public class NatsDlqStoreTests
 {
     private readonly INatsKVContext _kvContext;
-    private readonly IKeyValueStore _kvStore;
+    private readonly INatsKVStore _kvStore;
     private readonly ILogger<NatsDlqStore> _logger;
     private readonly NatsDlqStore _sut;
     private const string BucketName = "fs-dlq-entries";
@@ -22,16 +23,12 @@ public class NatsDlqStoreTests
     public NatsDlqStoreTests()
     {
         _kvContext = Substitute.For<INatsKVContext>();
-        _kvStore = Substitute.For<IKeyValueStore>();
+        _kvStore = Substitute.For<INatsKVStore>();
         _logger = Substitute.For<ILogger<NatsDlqStore>>();
-        
-        Func<string, IKeyValueStore> storeFactory = bucket => 
-        {
-            if (bucket == BucketName) return _kvStore;
-            throw new ArgumentException($"Unexpected bucket name: {bucket}");
-        };
+        _kvContext.GetStoreAsync(BucketName, Arg.Any<CancellationToken>())
+            .Returns(_kvStore);
 
-        _sut = new NatsDlqStore(_kvContext, storeFactory, _logger);
+        _sut = new NatsDlqStore(_kvContext, _logger);
     }
 
     #region Initialization Tests
@@ -44,7 +41,9 @@ public class NatsDlqStoreTests
 
         // Force GetStoreAsync to fail so CreateStoreAsync is called
         _kvContext.GetStoreAsync(BucketName, Arg.Any<CancellationToken>())
-            .Returns(ValueTask.FromException<INatsKVStore>(new Exception("Bucket not found")));
+            .Returns(
+                ValueTask.FromException<INatsKVStore>(new Exception("Bucket not found")),
+                new ValueTask<INatsKVStore>(_kvStore));
 
         // Act
         await _sut.StoreAsync(entry);
@@ -64,7 +63,9 @@ public class NatsDlqStoreTests
 
         // Force GetStoreAsync to fail so CreateStoreAsync is called
         _kvContext.GetStoreAsync(BucketName, Arg.Any<CancellationToken>())
-            .Returns(ValueTask.FromException<INatsKVStore>(new Exception("Bucket not found")));
+            .Returns(
+                ValueTask.FromException<INatsKVStore>(new Exception("Bucket not found")),
+                new ValueTask<INatsKVStore>(_kvStore));
 
         // Act
         await _sut.StoreAsync(entry1);
@@ -93,6 +94,7 @@ public class NatsDlqStoreTests
         await _kvStore.Received(1).PutAsync(
             expectedKey, 
             Arg.Is<string>(s => s == expectedJson), 
+            Arg.Any<INatsSerialize<string>?>(),
             Arg.Any<CancellationToken>());
     }
 
@@ -110,6 +112,7 @@ public class NatsDlqStoreTests
         await _kvStore.Received(1).PutAsync(
             expectedKey, 
             Arg.Any<string>(), 
+            Arg.Any<INatsSerialize<string>?>(),
             Arg.Any<CancellationToken>());
     }
 
@@ -146,9 +149,7 @@ public class NatsDlqStoreTests
         // Arrange - key is now hierarchical
         var key = "test-stream.test-consumer.msg-1";
         var entry = CreateTestEntry("msg-1");
-        var json = JsonSerializer.Serialize(entry);
-        
-        _kvStore.GetAsync<string>(key, Arg.Any<CancellationToken>()).Returns(json);
+        SetupGetAsync(key, entry, revision: 5);
 
         // Act
         var result = await _sut.GetAsync(key);
@@ -157,6 +158,7 @@ public class NatsDlqStoreTests
         result.ShouldNotBeNull();
         result!.Id.ShouldBe("msg-1");
         result.OriginalStream.ShouldBe(entry.OriginalStream);
+        result.StoreRevision.ShouldBe((ulong?)5);
     }
 
     [Test]
@@ -164,7 +166,8 @@ public class NatsDlqStoreTests
     {
         // Arrange
         var key = "missing-stream.missing-consumer.missing-id";
-        _kvStore.GetAsync<string>(key, Arg.Any<CancellationToken>()).Returns((string?)null);
+        _kvStore.GetEntryAsync<string>(key, Arg.Any<ulong>(), Arg.Any<INatsDeserialize<string>?>(), Arg.Any<CancellationToken>())
+            .Returns(x => ValueTask.FromException<NatsKVEntry<string>>(new NatsKVKeyNotFoundException()));
 
         // Act
         var result = await _sut.GetAsync(key);
@@ -308,14 +311,37 @@ public class NatsDlqStoreTests
         SetupGetAsync(key, entry);
 
         // Act
-        var result = await _sut.UpdateStatusAsync(key, DlqMessageStatus.Resolved);
+        _kvStore.UpdateAsync(key, Arg.Any<string>(), 7, serializer: null, cancellationToken: Arg.Any<CancellationToken>())
+            .Returns(new ValueTask<ulong>(8));
+
+        var result = await _sut.UpdateStatusAsync(key, DlqMessageStatus.Resolved, expectedRevision: 7);
 
         // Assert
-        result.ShouldBeTrue();
-        await _kvStore.Received(1).PutAsync(
+        result.Outcome.ShouldBe(DlqEntryUpdateOutcome.Updated);
+        result.Revision.ShouldBe((ulong?)8);
+        await _kvStore.Received(1).UpdateAsync(
             key,
             Arg.Is<string>(s => s.Contains("\"Status\":2")), // Resolved = 2
-            Arg.Any<CancellationToken>());
+            7,
+            serializer: null,
+            cancellationToken: Arg.Any<CancellationToken>());
+    }
+
+    [Test]
+    public async Task UpdateStatusAsync_ShouldReturnConflict_WhenRevisionChanged()
+    {
+        // Arrange
+        var key = "stream.consumer.msg-1";
+        var entry = CreateTestEntry("msg-1");
+        SetupGetAsync(key, entry, revision: 7);
+        _kvStore.UpdateAsync(key, Arg.Any<string>(), 7, serializer: null, cancellationToken: Arg.Any<CancellationToken>())
+            .Returns(x => ValueTask.FromException<ulong>(CreateException<NatsKVWrongLastRevisionException>()));
+
+        // Act
+        var result = await _sut.UpdateStatusAsync(key, DlqMessageStatus.Resolved, expectedRevision: 7);
+
+        // Assert
+        result.Outcome.ShouldBe(DlqEntryUpdateOutcome.Conflict);
     }
 
     #endregion
@@ -335,7 +361,7 @@ public class NatsDlqStoreTests
 
         // Assert
         result.ShouldBeTrue();
-        await _kvStore.Received(1).DeleteAsync(key, Arg.Any<CancellationToken>());
+        await _kvStore.Received(1).DeleteAsync(key, Arg.Any<NatsKVDeleteOpts?>(), Arg.Any<CancellationToken>());
     }
 
     [Test]
@@ -343,14 +369,15 @@ public class NatsDlqStoreTests
     {
         // Arrange
         var key = "missing.consumer.id";
-        _kvStore.GetAsync<string>(key, Arg.Any<CancellationToken>()).Returns((string?)null);
+        _kvStore.GetEntryAsync<string>(key, Arg.Any<ulong>(), Arg.Any<INatsDeserialize<string>?>(), Arg.Any<CancellationToken>())
+            .Returns(x => ValueTask.FromException<NatsKVEntry<string>>(new NatsKVKeyNotFoundException()));
 
         // Act
         var result = await _sut.DeleteAsync(key);
 
         // Assert
         result.ShouldBeFalse();
-        await _kvStore.DidNotReceive().DeleteAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
+        await _kvStore.DidNotReceive().DeleteAsync(Arg.Any<string>(), Arg.Any<NatsKVDeleteOpts?>(), Arg.Any<CancellationToken>());
     }
 
     #endregion
@@ -376,14 +403,42 @@ public class NatsDlqStoreTests
     {
         _kvStore.GetKeysAsync(
             Arg.Is<IEnumerable<string>>(p => p.SequenceEqual(expectedPatterns)),
+            Arg.Any<NatsKVWatchOpts?>(),
             Arg.Any<CancellationToken>()
         ).Returns(keysToReturn.ToAsyncEnumerable());
     }
 
-    private void SetupGetAsync(string key, DlqMessageEntry entry)
+    private void SetupGetAsync(string key, DlqMessageEntry entry, ulong revision = 1)
     {
         var json = JsonSerializer.Serialize(entry);
-        _kvStore.GetAsync<string>(key, Arg.Any<CancellationToken>()).Returns(json);
+        _kvStore.GetEntryAsync<string>(key, Arg.Any<ulong>(), Arg.Any<INatsDeserialize<string>?>(), Arg.Any<CancellationToken>())
+            .Returns(CreateTestEntry(key, json, revision));
+    }
+
+    private static NatsKVEntry<T> CreateTestEntry<T>(string key, T value, ulong revision, NatsKVOperation op = NatsKVOperation.Put)
+    {
+        var type = typeof(NatsKVEntry<T>);
+        object boxed = default(NatsKVEntry<T>)!;
+
+        void SetField(string name, object? val)
+        {
+            var field = type.GetField($"<{name}>k__BackingField", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            field?.SetValue(boxed, val);
+        }
+
+        SetField(nameof(NatsKVEntry<T>.Value), value);
+        SetField(nameof(NatsKVEntry<T>.Key), key);
+        SetField(nameof(NatsKVEntry<T>.Revision), revision);
+        SetField(nameof(NatsKVEntry<T>.Operation), op);
+
+        return (NatsKVEntry<T>)boxed;
+    }
+
+    private static TException CreateException<TException>() where TException : Exception
+    {
+#pragma warning disable SYSLIB0050
+        return (TException)System.Runtime.Serialization.FormatterServices.GetUninitializedObject(typeof(TException));
+#pragma warning restore SYSLIB0050
     }
 
     #endregion

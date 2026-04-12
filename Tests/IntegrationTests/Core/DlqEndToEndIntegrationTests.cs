@@ -106,7 +106,7 @@ public partial class DlqEndToEndIntegrationTests
 
         // DLQ store
         IKeyValueStore kvStore = new NatsKeyValueStore(kv, "fs-dlq-entries", new ConsoleLogger<NatsKeyValueStore>());
-        var dlqStore = new NatsDlqStore(kv, _ => kvStore, new ConsoleLogger<NatsDlqStore>());
+        var dlqStore = new NatsDlqStore(kv, new ConsoleLogger<NatsDlqStore>());
 
         // Poison handler
         var poisonHandler = new DefaultDlqPoisonHandler<OrderEvent>(
@@ -204,6 +204,8 @@ public partial class DlqEndToEndIntegrationTests
                     ErrorReason = msg.Data.ErrorReason,
                     Payload = msg.Data.Payload,
                     PayloadEncoding = msg.Data.PayloadEncoding,
+                    OriginalMessageType = msg.Data.OriginalMessageType,
+                    SerializerType = msg.Data.SerializerType,
                     Status = DlqMessageStatus.Pending
                 };
 
@@ -305,7 +307,7 @@ public partial class DlqEndToEndIntegrationTests
         await using var bus = new NatsJetStreamBus(js, new ConsoleLogger<NatsJetStreamBus>(), serializer);
 
         IKeyValueStore kvStore = new NatsKeyValueStore(kv, "fs-dlq-entries", new ConsoleLogger<NatsKeyValueStore>());
-        var dlqStore = new NatsDlqStore(kv, _ => kvStore, new ConsoleLogger<NatsDlqStore>());
+        var dlqStore = new NatsDlqStore(kv, new ConsoleLogger<NatsDlqStore>());
 
         var remediationService = new NatsDlqRemediationService(
             dlqStore,
@@ -325,7 +327,9 @@ public partial class DlqEndToEndIntegrationTests
             StoredAt = DateTimeOffset.UtcNow,
             ErrorReason = "Test error reason",
             Payload = System.Text.Encoding.UTF8.GetBytes("{\"test\":\"data\"}"),
-            PayloadEncoding = "application/json"
+            PayloadEncoding = "application/json",
+            OriginalMessageType = typeof(OrderEvent).AssemblyQualifiedName,
+            SerializerType = serializer.GetType().FullName
         };
         await dlqStore.StoreAsync(entry);
 
@@ -381,7 +385,7 @@ public partial class DlqEndToEndIntegrationTests
         await using var bus = new NatsJetStreamBus(js, new ConsoleLogger<NatsJetStreamBus>(), serializer);
 
         IKeyValueStore kvStore = new NatsKeyValueStore(kv, "fs-dlq-entries", new ConsoleLogger<NatsKeyValueStore>());
-        var dlqStore = new NatsDlqStore(kv, _ => kvStore, new ConsoleLogger<NatsDlqStore>());
+        var dlqStore = new NatsDlqStore(kv, new ConsoleLogger<NatsDlqStore>());
 
         var remediationService = new NatsDlqRemediationService(
             dlqStore,
