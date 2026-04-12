@@ -1,5 +1,4 @@
 using System.Buffers;
-using System.Collections.Concurrent;
 using System.Text.Json;
 using FlySwattr.NATS.Abstractions;
 using MemoryPack;
@@ -16,9 +15,6 @@ public class HybridNatsSerializer : IMessageSerializer
     private readonly MemoryPackSerializerOptions? _memoryPackOptions;
     private readonly JsonSerializerOptions _jsonOptions;
     private readonly int _maxPayloadSize;
-    
-    // Cache for attribute lookups to avoid reflection on every call
-    private static readonly ConcurrentDictionary<Type, bool> IsMemoryPackableCache = new();
     
     public const string ContentTypeMemoryPack = "application/x-memorypack";
     public const string ContentTypeJson = "application/json";
@@ -43,11 +39,11 @@ public class HybridNatsSerializer : IMessageSerializer
 
     public void Serialize<T>(IBufferWriter<byte> writer, T message)
     {
-        if (IsMemoryPackable<T>())
+        if (MemoryPackSchemaMetadata.IsMemoryPackable<T>())
         {
             // Fast path: MemoryPack for [MemoryPackable] types
             var limitingWriter = new SizeLimitingBufferWriter(writer, _maxPayloadSize);
-            MemoryPackSerializer.Serialize(limitingWriter, message, _memoryPackOptions);
+            MemoryPackSchemaEnvelopeSerializer.Serialize(limitingWriter, message, _memoryPackOptions);
         }
         else
         {
@@ -60,12 +56,12 @@ public class HybridNatsSerializer : IMessageSerializer
 
     public T Deserialize<T>(ReadOnlyMemory<byte> data)
     {
-        if (IsMemoryPackable<T>())
+        if (MemoryPackSchemaMetadata.IsMemoryPackable<T>())
         {
             try
             {
                 // Fast path: MemoryPack
-                return MemoryPackSerializer.Deserialize<T>(data.Span, _memoryPackOptions)
+                return MemoryPackSchemaEnvelopeSerializer.Deserialize<T>(data.Span, _memoryPackOptions)
                        ?? throw new MemoryPackSerializationException($"MemoryPack deserialization returned null for type {typeof(T).Name}");
             }
             catch (Exception ex) when (ex is not MemoryPackSerializationException)
@@ -83,16 +79,6 @@ public class HybridNatsSerializer : IMessageSerializer
 
     public string GetContentType<T>()
     {
-        return IsMemoryPackable<T>() ? ContentTypeMemoryPack : ContentTypeJson;
-    }
-
-    /// <summary>
-    /// Checks if a type is decorated with [MemoryPackable] attribute.
-    /// Results are cached for performance.
-    /// </summary>
-    private static bool IsMemoryPackable<T>()
-    {
-        return IsMemoryPackableCache.GetOrAdd(typeof(T), type =>
-            type.IsDefined(typeof(MemoryPackableAttribute), inherit: false));
+        return MemoryPackSchemaMetadata.IsMemoryPackable<T>() ? ContentTypeMemoryPack : ContentTypeJson;
     }
 }

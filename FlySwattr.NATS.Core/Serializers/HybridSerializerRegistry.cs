@@ -1,7 +1,5 @@
 using System.Buffers;
-using System.Collections.Concurrent;
 using System.Text.Json;
-using MemoryPack;
 using NATS.Client.Core;
 
 namespace FlySwattr.NATS.Core.Serializers;
@@ -14,8 +12,6 @@ namespace FlySwattr.NATS.Core.Serializers;
 /// </summary>
 public class HybridSerializerRegistry : INatsSerializerRegistry
 {
-    private static readonly ConcurrentDictionary<Type, bool> IsMemoryPackableCache = new();
-
     public static readonly HybridSerializerRegistry Default = new();
 
     public INatsSerialize<T> GetSerializer<T>() => HybridNatsTypeSerializer<T>.Default;
@@ -23,8 +19,7 @@ public class HybridSerializerRegistry : INatsSerializerRegistry
 
     internal static bool IsMemoryPackable<T>()
     {
-        return IsMemoryPackableCache.GetOrAdd(typeof(T), type =>
-            type.IsDefined(typeof(MemoryPackableAttribute), inherit: false));
+        return MemoryPackSchemaMetadata.IsMemoryPackable<T>();
     }
 }
 
@@ -45,7 +40,7 @@ internal class HybridNatsTypeSerializer<T> : INatsSerialize<T>, INatsDeserialize
     {
         if (HybridSerializerRegistry.IsMemoryPackable<T>())
         {
-            MemoryPackSerializer.Serialize(bufferWriter, value);
+            MemoryPackSchemaEnvelopeSerializer.Serialize(bufferWriter, value);
         }
         else
         {
@@ -59,7 +54,7 @@ internal class HybridNatsTypeSerializer<T> : INatsSerialize<T>, INatsDeserialize
     {
         if (HybridSerializerRegistry.IsMemoryPackable<T>())
         {
-            return MemoryPackSerializer.Deserialize<T>(buffer);
+            return MemoryPackSchemaEnvelopeSerializer.Deserialize<T>(buffer.ToArray());
         }
         else
         {

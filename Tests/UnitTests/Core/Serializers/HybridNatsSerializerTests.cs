@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Text.Json;
 using FlySwattr.NATS.Abstractions;
+using FlySwattr.NATS.Abstractions.Attributes;
 using FlySwattr.NATS.Core.Serializers;
 using MemoryPack;
 using NATS.Client.Core;
@@ -203,6 +204,33 @@ public class HybridNatsSerializerTests
         // Assert
         result.ShouldNotBeNull();
         result.Content.ShouldBe(original.Content);
+    }
+
+    [Test]
+    public void Deserialize_LegacyRawMemoryPackPayload_ShouldThrow()
+    {
+        var original = new MemoryPackableMessage { Content = "legacy" };
+        var writer = new ArrayBufferWriter<byte>();
+
+        MemoryPackSerializer.Serialize(writer, original);
+
+        var exception = Assert.Throws<MemoryPackSerializationException>(() =>
+            _serializer.Deserialize<MemoryPackableMessage>(writer.WrittenMemory));
+
+        exception!.Message.ShouldContain("Schema envelope missing");
+    }
+
+    [Test]
+    public void Deserialize_Envelope_WithDifferentSchemaType_ShouldFailClosed()
+    {
+        var original = new MemoryPackableMessage { Content = "mismatch" };
+        var writer = new ArrayBufferWriter<byte>();
+        _serializer.Serialize(writer, original);
+
+        var exception = Assert.Throws<MemoryPackSerializationException>(() =>
+            _serializer.Deserialize<SchemaMismatchedMessage>(writer.WrittenMemory));
+
+        exception!.Message.ShouldContain("Schema mismatch");
     }
 
     #endregion
@@ -552,6 +580,13 @@ public class HybridNatsSerializerTests
 
 [MemoryPack.MemoryPackable]
 public partial record MemoryPackableMessage
+{
+    public string? Content { get; set; }
+}
+
+[MemoryPack.MemoryPackable]
+[MessageSchema(2)]
+public partial record SchemaMismatchedMessage
 {
     public string? Content { get; set; }
 }

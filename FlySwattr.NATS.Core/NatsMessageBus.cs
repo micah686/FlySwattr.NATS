@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using FlySwattr.NATS.Abstractions;
+using FlySwattr.NATS.Core.Serializers;
 using FlySwattr.NATS.Core.Telemetry;
 using Microsoft.Extensions.Logging;
 using NATS.Client.Core;
@@ -78,6 +79,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
 
         var natsHeaders = new NatsHeaders();
         NatsTelemetry.InjectTraceContext(activity, natsHeaders);
+        MemoryPackSchemaMetadata.AddHeadersIfNeeded<T>(natsHeaders);
         
         await _connection.PublishAsync(subject, message, headers: natsHeaders, cancellationToken: cancellationToken);
         
@@ -124,6 +126,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
         }
         
         NatsTelemetry.InjectTraceContext(activity, natsHeaders);
+        MemoryPackSchemaMetadata.AddHeadersIfNeeded<T>(natsHeaders);
         
         await _connection.PublishAsync(subject, message, headers: natsHeaders, cancellationToken: cancellationToken);
         

@@ -1,6 +1,7 @@
 using System.Buffers;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core.Configuration;
+using FlySwattr.NATS.Core.Serializers;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -48,8 +49,9 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
         var bufferWriter = new ArrayBufferWriter<byte>();
         _serializer.Serialize(bufferWriter, message);
         var payload = bufferWriter.WrittenMemory;
+        var payloadSizeForThreshold = MemoryPackSchemaEnvelopeSerializer.GetLogicalPayloadSize(payload.Span);
 
-        if (payload.Length > _options.ThresholdBytes)
+        if (payloadSizeForThreshold > _options.ThresholdBytes)
         {
             await PublishWithOffloadingAsync(subject, message, payload, messageId, headers, cancellationToken);
         }

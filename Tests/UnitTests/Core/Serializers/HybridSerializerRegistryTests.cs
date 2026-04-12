@@ -1,4 +1,5 @@
 using System.Buffers;
+using FlySwattr.NATS.Abstractions.Attributes;
 using FlySwattr.NATS.Core.Serializers;
 using MemoryPack;
 using Shouldly;
@@ -198,6 +199,38 @@ public class HybridSerializerRegistryTests
     }
 
     [Test]
+    public void Serializer_ShouldReject_LegacyRawMemoryPackPayload()
+    {
+        var registry = new HybridSerializerRegistry();
+        var deserializer = registry.GetDeserializer<TestMemoryPackableMessage>();
+        var writer = new ArrayBufferWriter<byte>();
+        var original = new TestMemoryPackableMessage { Content = "legacy" };
+
+        MemoryPackSerializer.Serialize(writer, original);
+
+        var exception = Should.Throw<MemoryPackSerializationException>(() =>
+            deserializer.Deserialize(new ReadOnlySequence<byte>(writer.WrittenMemory)));
+
+        exception.Message.ShouldContain("Schema envelope missing");
+    }
+
+    [Test]
+    public void Serializer_ShouldReject_MismatchedSchemaEnvelope()
+    {
+        var registry = new HybridSerializerRegistry();
+        var serializer = registry.GetSerializer<TestMemoryPackableMessage>();
+        var deserializer = registry.GetDeserializer<TestMemoryPackableMessageV2>();
+        var writer = new ArrayBufferWriter<byte>();
+
+        serializer.Serialize(writer, new TestMemoryPackableMessage { Content = "mismatch" });
+
+        var exception = Should.Throw<MemoryPackSerializationException>(() =>
+            deserializer.Deserialize(new ReadOnlySequence<byte>(writer.WrittenMemory)));
+
+        exception.Message.ShouldContain("Schema mismatch");
+    }
+
+    [Test]
     public void Serializer_ShouldRoundtrip_JsonTypes()
     {
         // Arrange
@@ -237,6 +270,13 @@ public class HybridSerializerRegistryTests
 
 [MemoryPackable]
 public partial class TestMemoryPackableMessage
+{
+    public string? Content { get; set; }
+}
+
+[MemoryPackable]
+[MessageSchema(2)]
+public partial class TestMemoryPackableMessageV2
 {
     public string? Content { get; set; }
 }

@@ -20,6 +20,31 @@ This library has been generated with AI, but also partially reviewed by hand for
 - **OpenTelemetry** - Built-in tracing and metrics instrumentation
 - **Middleware Pipeline** - Extensible message processing with logging and validation
 
+## MemoryPack Schema Strategy
+
+MemoryPack is fast, but it is positional binary serialization. A field reorder, add, or remove can otherwise deserialize into the wrong shape without an obvious failure. FlySwattr.NATS now treats MemoryPack contracts as self-describing envelopes instead of sending raw positional bytes directly.
+
+- New MemoryPack payloads are wrapped with `schemaId`, `schemaVersion`, and a structural fingerprint before the inner payload bytes.
+- Publishers also stamp `X-Schema-Id`, `X-Schema-Version`, and `X-Schema-Fingerprint` headers for DLQ and operational inspection.
+- All MemoryPack consumers now require the schema envelope. Older raw MemoryPack payloads are rejected as an intentional wire-format break.
+- Use `[MessageSchema(n)]` on `[MemoryPackable]` contracts when you intentionally introduce a breaking change. If you need side-by-side compatibility, keep `V1` and `V2` message types distinct instead of mutating one CLR type in place.
+
+Example:
+
+```csharp
+using FlySwattr.NATS.Abstractions.Attributes;
+using MemoryPack;
+
+[MemoryPackable]
+[MessageSchema(2)]
+public partial record OrderCreatedV2
+{
+    public required string OrderId { get; init; }
+    public required string CustomerId { get; init; }
+    public string? SalesRegion { get; init; }
+}
+```
+
 ## Installation
 
 The library is organized into modular NuGet packages:

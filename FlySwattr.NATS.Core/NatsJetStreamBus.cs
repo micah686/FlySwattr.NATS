@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Abstractions.Exceptions;
+using FlySwattr.NATS.Core.Serializers;
 using FlySwattr.NATS.Core.Telemetry;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -94,6 +95,7 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
         }
         
         NatsTelemetry.InjectTraceContext(activity, natsHeaders);
+        MemoryPackSchemaMetadata.AddHeadersIfNeeded<T>(natsHeaders);
 
         // Pass the message directly to NATS.Net - let the configured MemoryPackSerializerRegistry
         // handle serialization. Do NOT pre-serialize here as that causes double-serialization.
