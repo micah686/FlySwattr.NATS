@@ -16,7 +16,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
     private readonly ConcurrentDictionary<Guid, Task> _backgroundTasks = new();
     private readonly ConcurrentDictionary<Guid, IAsyncDisposable> _subscriptions = new();
     private readonly CancellationTokenSource _cts = new();
-    private bool _disposed;
+    private int _disposed;
 
     public event EventHandler<NatsConnectionState>? ConnectionStateChanged;
 
@@ -327,8 +327,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (_disposed) return;
-        _disposed = true;
+        if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
 
         // Unsubscribe events
         _connection.ConnectionOpened -= OnConnectionEvent;
@@ -336,26 +335,10 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
         _connection.ReconnectFailed -= OnConnectionEvent;
 
         await _cts.CancelAsync();
-        
-        var subscriptionsSnapshot = _subscriptions.ToArray();
 
-        foreach (var kvp in subscriptionsSnapshot)
-        {
-            try
-            {
-                _subscriptions.TryRemove(kvp.Key, out _);
-                await kvp.Value.DisposeAsync();
-            }
-            catch (OperationCanceledException)
-            {
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Error disposing subscription {Id}", kvp.Key);
-            }
-        }
-        _subscriptions.Clear();
-        
+        // Background tasks own their subscriptions: each task disposes its own INatsSub in its
+        // finally block and then removes itself from _subscriptions.  Wait for them to finish
+        // before touching the dictionary so we don't double-dispose the same sub concurrently.
         using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         try
         {
@@ -372,6 +355,20 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
         {
             _logger.LogWarning(ex, "Error during message bus shutdown");
         }
+
+        // Safety net: dispose any subscriptions whose background tasks did not complete in time.
+        // TryRemove ensures a subscription is only disposed once even if a slow task is still
+        // winding down and tries to remove the same entry after we do.
+        foreach (var kvp in _subscriptions)
+        {
+            if (_subscriptions.TryRemove(kvp.Key, out var sub))
+            {
+                try { await sub.DisposeAsync(); }
+                catch (OperationCanceledException) { }
+                catch (Exception ex) { _logger.LogWarning(ex, "Error disposing subscription {Id}", kvp.Key); }
+            }
+        }
+
         _cts.Dispose();
     }
 }

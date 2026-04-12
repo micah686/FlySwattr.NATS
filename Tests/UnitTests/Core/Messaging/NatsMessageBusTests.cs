@@ -1,3 +1,4 @@
+using System.Threading.Channels;
 using FlySwattr.NATS.Core;
 using Microsoft.Extensions.Logging;
 using NATS.Client.Core;
@@ -138,7 +139,7 @@ public class NatsMessageBusTests : IAsyncDisposable
         // Arrange
         var subject = "test.dispose";
         var sub = Substitute.For<INatsSub<object>>();
-        
+
         // Subscribe successfully
         _connection.SubscribeCoreAsync<object>(subject, queueGroup: null, cancellationToken: Arg.Any<CancellationToken>())
             .Returns(sub);
@@ -146,15 +147,15 @@ public class NatsMessageBusTests : IAsyncDisposable
         var readyCts = new CancellationTokenSource();
         // Use a callback to signal when subscription is established
         _connection.SubscribeCoreAsync<object>(subject, queueGroup: null, cancellationToken: Arg.Any<CancellationToken>())
-            .Returns(x => 
+            .Returns(x =>
             {
-                readyCts.Cancel(); 
+                readyCts.Cancel();
                 return ValueTask.FromResult(sub);
             });
-            
+
         // We need to start the subscription in background
         var subTask = _bus.SubscribeAsync<object>(subject, _ => Task.CompletedTask);
-        
+
         var handle = await subTask;
 
         // Act
@@ -163,8 +164,66 @@ public class NatsMessageBusTests : IAsyncDisposable
 
         // Assert
         await sub.Received().DisposeAsync();
-        
+
         // Clean up task
         try { await subTask; } catch { }
+    }
+
+    [Test]
+    public async Task DisposeAsync_CalledConcurrently_ShouldNotDoubleDispose()
+    {
+        // Arrange
+        var subject = "test.concurrent-dispose";
+        var sub = Substitute.For<INatsSub<object>>();
+        _connection.SubscribeCoreAsync<object>(subject, queueGroup: null, cancellationToken: Arg.Any<CancellationToken>())
+            .Returns(ValueTask.FromResult(sub));
+
+        var handle = await _bus.SubscribeAsync<object>(subject, _ => Task.CompletedTask);
+        await handle.StopAsync();
+
+        // Act: fire multiple DisposeAsync calls simultaneously
+        await Task.WhenAll(
+            _bus.DisposeAsync().AsTask(),
+            _bus.DisposeAsync().AsTask(),
+            _bus.DisposeAsync().AsTask());
+
+        // Assert: no exception thrown — idempotent guard worked
+    }
+
+    [Test]
+    public async Task DisposeAsync_ShouldNotDoubleDisposeSub_WhenOnlyBusIsDisposed()
+    {
+        // Regression test: old DisposeAsync captured a snapshot of _subscriptions and disposed
+        // them explicitly, racing with the background task's own finally-block cleanup.
+        // New DisposeAsync waits for background tasks first (they own and dispose their sub),
+        // then the safety-net loop only disposes subs whose tasks timed out — so in the happy
+        // path the sub is disposed exactly once.
+
+        // Arrange: use a real channel so ReadAllAsync blocks until the token is cancelled,
+        // preventing the reconnect-loop from disposing sub multiple times before we assert.
+        var subject = "test.no-double-dispose";
+        var disposeCount = 0;
+        var sub = Substitute.For<INatsSub<object>>();
+        var messageChannel = Channel.CreateUnbounded<NatsMsg<object>>();
+        sub.Msgs.Returns(messageChannel.Reader);
+        sub.DisposeAsync().Returns(_ =>
+        {
+            Interlocked.Increment(ref disposeCount);
+            return ValueTask.CompletedTask;
+        });
+
+        _connection.SubscribeCoreAsync<object>(subject, queueGroup: null, cancellationToken: Arg.Any<CancellationToken>())
+            .Returns(ValueTask.FromResult(sub));
+
+        // Start subscription but do NOT call handle.StopAsync — we want DisposeAsync to drive cleanup
+        await _bus.SubscribeAsync<object>(subject, _ => Task.CompletedTask);
+
+        // Act
+        await _bus.DisposeAsync();
+
+        // Assert: background task's finally disposes sub (count=1).
+        // DisposeAsync's safety-net finds _subscriptions empty because the bg task removed its
+        // entry before completing, so the sub is not disposed a second time.
+        await Assert.That(disposeCount).IsEqualTo(1);
     }
 }

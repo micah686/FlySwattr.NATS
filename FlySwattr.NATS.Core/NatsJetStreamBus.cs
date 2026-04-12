@@ -48,6 +48,7 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
     private readonly ConcurrentDictionary<Guid, CancellationTokenSource> _linkedTokenSources = new();
     private readonly CancellationTokenSource _cts = new();
     private readonly Timer _cleanupTimer;
+    private int _disposed;
 
     public NatsJetStreamBus(
         INatsJSContext jsContext,
@@ -398,6 +399,8 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
 
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
+
         _cts.Cancel();
         try
         {
@@ -416,28 +419,35 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
             _logger.LogWarning(ex, "Error during JetStream bus shutdown");
         }
 
+        // Use TryRemove so WrapTaskWithCleanupAsync cannot race to double-stop/dispose
+        // the same service after we've already claimed it here.
         var stopTasks = new List<Task>();
-        foreach (var svc in _backgroundServices.Values)
+        foreach (var kvp in _backgroundServices)
         {
-            stopTasks.Add(StopAndDisposeServiceAsync(svc));
+            if (_backgroundServices.TryRemove(kvp.Key, out var svc))
+            {
+                stopTasks.Add(StopAndDisposeServiceAsync(svc));
+            }
         }
 
         await Task.WhenAll(stopTasks);
-        _backgroundServices.Clear();
 
-        // Dispose any remaining linked token sources
-        foreach (var cts in _linkedTokenSources.Values)
+        // Use TryRemove so WrapTaskWithCleanupAsync cannot race to double-dispose
+        // the same CancellationTokenSource after we've already claimed it here.
+        foreach (var kvp in _linkedTokenSources)
         {
-            try
+            if (_linkedTokenSources.TryRemove(kvp.Key, out var cts))
             {
-                cts.Dispose();
-            }
-            catch (ObjectDisposedException)
-            {
-                // Already disposed - ignore
+                try
+                {
+                    cts.Dispose();
+                }
+                catch (ObjectDisposedException)
+                {
+                    // Already disposed - ignore
+                }
             }
         }
-        _linkedTokenSources.Clear();
 
         await _cleanupTimer.DisposeAsync();
         _cts.Dispose();

@@ -199,10 +199,10 @@ public class NatsJetStreamBusTests : IAsyncDisposable
         // Arrange
         var consumer = Substitute.For<INatsJSConsumer>();
         consumer.Info.Returns(new ConsumerInfo { Name = "test-consumer", StreamName = "test-stream", Config = new ConsumerConfig() });
-        
+
         _jsContext.CreateOrUpdateConsumerAsync(
-            Arg.Any<string>(), 
-            Arg.Any<ConsumerConfig>(), 
+            Arg.Any<string>(),
+            Arg.Any<ConsumerConfig>(),
             Arg.Any<CancellationToken>())
             .Returns(consumer);
 
@@ -224,6 +224,39 @@ public class NatsJetStreamBusTests : IAsyncDisposable
         // Assert
         // If we reached here without hanging, it means DisposeAsync didn't deadlock.
         // We can't easily verify private fields, but we've exercised the path.
+    }
+
+    [Test]
+    public async Task DisposeAsync_CalledConcurrently_ShouldBeIdempotent()
+    {
+        // Arrange: register a consumer so there is state to clean up
+        var consumer = Substitute.For<INatsJSConsumer>();
+        consumer.Info.Returns(new ConsumerInfo { Name = "test-consumer", StreamName = "test-stream", Config = new ConsumerConfig() });
+
+        _jsContext.CreateOrUpdateConsumerAsync(
+                Arg.Any<string>(),
+                Arg.Any<ConsumerConfig>(),
+                Arg.Any<CancellationToken>())
+            .Returns(consumer);
+
+        consumer.ConsumeAsync<object>(
+                Arg.Any<INatsDeserialize<object>>(),
+                Arg.Any<NatsJSConsumeOpts>(),
+                Arg.Any<CancellationToken>())
+            .Returns(CreateEmptyAsyncEnumerable());
+
+        await _bus.ConsumeAsync<object>(
+            StreamName.From("test-stream"),
+            SubjectName.From("test.subject"),
+            _ => Task.CompletedTask);
+
+        // Act: concurrent DisposeAsync calls must not throw or hang
+        await Task.WhenAll(
+            _bus.DisposeAsync().AsTask(),
+            _bus.DisposeAsync().AsTask(),
+            _bus.DisposeAsync().AsTask());
+
+        // Assert: reached here means no deadlock and no unhandled exception
     }
 
     [Test]
