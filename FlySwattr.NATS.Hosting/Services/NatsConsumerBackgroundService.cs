@@ -1,8 +1,10 @@
 using System.Threading.Channels;
 using System.Diagnostics;
+using System.Buffers;
 using CommunityToolkit.HighPerformance;
 using CommunityToolkit.HighPerformance.Buffers;
 using FlySwattr.NATS.Abstractions;
+using FlySwattr.NATS.Core.Configuration;
 using FlySwattr.NATS.Abstractions.Exceptions;
 using FlySwattr.NATS.Core.Telemetry;
 using FlySwattr.NATS.Hosting.Health;
@@ -32,6 +34,9 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
     private readonly int _maxParallelism;
 
     private readonly IPoisonMessageHandler<T> _poisonHandler;
+    private readonly IMessageSerializer? _serializer;
+    private readonly IObjectStore? _objectStore;
+    private readonly PayloadOffloadingOptions? _offloadingOptions;
 
     // Resilience pipelines (provided by Resilience package, optional)
     private readonly ResiliencePipeline? _resiliencePipeline;
@@ -45,7 +50,7 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
     // Middleware pipeline for cross-cutting concerns
     private readonly IReadOnlyList<IConsumerMiddleware<T>> _middlewares;
 
-    public NatsConsumerBackgroundService(
+    internal NatsConsumerBackgroundService(
         INatsJSConsumer consumer,
         string streamName,
         string consumerName,
@@ -53,6 +58,41 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
         NatsJSConsumeOpts consumeOpts,
         ILogger logger,
         IPoisonMessageHandler<T> poisonHandler,
+        int? maxDegreeOfParallelism = null,
+        ResiliencePipeline? resiliencePipeline = null,
+        IConsumerHealthMetrics? healthMetrics = null,
+        ITopologyReadySignal? topologyReadySignal = null,
+        IEnumerable<IConsumerMiddleware<T>>? middlewares = null)
+        : this(
+            consumer,
+            streamName,
+            consumerName,
+            handler,
+            consumeOpts,
+            logger,
+            poisonHandler,
+            serializer: null,
+            objectStore: null,
+            offloadingOptions: null,
+            maxDegreeOfParallelism: maxDegreeOfParallelism,
+            resiliencePipeline: resiliencePipeline,
+            healthMetrics: healthMetrics,
+            topologyReadySignal: topologyReadySignal,
+            middlewares: middlewares)
+    {
+    }
+
+    internal NatsConsumerBackgroundService(
+        INatsJSConsumer consumer,
+        string streamName,
+        string consumerName,
+        Func<IJsMessageContext<T>, Task> handler,
+        NatsJSConsumeOpts consumeOpts,
+        ILogger logger,
+        IPoisonMessageHandler<T> poisonHandler,
+        IMessageSerializer? serializer,
+        IObjectStore? objectStore,
+        PayloadOffloadingOptions? offloadingOptions,
         int? maxDegreeOfParallelism = null,
         ResiliencePipeline? resiliencePipeline = null,
         IConsumerHealthMetrics? healthMetrics = null,
@@ -67,6 +107,9 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
         _logger = logger;
         _maxParallelism = maxDegreeOfParallelism ?? consumeOpts.MaxMsgs ?? 1;
         _poisonHandler = poisonHandler;
+        _serializer = serializer;
+        _objectStore = objectStore;
+        _offloadingOptions = offloadingOptions;
 
         _resiliencePipeline = resiliencePipeline;
         _healthMetrics = healthMetrics;
@@ -131,20 +174,32 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
             {
                 try
                 {
-                    await foreach (var msg in _consumer.ConsumeAsync<T>(opts: _consumeOpts, cancellationToken: stoppingToken))
+                    if (UseRawConsumption())
                     {
-                        // Record loop iteration for health check (consumer is actively receiving)
-                        _healthMetrics?.RecordLoopIteration(_streamName, _consumerName);
-
-                        var context = CreateContext(msg);
-
-                        // Non-blocking write to apply backpressure
-                        if (!channel.Writer.TryWrite(context))
+                        await foreach (var context in ReadContextsAsync(
+                                           _consumer.ConsumeAsync(PassthroughByteArrayDeserializer.Instance, opts: _consumeOpts, cancellationToken: stoppingToken),
+                                           stoppingToken))
                         {
-                            // Fail fast: NAK immediately with short backoff for redistribution
-                            LogBackpressure(_streamName, _consumerName);
-                            await context.NackAsync(TimeSpan.FromSeconds(1), stoppingToken);
-                            continue;
+                            _healthMetrics?.RecordLoopIteration(_streamName, _consumerName);
+                            if (!channel.Writer.TryWrite(context))
+                            {
+                                LogBackpressure(_streamName, _consumerName);
+                                await context.NackAsync(TimeSpan.FromSeconds(1), stoppingToken);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        await foreach (var context in ReadContextsAsync(
+                                           _consumer.ConsumeAsync<T>(opts: _consumeOpts, cancellationToken: stoppingToken),
+                                           stoppingToken))
+                        {
+                            _healthMetrics?.RecordLoopIteration(_streamName, _consumerName);
+                            if (!channel.Writer.TryWrite(context))
+                            {
+                                LogBackpressure(_streamName, _consumerName);
+                                await context.NackAsync(TimeSpan.FromSeconds(1), stoppingToken);
+                            }
                         }
                     }
                 }
@@ -185,6 +240,54 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
             // Unregister from health metrics
             _healthMetrics?.UnregisterConsumer(_streamName, _consumerName);
         }
+    }
+
+    private bool UseRawConsumption()
+        => _serializer != null && _objectStore != null && _offloadingOptions != null;
+
+    private async IAsyncEnumerable<IJsMessageContext<T>> ReadContextsAsync(
+        IAsyncEnumerable<INatsJSMsg<T>> messages,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await foreach (var msg in messages.WithCancellation(cancellationToken))
+        {
+            yield return CreateContext(msg);
+        }
+    }
+
+    private async IAsyncEnumerable<IJsMessageContext<T>> ReadContextsAsync(
+        IAsyncEnumerable<INatsJSMsg<byte[]>> messages,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await foreach (var msg in messages.WithCancellation(cancellationToken))
+        {
+            var rawContext = new JsMessageContextWrapper<byte[]>(msg);
+            yield return await ResolveRawContextAsync(rawContext, cancellationToken);
+        }
+    }
+
+    private async Task<IJsMessageContext<T>> ResolveRawContextAsync(
+        IJsMessageContext<byte[]> rawContext,
+        CancellationToken cancellationToken)
+    {
+        if (rawContext.Headers.Headers.TryGetValue(_offloadingOptions!.ClaimCheckHeaderName, out var claimCheckRef))
+        {
+            var payload = await DownloadPayloadAsync(claimCheckRef, cancellationToken);
+            return new HydratedMessageContext<T>(rawContext, _serializer!.Deserialize<T>(payload));
+        }
+
+        return new HydratedMessageContext<T>(rawContext, _serializer!.Deserialize<T>(rawContext.Message));
+    }
+
+    private async Task<ReadOnlyMemory<byte>> DownloadPayloadAsync(string claimCheckRef, CancellationToken cancellationToken)
+    {
+        var objectKey = claimCheckRef.StartsWith("objstore://", StringComparison.OrdinalIgnoreCase)
+            ? claimCheckRef["objstore://".Length..]
+            : claimCheckRef;
+
+        using var memoryStream = new MemoryStream();
+        await _objectStore!.GetAsync(objectKey, memoryStream, cancellationToken);
+        return memoryStream.ToArray();
     }
 
     private async Task RunWorkerAsync(ChannelReader<IJsMessageContext<T>> reader, CancellationToken token)
@@ -394,4 +497,37 @@ internal class JsMessageContextWrapper<T> : IJsMessageContext<T>
         else
             throw new NotSupportedException("This message type does not support replies.");
     }
+}
+
+internal class HydratedMessageContext<T> : IJsMessageContext<T>
+{
+    private readonly IJsMessageContext<byte[]> _inner;
+    private readonly T _message;
+
+    public HydratedMessageContext(IJsMessageContext<byte[]> inner, T message)
+    {
+        _inner = inner;
+        _message = message;
+    }
+
+    public T Message => _message;
+    public string Subject => _inner.Subject;
+    public MessageHeaders Headers => _inner.Headers;
+    public string? ReplyTo => _inner.ReplyTo;
+    public ulong Sequence => _inner.Sequence;
+    public DateTimeOffset Timestamp => _inner.Timestamp;
+    public bool Redelivered => _inner.Redelivered;
+    public uint NumDelivered => _inner.NumDelivered;
+
+    public Task AckAsync(CancellationToken cancellationToken = default) => _inner.AckAsync(cancellationToken);
+    public Task NackAsync(TimeSpan? delay = null, CancellationToken cancellationToken = default) => _inner.NackAsync(delay, cancellationToken);
+    public Task TermAsync(CancellationToken cancellationToken = default) => _inner.TermAsync(cancellationToken);
+    public Task InProgressAsync(CancellationToken cancellationToken = default) => _inner.InProgressAsync(cancellationToken);
+    public Task RespondAsync<TResponse>(TResponse response, CancellationToken cancellationToken = default) => _inner.RespondAsync(response, cancellationToken);
+}
+
+internal sealed class PassthroughByteArrayDeserializer : INatsDeserialize<byte[]>
+{
+    public static PassthroughByteArrayDeserializer Instance { get; } = new();
+    public byte[]? Deserialize(in ReadOnlySequence<byte> buffer) => buffer.ToArray();
 }

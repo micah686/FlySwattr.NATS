@@ -7,7 +7,6 @@ using FlySwattr.NATS.Hosting.Services;
 using IntegrationTests.Infrastructure;
 using MemoryPack;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Logging.Abstractions;
 using NATS.Client.Core;
 using NATS.Client.JetStream;
 using NATS.Client.JetStream.Models;
@@ -83,15 +82,14 @@ public partial class DlqEndToEndIntegrationTests
         });
 
         // Create KV bucket for DLQ entries
-        var dlqBucket = await kv.CreateStoreAsync(new NatsKVConfig("fs-dlq-entries")
+        await kv.CreateStoreAsync(new NatsKVConfig("fs-dlq-entries")
         {
             Storage = NatsKVStorageType.Memory
         });
 
         // Set up services
         var serializer = new HybridNatsSerializer();
-        var logger = new ConsoleLogger<NatsJetStreamBus>();
-        await using var bus = new NatsJetStreamBus(js, logger, serializer);
+        await using var bus = new NatsJetStreamBus(js, new ConsoleLogger<NatsJetStreamBus>(), serializer);
 
         // DLQ policy registry
         var dlqPolicyRegistry = new DlqPolicyRegistry(new ConsoleLogger<DlqPolicyRegistry>());
@@ -105,7 +103,6 @@ public partial class DlqEndToEndIntegrationTests
         dlqPolicyRegistry.Register(streamName, consumerName, dlqPolicy);
 
         // DLQ store
-        IKeyValueStore kvStore = new NatsKeyValueStore(kv, "fs-dlq-entries", new ConsoleLogger<NatsKeyValueStore>());
         var dlqStore = new NatsDlqStore(kv, new ConsoleLogger<NatsDlqStore>());
 
         // Poison handler
@@ -306,7 +303,6 @@ public partial class DlqEndToEndIntegrationTests
         var serializer = new HybridNatsSerializer();
         await using var bus = new NatsJetStreamBus(js, new ConsoleLogger<NatsJetStreamBus>(), serializer);
 
-        IKeyValueStore kvStore = new NatsKeyValueStore(kv, "fs-dlq-entries", new ConsoleLogger<NatsKeyValueStore>());
         var dlqStore = new NatsDlqStore(kv, new ConsoleLogger<NatsDlqStore>());
 
         var remediationService = new NatsDlqRemediationService(
@@ -384,7 +380,6 @@ public partial class DlqEndToEndIntegrationTests
         var serializer = new HybridNatsSerializer();
         await using var bus = new NatsJetStreamBus(js, new ConsoleLogger<NatsJetStreamBus>(), serializer);
 
-        IKeyValueStore kvStore = new NatsKeyValueStore(kv, "fs-dlq-entries", new ConsoleLogger<NatsKeyValueStore>());
         var dlqStore = new NatsDlqStore(kv, new ConsoleLogger<NatsDlqStore>());
 
         var remediationService = new NatsDlqRemediationService(

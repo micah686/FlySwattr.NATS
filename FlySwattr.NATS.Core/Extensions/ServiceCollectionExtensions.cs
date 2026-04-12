@@ -100,6 +100,7 @@ public static class ServiceCollectionExtensions
             sp.GetRequiredService<IJetStreamPublisher>(),
             sp.GetRequiredService<IMessageSerializer>(),
             sp.GetRequiredService<ILogger<Services.NatsDlqRemediationService>>(),
+            sp.GetRequiredService<NatsJetStreamBus>(),
             sp.GetService<IObjectStore>(),
             sp.GetService<IDlqNotificationService>()
         ));
@@ -146,7 +147,7 @@ public static class ServiceCollectionExtensions
             var options = sp.GetRequiredService<IOptions<PayloadOffloadingOptions>>();
             var logger = sp.GetRequiredService<ILogger<Decorators.OffloadingJetStreamPublisher>>();
 
-            return new Decorators.OffloadingJetStreamPublisher(coreBus, objectStore, serializer, options, logger);
+            return new Decorators.OffloadingJetStreamPublisher(coreBus, coreBus, objectStore, serializer, options, logger);
         }));
 
         // 4. Replace IJetStreamConsumer with Offloading decorator

@@ -1,4 +1,3 @@
-using System.Buffers;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core;
 using FlySwattr.NATS.Core.Serializers;
@@ -6,7 +5,6 @@ using FlySwattr.NATS.Hosting.Services;
 using IntegrationTests.Infrastructure;
 using MemoryPack;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Logging.Abstractions;
 using NATS.Client.Core;
 using NATS.Client.JetStream;
 using NATS.Client.JetStream.Models;
@@ -101,7 +99,7 @@ public partial class NatsConsumerBackgroundServiceTests
 
         // 5. Start Service
         var cts = new CancellationTokenSource();
-        var serviceTask = service.StartAsync(cts.Token);
+        await service.StartAsync(cts.Token);
 
         // Give it a moment to start the consume loop
         await Task.Delay(1000);

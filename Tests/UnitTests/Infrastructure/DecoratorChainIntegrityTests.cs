@@ -59,7 +59,9 @@ public class DecoratorChainIntegrityTests
         resilientInner.ShouldBeOfType<OffloadingJetStreamConsumer>();
 
         // Get the inner consumer from OffloadingJetStreamConsumer
-        var offloadingInner = GetInnerField<IJetStreamConsumer>(resilientInner, "_inner");
+        // OffloadingJetStreamConsumer uses _rawConsumer (IRawJetStreamConsumer) not _inner,
+        // because it consumes raw bytes and deserializes after claim-check resolution.
+        var offloadingInner = GetInnerField<IRawJetStreamConsumer>(resilientInner, "_rawConsumer");
         offloadingInner.ShouldNotBeNull();
         offloadingInner.ShouldBeOfType<NatsJetStreamBus>();
     }
@@ -125,7 +127,7 @@ public class DecoratorChainIntegrityTests
         // Assert
         consumer.ShouldBeOfType<OffloadingJetStreamConsumer>();
 
-        var offloadingInner = GetInnerField<IJetStreamConsumer>(consumer, "_inner");
+        var offloadingInner = GetInnerField<IRawJetStreamConsumer>(consumer, "_rawConsumer");
         offloadingInner.ShouldNotBeNull();
         offloadingInner.ShouldBeOfType<NatsJetStreamBus>();
     }

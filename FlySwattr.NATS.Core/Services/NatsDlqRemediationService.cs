@@ -17,6 +17,7 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
     private readonly IMessageSerializer _serializer;
     private readonly IObjectStore? _objectStore;
     private readonly IDlqNotificationService? _notificationService;
+    private readonly IRawJetStreamPublisher? _rawPublisher;
     private readonly ILogger<NatsDlqRemediationService> _logger;
 
     public NatsDlqRemediationService(
@@ -31,6 +32,24 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
         _publisher = publisher ?? throw new ArgumentNullException(nameof(publisher));
         _serializer = serializer ?? throw new ArgumentNullException(nameof(serializer));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _objectStore = objectStore;
+        _notificationService = notificationService;
+    }
+
+    internal NatsDlqRemediationService(
+        IDlqStore dlqStore,
+        IJetStreamPublisher publisher,
+        IMessageSerializer serializer,
+        ILogger<NatsDlqRemediationService> logger,
+        IRawJetStreamPublisher rawPublisher,
+        IObjectStore? objectStore,
+        IDlqNotificationService? notificationService)
+    {
+        _dlqStore = dlqStore ?? throw new ArgumentNullException(nameof(dlqStore));
+        _publisher = publisher ?? throw new ArgumentNullException(nameof(publisher));
+        _serializer = serializer ?? throw new ArgumentNullException(nameof(serializer));
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _rawPublisher = rawPublisher;
         _objectStore = objectStore;
         _notificationService = notificationService;
     }
@@ -304,8 +323,13 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
         CancellationToken cancellationToken)
     {
         var headers = CreateReplayHeaders(entry);
-        var runtimeType = ResolveRuntimeType(entry.OriginalMessageType);
+        if (_rawPublisher != null)
+        {
+            await _rawPublisher.PublishRawAsync(entry.OriginalSubject, payload, messageId, headers, cancellationToken);
+            return;
+        }
 
+        var runtimeType = ResolveRuntimeType(entry.OriginalMessageType);
         if (runtimeType == null || runtimeType == typeof(byte[]))
         {
             await _publisher.PublishAsync(entry.OriginalSubject, payload, messageId, headers, cancellationToken);
@@ -406,7 +430,6 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
         }
 
         var headers = entry.OriginalHeaders
-            .Where(kvp => !string.Equals(kvp.Key, ContentTypeHeader, StringComparison.OrdinalIgnoreCase))
             .Where(kvp => !string.Equals(kvp.Key, MessageIdHeader, StringComparison.OrdinalIgnoreCase))
             .ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
 

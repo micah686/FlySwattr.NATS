@@ -55,90 +55,20 @@ public static class ServiceCollectionExtensions
         {
             var options = new NatsConsumerOptions();
             configureOptions?.Invoke(options);
-            
-            var jsContext = sp.GetRequiredService<INatsJSContext>();
-            var logger = sp.GetRequiredService<ILogger<NatsConsumerBackgroundService<TMessage>>>();
-            
-            // Get consumer (sync-over-async during startup - consider factory pattern for production)
-            var consumerTask = jsContext.GetConsumerAsync(streamName, consumerName);
-            var consumer = consumerTask.GetAwaiter().GetResult();
-            
-            var consumeOpts = new NatsJSConsumeOpts { MaxMsgs = options.MaxConcurrency };
-            
-            // Resolve optional dependencies
-            var dlqPublisher = options.DlqPublisherServiceKey != null
-                ? sp.GetKeyedService<IJetStreamPublisher>(options.DlqPublisherServiceKey)
-                : sp.GetService<IJetStreamPublisher>();
-                
-            var serializer = sp.GetService<IMessageSerializer>();
-            
-            var objectStore = options.ObjectStoreServiceKey != null
-                ? sp.GetKeyedService<IObjectStore>(options.ObjectStoreServiceKey)
-                : sp.GetService<IObjectStore>();
-                
-            var notificationService = sp.GetService<IDlqNotificationService>();
 
-            // Resolve resilience pipeline (provided by Resilience package)
-            var resiliencePipeline = options.ResiliencePipelineKey != null
-                ? sp.GetKeyedService<ResiliencePipeline>(options.ResiliencePipelineKey)
-                : null;
-
-            // Resolve health metrics for zombie detection
-            var healthMetrics = sp.GetService<IConsumerHealthMetrics>();
-
-            // Resolve topology signal for Safety Mode startup coordination
-            var topologyReadySignal = sp.GetService<ITopologyReadySignal>();
-
-            // Resolve middleware pipeline
-            var middlewares = ResolveMiddlewares<TMessage>(sp, options);
-            
-            // Resolve or create poison message handler
-            IPoisonMessageHandler<TMessage> poisonHandler;
-            if (options.PoisonHandlerKey != null)
-            {
-                poisonHandler = sp.GetRequiredKeyedService<IPoisonMessageHandler<TMessage>>(options.PoisonHandlerKey);
-            }
-            else
-            {
-                // Register policy if provided in options and not already registered (best effort)
-                // In a real app, policies should be registered via TopologyManager, but for manual consumer setup:
-                var registry = sp.GetRequiredService<IDlqPolicyRegistry>();
-                if (options.DlqPolicy != null)
-                {
-                    registry.Register(streamName, consumerName, options.DlqPolicy);
-                }
-                
-                poisonHandler = new DefaultDlqPoisonHandler<TMessage>(
-                    dlqPublisher,
-                    serializer,
-                    objectStore,
-                    notificationService,
-                    registry,
-                    sp.GetRequiredService<ILogger<DefaultDlqPoisonHandler<TMessage>>>()
-                );
-            }
-
-            return new NatsConsumerBackgroundService<TMessage>(
-                consumer,
+            return new ConfiguredNatsConsumerHostedService<TMessage>(
+                sp,
                 streamName,
                 consumerName,
                 handler,
-                consumeOpts,
-                logger,
-                poisonHandler,
-                options.MaxConcurrency,
-                resiliencePipeline,
-                healthMetrics,
-                topologyReadySignal,
-                middlewares
-            );
+                options);
         });
     }
 
     /// <summary>
     /// Resolves and instantiates the middleware pipeline for a consumer.
     /// </summary>
-    private static IEnumerable<IConsumerMiddleware<TMessage>> ResolveMiddlewares<TMessage>(
+    internal static IEnumerable<IConsumerMiddleware<TMessage>> ResolveMiddlewares<TMessage>(
         IServiceProvider sp, 
         NatsConsumerOptions options)
     {

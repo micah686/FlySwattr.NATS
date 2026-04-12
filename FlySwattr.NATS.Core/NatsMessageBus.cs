@@ -137,12 +137,13 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
         NatsTelemetry.PublishDuration.Record(stopwatch.Elapsed.TotalMilliseconds, tags);
     }
 
-    public async Task SubscribeAsync<T>(string subject, Func<IMessageContext<T>, Task> handler, string? queueGroup = null, CancellationToken cancellationToken = default)
+    public async Task<ISubscription> SubscribeAsync<T>(string subject, Func<IMessageContext<T>, Task> handler, string? queueGroup = null, CancellationToken cancellationToken = default)
     {
         var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
         var token = linkedCts.Token;
         var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var taskId = Guid.NewGuid();
+        var subscriptionHandle = new NatsSubscriptionHandle(taskId, StopSubscriptionAsync);
 
         _logger.LogInformation("Starting subscription for {Subject}", subject);
 
@@ -264,11 +265,40 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
         catch (TimeoutException)
         {
             _logger.LogWarning("Subscription to {Subject} timed out waiting for initial connection.", subject);
+            await linkedCts.CancelAsync();
             throw new TimeoutException($"Subscription to {subject} timed out waiting for initial connection.");
         }
         catch when (token.IsCancellationRequested)
         {
             _logger.LogWarning("SubscribeAsync cancelled for {Subject} during initial wait", subject);
+        }
+
+        return subscriptionHandle;
+    }
+
+    private async Task StopSubscriptionAsync(Guid subscriptionId, CancellationToken cancellationToken)
+    {
+        if (_subscriptions.TryRemove(subscriptionId, out var subscription))
+        {
+            await subscription.DisposeAsync();
+        }
+
+        if (_backgroundTasks.TryGetValue(subscriptionId, out var task))
+        {
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutCts.CancelAfter(TimeSpan.FromSeconds(30));
+            try
+            {
+                await task.WaitAsync(timeoutCts.Token);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("Timed out waiting for subscription {SubscriptionId} to stop", subscriptionId);
+            }
         }
     }
 
@@ -344,6 +374,32 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
         }
         _cts.Dispose();
     }
+}
+
+internal sealed class NatsSubscriptionHandle : ISubscription
+{
+    private readonly Func<Guid, CancellationToken, Task> _stopAsync;
+    private int _stopped;
+
+    public NatsSubscriptionHandle(Guid id, Func<Guid, CancellationToken, Task> stopAsync)
+    {
+        Id = id;
+        _stopAsync = stopAsync;
+    }
+
+    public Guid Id { get; }
+
+    public async Task StopAsync(CancellationToken cancellationToken = default)
+    {
+        if (Interlocked.Exchange(ref _stopped, 1) != 0)
+        {
+            return;
+        }
+
+        await _stopAsync(Id, cancellationToken);
+    }
+
+    public ValueTask DisposeAsync() => new(StopAsync());
 }
 
 internal class MessageContext<T> : IMessageContext<T>

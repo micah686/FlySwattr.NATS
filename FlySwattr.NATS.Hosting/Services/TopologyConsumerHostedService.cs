@@ -129,6 +129,7 @@ internal class TopologyConsumerHostedService<TSource> : IHostedService
         var serializer = _serviceProvider.GetService<IMessageSerializer>();
         var objectStore = _serviceProvider.GetService<IObjectStore>();
         var notificationService = _serviceProvider.GetService<IDlqNotificationService>();
+        var offloadingOptions = _serviceProvider.GetService<Microsoft.Extensions.Options.IOptions<FlySwattr.NATS.Core.Configuration.PayloadOffloadingOptions>>()?.Value;
         var dlqRegistry = _serviceProvider.GetRequiredService<IDlqPolicyRegistry>();
 
         // Register policy if provided
@@ -169,6 +170,9 @@ internal class TopologyConsumerHostedService<TSource> : IHostedService
             consumeOpts,
             workerLogger,
             poisonHandler,
+            serializer,
+            objectStore,
+            offloadingOptions,
             maxConcurrency,
             resiliencePipeline,
             healthMetrics,

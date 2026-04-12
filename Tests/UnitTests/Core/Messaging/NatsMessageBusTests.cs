@@ -155,10 +155,10 @@ public class NatsMessageBusTests : IAsyncDisposable
         // We need to start the subscription in background
         var subTask = _bus.SubscribeAsync<object>(subject, _ => Task.CompletedTask);
         
-        // Wait a bit for subscription to be active
-        await Task.Delay(100);
+        var handle = await subTask;
 
         // Act
+        await handle.DisposeAsync();
         await _bus.DisposeAsync();
 
         // Assert

@@ -15,6 +15,7 @@ namespace FlySwattr.NATS.Core.Decorators;
 internal class OffloadingJetStreamPublisher : IJetStreamPublisher
 {
     private readonly IJetStreamPublisher _inner;
+    private readonly IRawJetStreamPublisher _rawPublisher;
     private readonly IObjectStore _objectStore;
     private readonly IMessageSerializer _serializer;
     private readonly PayloadOffloadingOptions _options;
@@ -26,8 +27,20 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
         IMessageSerializer serializer,
         IOptions<PayloadOffloadingOptions> options,
         ILogger<OffloadingJetStreamPublisher> logger)
+        : this(inner, (IRawJetStreamPublisher)inner, objectStore, serializer, options, logger)
+    {
+    }
+
+    public OffloadingJetStreamPublisher(
+        IJetStreamPublisher inner,
+        IRawJetStreamPublisher rawPublisher,
+        IObjectStore objectStore,
+        IMessageSerializer serializer,
+        IOptions<PayloadOffloadingOptions> options,
+        ILogger<OffloadingJetStreamPublisher> logger)
     {
         _inner = inner;
+        _rawPublisher = rawPublisher;
         _objectStore = objectStore;
         _serializer = serializer;
         _options = options.Value;
@@ -83,18 +96,11 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
         using var payloadStream = new MemoryStream(payload.ToArray());
         await _objectStore.PutAsync(objectKey, payloadStream, cancellationToken);
 
-        // Create a claim check wrapper message with the reference
-        var claimCheck = new ClaimCheckMessage
-        {
-            ObjectStoreRef = claimCheckRef,
-            OriginalType = typeof(T).AssemblyQualifiedName ?? typeof(T).FullName ?? typeof(T).Name,
-            OriginalSize = payload.Length
-        };
-
-        // Build headers with the claim check reference
+        // Build headers with the claim check reference and preserve the original content type.
         var claimCheckHeaders = new Dictionary<string, string>
         {
-            [_options.ClaimCheckHeaderName] = claimCheckRef
+            [_options.ClaimCheckHeaderName] = claimCheckRef,
+            ["Content-Type"] = _serializer.GetContentType<T>()
         };
 
         // Merge any existing headers
@@ -108,8 +114,13 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
 
         try
         {
-            // Publish the claim check wrapper instead of the original message
-            await _inner.PublishAsync(subject, claimCheck, messageId, new MessageHeaders(claimCheckHeaders), cancellationToken);
+            // Publish an empty payload with headers so consumers can hydrate before business deserialization.
+            await _rawPublisher.PublishRawAsync(
+                subject,
+                ReadOnlyMemory<byte>.Empty,
+                messageId,
+                new MessageHeaders(claimCheckHeaders),
+                cancellationToken);
 
             _logger.LogInformation(
                 "Published large message ({Size} bytes) to {Subject} via claim check {ObjectKey}",
@@ -142,30 +153,7 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
                     objectKey);
             }
 
-            throw; // Re-throw the original publish exception
+            throw;
         }
     }
-}
-
-/// <summary>
-/// Internal marker message used for claim check references.
-/// This is published instead of the original large payload.
-/// </summary>
-[MemoryPack.MemoryPackable]
-internal partial class ClaimCheckMessage
-{
-    /// <summary>
-    /// Reference to the offloaded payload in object store (e.g., "objstore://claimcheck/subject/guid")
-    /// </summary>
-    public string ObjectStoreRef { get; set; } = string.Empty;
-
-    /// <summary>
-    /// Assembly-qualified type name of the original message for deserialization
-    /// </summary>
-    public string OriginalType { get; set; } = string.Empty;
-
-    /// <summary>
-    /// Original payload size in bytes (for logging/diagnostics)
-    /// </summary>
-    public int OriginalSize { get; set; }
 }
