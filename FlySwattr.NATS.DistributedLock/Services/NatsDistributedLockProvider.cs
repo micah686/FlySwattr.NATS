@@ -60,25 +60,23 @@ internal class NatsDistributedLockProvider : IDistributedLockProvider
             _ttl = ttl;
         }
 
-        #region Obsolete Methods
-        //These are only here to satisfy the DistributedLock.Core interfaces, but should not be used.
-        
-        [Obsolete("Prefer TryAcquireAsync to avoid thread pool starvation. This method may deadlock in SynchronizationContext environments.")]
-        public IDistributedSynchronizationHandle? TryAcquire(TimeSpan timeout = default, CancellationToken cancellationToken = default)
-        {
-            _logger.LogWarning("TryAcquire should not be used. Use AcquireAsync instead.");
-            // Task.Run offloads to a thread pool thread without a SynchronizationContext, preventing deadlock
-            return Task.Run(() => TryAcquireAsync(timeout, cancellationToken).AsTask(), cancellationToken).GetAwaiter().GetResult();
-        }
+        #region Obsolete
+        // Explicit interface implementations for the synchronous IDistributedLock members.
+        // Explicit implementation means these methods are invisible on the concrete type and
+        // only reachable via an IDistributedLock-typed variable.
+        // Obsolete(error:true) turns any such call-site into a compilation error, so the methods
+        // satisfy the interface contract without being callable in practice.
+        [Obsolete("Synchronous locking is not supported. Use TryAcquireAsync instead.", error: true)]
+        [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+        IDistributedSynchronizationHandle? IDistributedLock.TryAcquire(TimeSpan timeout, CancellationToken cancellationToken)
+            => throw new NotSupportedException("Synchronous locking is not supported. Use TryAcquireAsync instead.");
 
-        [Obsolete("Prefer AcquireAsync to avoid thread pool starvation. This method may deadlock in SynchronizationContext environments.")]
-        public IDistributedSynchronizationHandle Acquire(TimeSpan? timeout = null, CancellationToken cancellationToken = default)
-        {
-            _logger.LogWarning("Acquire should not be used. Use AcquireAsync instead.");
-            // Task.Run offloads to a thread pool thread without a SynchronizationContext, preventing deadlock
-            return Task.Run(() => AcquireAsync(timeout, cancellationToken).AsTask(), cancellationToken).GetAwaiter().GetResult();
-        }
-        #endregion        
+        [Obsolete("Synchronous locking is not supported. Use AcquireAsync instead.", error: true)]
+        [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+        IDistributedSynchronizationHandle IDistributedLock.Acquire(TimeSpan? timeout, CancellationToken cancellationToken)
+            => throw new NotSupportedException("Synchronous locking is not supported. Use AcquireAsync instead.");
+        #endregion
+        
 
         public async ValueTask<IDistributedSynchronizationHandle?> TryAcquireAsync(TimeSpan timeout = default, CancellationToken cancellationToken = default)
         {
