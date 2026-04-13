@@ -1,7 +1,9 @@
 using System.Text;
 using FlySwattr.NATS.Abstractions;
+using FlySwattr.NATS.Core.Configuration;
 using FlySwattr.NATS.Core.Services;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
 using Shouldly;
@@ -20,6 +22,7 @@ public class NatsDlqRemediationServiceTests
     private readonly IDlqStore _dlqStore;
     private readonly IJetStreamPublisher _publisher;
     private readonly IMessageSerializer _serializer;
+    private readonly IMessageTypeAliasRegistry _typeAliasRegistry;
     private readonly IObjectStore _objectStore;
     private readonly ILogger<NatsDlqRemediationService> _logger;
     private readonly NatsDlqRemediationService _sut;
@@ -29,6 +32,8 @@ public class NatsDlqRemediationServiceTests
         _dlqStore = Substitute.For<IDlqStore>();
         _publisher = Substitute.For<IJetStreamPublisher>();
         _serializer = Substitute.For<IMessageSerializer>();
+        _typeAliasRegistry = new MessageTypeAliasRegistry(Options.Create(new MessageTypeAliasOptions()));
+        _typeAliasRegistry.Register<TestPayload>(nameof(TestPayload));
         _objectStore = Substitute.For<IObjectStore>();
         _logger = Substitute.For<ILogger<NatsDlqRemediationService>>();
 
@@ -36,6 +41,7 @@ public class NatsDlqRemediationServiceTests
             _dlqStore,
             _publisher,
             _serializer,
+            _typeAliasRegistry,
             _logger,
             _objectStore);
     }
@@ -575,7 +581,7 @@ public class NatsDlqRemediationServiceTests
         var entry = CreateTestEntry(
             entryId,
             payload: Encoding.UTF8.GetBytes("serialized"),
-            originalMessageType: typeof(TestPayload).AssemblyQualifiedName);
+            originalMessageType: nameof(TestPayload));
         var deserialized = new TestPayload { Data = "typed", Value = 99 };
 
         _dlqStore.GetAsync(entryId, Arg.Any<CancellationToken>()).Returns(entry);

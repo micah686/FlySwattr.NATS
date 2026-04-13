@@ -24,6 +24,7 @@ public static class ServiceCollectionExtensions
     {
         // 1. Configuration
         services.AddOptions<NatsConfiguration>().Configure(configure);
+        services.AddOptions<MessageTypeAliasOptions>();
         services.AddSingleton(sp => sp.GetRequiredService<IOptions<NatsConfiguration>>().Value);
         services.TryAddSingleton<NatsCoreServicesMarker>();
 
@@ -62,6 +63,7 @@ public static class ServiceCollectionExtensions
 
         services.AddSingleton<IMessageBus, NatsMessageBus>();
         services.AddSingleton<BackgroundTaskManager>();
+        services.AddSingleton<IMessageTypeAliasRegistry, MessageTypeAliasRegistry>();
         
         // Register NatsJetStreamBus as the implementation
         services.AddSingleton<NatsJetStreamBus>(sp =>
@@ -102,11 +104,26 @@ public static class ServiceCollectionExtensions
             sp.GetRequiredService<IDlqStore>(),
             sp.GetRequiredService<IJetStreamPublisher>(),
             sp.GetRequiredService<IMessageSerializer>(),
+            sp.GetRequiredService<IMessageTypeAliasRegistry>(),
             sp.GetRequiredService<ILogger<Services.NatsDlqRemediationService>>(),
             sp.GetRequiredService<NatsJetStreamBus>(),
             sp.GetService<IObjectStore>(),
             sp.GetService<IDlqNotificationService>()
         ));
+
+        return services;
+    }
+
+    public static IServiceCollection AddMessageTypeAlias<TMessage>(
+        this IServiceCollection services,
+        string alias)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(alias);
+
+        services.Configure<MessageTypeAliasOptions>(options =>
+        {
+            options.AliasMappings[alias] = typeof(TMessage);
+        });
 
         return services;
     }
@@ -158,10 +175,11 @@ public static class ServiceCollectionExtensions
             var coreBus = sp.GetRequiredService<NatsJetStreamBus>();
             var objectStore = sp.GetRequiredKeyedService<IObjectStore>(objectStoreBucket);
             var serializer = sp.GetRequiredService<IMessageSerializer>();
+            var typeAliasRegistry = sp.GetRequiredService<IMessageTypeAliasRegistry>();
             var options = sp.GetRequiredService<IOptions<PayloadOffloadingOptions>>();
             var logger = sp.GetRequiredService<ILogger<Decorators.OffloadingJetStreamPublisher>>();
 
-            return new Decorators.OffloadingJetStreamPublisher(coreBus, coreBus, objectStore, serializer, options, logger);
+            return new Decorators.OffloadingJetStreamPublisher(coreBus, coreBus, objectStore, serializer, typeAliasRegistry, options, logger);
         }));
 
         // 4. Replace IJetStreamConsumer with Offloading decorator

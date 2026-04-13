@@ -4,6 +4,7 @@ using CommunityToolkit.HighPerformance.Buffers;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Abstractions.Exceptions;
 using FlySwattr.NATS.Core;
+using FlySwattr.NATS.Core.Services;
 using Microsoft.Extensions.Logging;
 
 namespace FlySwattr.NATS.Hosting.Services;
@@ -21,6 +22,7 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
 
     private readonly IJetStreamPublisher? _dlqPublisher;
     private readonly IMessageSerializer? _serializer;
+    private readonly IMessageTypeAliasRegistry _typeAliasRegistry;
     private readonly IObjectStore? _objectStore;
     private readonly IDlqNotificationService? _notificationService;
     private readonly IDlqPolicyRegistry _dlqPolicyRegistry;
@@ -29,6 +31,7 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
     public DefaultDlqPoisonHandler(
         IJetStreamPublisher? dlqPublisher,
         IMessageSerializer? serializer,
+        IMessageTypeAliasRegistry typeAliasRegistry,
         IObjectStore? objectStore,
         IDlqNotificationService? notificationService,
         IDlqPolicyRegistry dlqPolicyRegistry,
@@ -36,6 +39,7 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
     {
         _dlqPublisher = dlqPublisher;
         _serializer = serializer;
+        _typeAliasRegistry = typeAliasRegistry;
         _objectStore = objectStore;
         _notificationService = notificationService;
         _dlqPolicyRegistry = dlqPolicyRegistry;
@@ -130,7 +134,7 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
             if (bufferWriter.WrittenCount > MaxDlqPayloadSize && _objectStore != null)
             {
                 // Offload to object store
-                var objectKey = $"dlq-payload/{streamName}/{consumerName}/{context.Sequence}-{Guid.NewGuid():N}";
+                var objectKey = MessageSecurity.ValidateObjectStoreKey($"dlq-payload/{streamName}/{consumerName}/{context.Sequence}-{Guid.NewGuid():N}");
                 using var payloadStream = bufferWriter.WrittenMemory.AsStream();
                 await _objectStore.PutAsync(objectKey, payloadStream, token);
 
@@ -169,9 +173,9 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
             FailedAt = DateTimeOffset.UtcNow,
             Payload = payload,
             PayloadEncoding = contentType,
-            ErrorReason = ex.Message,
+            ErrorReason = MessageSecurity.SanitizeExceptionMessage(ex),
             OriginalHeaders = context.Headers.Headers,
-            OriginalMessageType = typeof(T).AssemblyQualifiedName ?? typeof(T).FullName,
+            OriginalMessageType = _typeAliasRegistry.GetAlias(typeof(T)),
             SerializerType = serializerType
         };
     }
@@ -192,7 +196,7 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
                 OriginalSubject: context.Subject,
                 OriginalSequence: context.Sequence,
                 DeliveryCount: (int)context.NumDelivered,
-                ErrorReason: ex.Message,
+                ErrorReason: MessageSecurity.SanitizeExceptionMessage(ex),
                 OccurredAt: DateTimeOffset.UtcNow
             );
             await _notificationService!.NotifyAsync(notification, token);

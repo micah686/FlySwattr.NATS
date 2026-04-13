@@ -3,6 +3,7 @@ using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core;
 using FlySwattr.NATS.Core.Configuration;
 using FlySwattr.NATS.Core.Decorators;
+using FlySwattr.NATS.Core.Services;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NSubstitute;
@@ -19,6 +20,7 @@ public class OffloadingJetStreamPublisherTests
     private readonly IRawJetStreamPublisher _rawPublisher;
     private readonly IObjectStore _objectStore;
     private readonly IMessageSerializer _serializer;
+    private readonly IMessageTypeAliasRegistry _typeAliasRegistry;
     private readonly ILogger<OffloadingJetStreamPublisher> _logger;
     private readonly PayloadOffloadingOptions _options;
 
@@ -28,6 +30,7 @@ public class OffloadingJetStreamPublisherTests
         _rawPublisher = (IRawJetStreamPublisher)_innerPublisher;
         _objectStore = Substitute.For<IObjectStore>();
         _serializer = Substitute.For<IMessageSerializer>();
+        _typeAliasRegistry = Substitute.For<IMessageTypeAliasRegistry>();
         _logger = Substitute.For<ILogger<OffloadingJetStreamPublisher>>();
         _options = new PayloadOffloadingOptions
         {
@@ -37,7 +40,7 @@ public class OffloadingJetStreamPublisherTests
     }
 
     private OffloadingJetStreamPublisher CreateSut()
-        => new(_innerPublisher, _rawPublisher, _objectStore, _serializer, Options.Create(_options), _logger);
+        => new(_innerPublisher, _rawPublisher, _objectStore, _serializer, _typeAliasRegistry, Options.Create(_options), _logger);
 
     private void WritePayload<T>(int size)
     {
@@ -69,6 +72,7 @@ public class OffloadingJetStreamPublisherTests
     {
         WritePayload<TestMessage>(_options.ThresholdBytes + 1);
         _serializer.GetContentType<TestMessage>().Returns("application/json");
+        _typeAliasRegistry.GetAlias(typeof(TestMessage)).Returns("test-message");
         var sut = CreateSut();
 
         await sut.PublishAsync("test.subject", new TestMessage { Data = "large" }, "msg-1");
@@ -84,6 +88,7 @@ public class OffloadingJetStreamPublisherTests
             "msg-1",
             Arg.Is<MessageHeaders>(headers =>
                 headers.Headers["Content-Type"] == "application/json" &&
+                headers.Headers[_options.ClaimCheckTypeHeaderName] == "test-message" &&
                 headers.Headers[_options.ClaimCheckHeaderName].StartsWith("objstore://claimcheck/test.subject/")),
             Arg.Any<CancellationToken>());
     }
@@ -115,6 +120,31 @@ public class OffloadingJetStreamPublisherTests
 
         ex.Message.ShouldBe("publish failed");
         await _objectStore.Received(1).DeleteAsync(objectKey!, Arg.Any<CancellationToken>());
+    }
+
+    [Test]
+    public async Task PublishAsync_ShouldRejectReservedClaimCheckHeaders()
+    {
+        WritePayload<TestMessage>(_options.ThresholdBytes - 1);
+        var sut = CreateSut();
+        var headers = new MessageHeaders(new Dictionary<string, string>
+        {
+            [_options.ClaimCheckHeaderName] = "objstore://override"
+        });
+
+        await Should.ThrowAsync<ArgumentException>(() =>
+            sut.PublishAsync("test.subject", new TestMessage { Data = "small" }, "msg-1", headers));
+    }
+
+    [Test]
+    public async Task PublishAsync_ShouldRejectInvalidGeneratedObjectStoreKey()
+    {
+        WritePayload<TestMessage>(_options.ThresholdBytes + 1);
+        _options.ObjectKeyPrefix = "../bad";
+        var sut = CreateSut();
+
+        await Should.ThrowAsync<ArgumentException>(() =>
+            sut.PublishAsync("test.subject", new TestMessage { Data = "large" }, "msg-1"));
     }
 
     public sealed class TestMessage

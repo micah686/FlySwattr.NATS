@@ -3,6 +3,7 @@ using FlySwattr.NATS.Core;
 using FlySwattr.NATS.Core.Configuration;
 using FlySwattr.NATS.Core.Decorators;
 using FlySwattr.NATS.Core.Serializers;
+using FlySwattr.NATS.Core.Services;
 using FlySwattr.NATS.Core.Stores;
 using IntegrationTests.Infrastructure;
 using MemoryPack;
@@ -89,11 +90,13 @@ public partial class PayloadOffloadingIntegrationTests
             objContext,
             bucketName,
             new ConsoleLogger<NatsObjectStore>());
+        var typeAliasRegistry = new MessageTypeAliasRegistry(Options.Create(new MessageTypeAliasOptions()));
 
         var offloadingPublisher = new OffloadingJetStreamPublisher(
             innerBus,
             objectStore,
             serializer,
+            typeAliasRegistry,
             Options.Create(offloadOptions),
             new ConsoleLogger<OffloadingJetStreamPublisher>());
 
@@ -201,11 +204,13 @@ public partial class PayloadOffloadingIntegrationTests
             objContext,
             bucketName,
             new ConsoleLogger<NatsObjectStore>());
+        var typeAliasRegistry = new MessageTypeAliasRegistry(Options.Create(new MessageTypeAliasOptions()));
 
         var offloadingPublisher = new OffloadingJetStreamPublisher(
             innerBus,
             objectStore,
             serializer,
+            typeAliasRegistry,
             Options.Create(offloadOptions),
             new ConsoleLogger<OffloadingJetStreamPublisher>());
 
@@ -281,11 +286,13 @@ public partial class PayloadOffloadingIntegrationTests
             objContext,
             bucketName,
             new ConsoleLogger<NatsObjectStore>());
+        var typeAliasRegistry = new MessageTypeAliasRegistry(Options.Create(new MessageTypeAliasOptions()));
 
         var offloadingPublisher = new OffloadingJetStreamPublisher(
             innerBus,
             objectStore,
             serializer,
+            typeAliasRegistry,
             Options.Create(offloadOptions),
             new ConsoleLogger<OffloadingJetStreamPublisher>());
 
@@ -374,11 +381,13 @@ public partial class PayloadOffloadingIntegrationTests
             objContext,
             bucketName,
             new ConsoleLogger<NatsObjectStore>());
+        var typeAliasRegistry = new MessageTypeAliasRegistry(Options.Create(new MessageTypeAliasOptions()));
 
         var offloadingPublisher = new OffloadingJetStreamPublisher(
             innerBus,
             objectStore,
             serializer,
+            typeAliasRegistry,
             Options.Create(offloadOptions),
             new ConsoleLogger<OffloadingJetStreamPublisher>());
 

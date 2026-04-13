@@ -1,7 +1,8 @@
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core;
-using FlySwattr.NATS.Core.Serializers;
+using FlySwattr.NATS.Core.Configuration;
 using FlySwattr.NATS.Core.Services;
+using FlySwattr.NATS.Core.Serializers;
 using FlySwattr.NATS.Core.Stores;
 using FlySwattr.NATS.Hosting.Services;
 using IntegrationTests.Infrastructure;
@@ -106,9 +107,12 @@ public partial class DlqEndToEndIntegrationTests
         var dlqStore = new NatsDlqStore(kv, new ConsoleLogger<NatsDlqStore>());
 
         // Poison handler
+        var typeAliasRegistry = new MessageTypeAliasRegistry(Microsoft.Extensions.Options.Options.Create(new MessageTypeAliasOptions()));
+        typeAliasRegistry.Register<OrderEvent>(nameof(OrderEvent));
         var poisonHandler = new DefaultDlqPoisonHandler<OrderEvent>(
             bus,
             serializer,
+            typeAliasRegistry,
             null, // No object store
             null, // No notification service
             dlqPolicyRegistry,
@@ -119,6 +123,7 @@ public partial class DlqEndToEndIntegrationTests
             dlqStore,
             bus,
             serializer,
+            typeAliasRegistry,
             new ConsoleLogger<NatsDlqRemediationService>());
 
         // =====================================================
@@ -304,11 +309,14 @@ public partial class DlqEndToEndIntegrationTests
         await using var bus = new NatsJetStreamBus(js, new ConsoleLogger<NatsJetStreamBus>(), serializer);
 
         var dlqStore = new NatsDlqStore(kv, new ConsoleLogger<NatsDlqStore>());
+        var typeAliasRegistry = new MessageTypeAliasRegistry(Microsoft.Extensions.Options.Options.Create(new MessageTypeAliasOptions()));
+        typeAliasRegistry.Register<OrderEvent>(nameof(OrderEvent));
 
         var remediationService = new NatsDlqRemediationService(
             dlqStore,
             bus,
             serializer,
+            typeAliasRegistry,
             new ConsoleLogger<NatsDlqRemediationService>());
 
         // Manually store a DLQ entry
@@ -324,7 +332,7 @@ public partial class DlqEndToEndIntegrationTests
             ErrorReason = "Test error reason",
             Payload = System.Text.Encoding.UTF8.GetBytes("{\"test\":\"data\"}"),
             PayloadEncoding = "application/json",
-            OriginalMessageType = typeof(OrderEvent).AssemblyQualifiedName,
+            OriginalMessageType = nameof(OrderEvent),
             SerializerType = serializer.GetType().FullName
         };
         await dlqStore.StoreAsync(entry);
@@ -381,11 +389,13 @@ public partial class DlqEndToEndIntegrationTests
         await using var bus = new NatsJetStreamBus(js, new ConsoleLogger<NatsJetStreamBus>(), serializer);
 
         var dlqStore = new NatsDlqStore(kv, new ConsoleLogger<NatsDlqStore>());
+        var typeAliasRegistry = new MessageTypeAliasRegistry(Microsoft.Extensions.Options.Options.Create(new MessageTypeAliasOptions()));
 
         var remediationService = new NatsDlqRemediationService(
             dlqStore,
             bus,
             serializer,
+            typeAliasRegistry,
             new ConsoleLogger<NatsDlqRemediationService>());
 
         // Store an entry

@@ -1,5 +1,7 @@
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core;
+using FlySwattr.NATS.Core.Configuration;
+using FlySwattr.NATS.Core.Services;
 using FlySwattr.NATS.Core.Serializers;
 using FlySwattr.NATS.Hosting.Services;
 using IntegrationTests.Infrastructure;
@@ -69,10 +71,12 @@ public partial class NatsConsumerBackgroundServiceTests
         dlqPolicyRegistry.Register(streamName, consumerName, dlqPolicy);
 
         var bus = new NatsJetStreamBus(js, new ConsoleLogger<NatsJetStreamBus>(), serializer);
+        var typeAliasRegistry = new MessageTypeAliasRegistry(Microsoft.Extensions.Options.Options.Create(new MessageTypeAliasOptions()));
         
         var poisonHandler = new DefaultDlqPoisonHandler<TestMessage>(
             bus, 
             serializer, 
+            typeAliasRegistry,
             null, 
             null, 
             dlqPolicyRegistry, 

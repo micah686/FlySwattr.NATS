@@ -1,5 +1,6 @@
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core.Configuration;
+using FlySwattr.NATS.Core.Services;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -97,9 +98,10 @@ internal class OffloadingJetStreamConsumer : IJetStreamConsumer
     private static string ExtractObjectKey(string reference)
     {
         const string prefix = "objstore://";
-        return reference.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+        var objectKey = reference.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
             ? reference[prefix.Length..]
             : reference;
+        return MessageSecurity.ValidateObjectStoreKey(objectKey, nameof(reference));
     }
 }
 

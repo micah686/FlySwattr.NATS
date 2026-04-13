@@ -88,6 +88,25 @@ public class NatsJetStreamBusTests : IAsyncDisposable
             await _bus.PublishAsync("test.subject", new TestMessage("test"), "msg-1"));
     }
 
+    [Test]
+    public async Task PublishAsync_ShouldRejectReservedHeaders()
+    {
+        var headers = new MessageHeaders(new Dictionary<string, string>
+        {
+            ["Content-Type"] = "text/plain"
+        });
+
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await _bus.PublishAsync("test.subject", new TestMessage("test"), "msg-1", headers));
+    }
+
+    [Test]
+    public async Task PublishAsync_ShouldValidateSubject()
+    {
+        await Assert.ThrowsAsync<Exception>(async () =>
+            await _bus.PublishAsync("test..subject", new TestMessage("test"), "msg-1"));
+    }
+
     private record TestMessage(string Data);
 
     [Test]

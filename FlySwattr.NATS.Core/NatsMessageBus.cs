@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using FlySwattr.NATS.Abstractions;
+using FlySwattr.NATS.Core.Services;
 using FlySwattr.NATS.Core.Serializers;
 using FlySwattr.NATS.Core.Telemetry;
 using Microsoft.Extensions.Logging;
@@ -11,6 +12,12 @@ namespace FlySwattr.NATS.Core;
 
 public class NatsMessageBus : IMessageBus, IAsyncDisposable
 {
+    private static readonly string[] ReservedHeaders =
+    [
+        "traceparent",
+        "tracestate"
+    ];
+
     private readonly INatsConnection _connection;
     private readonly ILogger<NatsMessageBus> _logger;
     private readonly ConcurrentDictionary<Guid, Task> _backgroundTasks = new();
@@ -68,6 +75,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
 
     public async Task PublishAsync<T>(string subject, T message, CancellationToken cancellationToken = default)
     {
+        MessageSecurity.ValidatePublishSubject(subject);
         var stopwatch = Stopwatch.StartNew();
         using var activity = NatsTelemetry.ActivitySource.StartActivity($"{subject} publish", ActivityKind.Producer);
         if (activity != null)
@@ -92,6 +100,8 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
 
     public async Task PublishAsync<T>(string subject, T message, MessageHeaders? headers, CancellationToken cancellationToken = default)
     {
+        MessageSecurity.ValidatePublishSubject(subject);
+        MessageSecurity.RejectReservedHeaders(headers, ReservedHeaders);
         var stopwatch = Stopwatch.StartNew();
         using var activity = NatsTelemetry.ActivitySource.StartActivity($"{subject} publish", ActivityKind.Producer);
         if (activity != null)

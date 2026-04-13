@@ -40,6 +40,21 @@ internal interface IRawJetStreamConsumer
 
 public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJetStreamPublisher, IRawJetStreamConsumer, IAsyncDisposable
 {
+    private static readonly string[] ReservedPublishHeaders =
+    [
+        "Content-Type",
+        "Nats-Msg-Id",
+        "traceparent",
+        "tracestate"
+    ];
+
+    private static readonly string[] ReservedRawPublishHeaders =
+    [
+        "Nats-Msg-Id",
+        "traceparent",
+        "tracestate"
+    ];
+
     private readonly INatsJSContext _jsContext;
     private readonly ILogger<NatsJetStreamBus> _logger;
     private readonly IMessageSerializer _serializer;
@@ -81,6 +96,8 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
     public async Task PublishAsync<T>(string subject, T message, string? messageId, MessageHeaders? headers = null, CancellationToken cancellationToken = default)
     {
         var stopwatch = Stopwatch.StartNew();
+        MessageSecurity.ValidatePublishSubject(subject);
+        MessageSecurity.RejectReservedHeaders(headers, ReservedPublishHeaders);
         
         // Require a caller-provided message ID for true application-level idempotency.
         // Auto-generating GUIDs would defeat JetStream's deduplication on retries.
@@ -141,6 +158,9 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
 
     public async Task PublishRawAsync(string subject, ReadOnlyMemory<byte> payload, string? messageId, MessageHeaders? headers = null, CancellationToken cancellationToken = default)
     {
+        MessageSecurity.ValidatePublishSubject(subject);
+        MessageSecurity.RejectReservedHeaders(headers, ReservedRawPublishHeaders);
+
         if (string.IsNullOrWhiteSpace(messageId))
         {
             throw new ArgumentException(

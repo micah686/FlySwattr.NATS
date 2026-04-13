@@ -92,6 +92,19 @@ public class OffloadingJetStreamConsumerTests
         await _objectStore.DidNotReceive().GetAsync(Arg.Any<string>(), Arg.Any<Stream>(), Arg.Any<CancellationToken>());
     }
 
+    [Test]
+    public async Task ResolveClaimCheckAsync_ShouldRejectPathTraversalObjectKey()
+    {
+        var sut = CreateSut();
+        var context = new TestByteContext(Array.Empty<byte>(), new Dictionary<string, string>
+        {
+            [_options.ClaimCheckHeaderName] = "objstore://../secrets"
+        });
+
+        await Should.ThrowAsync<ArgumentException>(() =>
+            sut.ResolveClaimCheckAsync<TestMessage>(context, CancellationToken.None));
+    }
+
     private sealed class TestByteContext : IJsMessageContext<byte[]>
     {
         public TestByteContext(byte[] message, Dictionary<string, string>? headers = null)

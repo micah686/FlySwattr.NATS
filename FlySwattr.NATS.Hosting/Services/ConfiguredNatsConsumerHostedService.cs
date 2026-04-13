@@ -74,6 +74,7 @@ internal sealed class ConfiguredNatsConsumerHostedService<TMessage> : IHostedSer
             poisonHandler = new DefaultDlqPoisonHandler<TMessage>(
                 dlqPublisher,
                 serializer,
+                _serviceProvider.GetRequiredService<IMessageTypeAliasRegistry>(),
                 objectStore,
                 notificationService,
                 registry,

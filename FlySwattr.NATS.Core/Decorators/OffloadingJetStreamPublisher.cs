@@ -1,6 +1,7 @@
 using System.Buffers;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core.Configuration;
+using FlySwattr.NATS.Core.Services;
 using FlySwattr.NATS.Core.Serializers;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -18,6 +19,7 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
     private readonly IRawJetStreamPublisher _rawPublisher;
     private readonly IObjectStore _objectStore;
     private readonly IMessageSerializer _serializer;
+    private readonly IMessageTypeAliasRegistry _typeAliasRegistry;
     private readonly PayloadOffloadingOptions _options;
     private readonly ILogger<OffloadingJetStreamPublisher> _logger;
 
@@ -25,9 +27,10 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
         IJetStreamPublisher inner,
         IObjectStore objectStore,
         IMessageSerializer serializer,
+        IMessageTypeAliasRegistry typeAliasRegistry,
         IOptions<PayloadOffloadingOptions> options,
         ILogger<OffloadingJetStreamPublisher> logger)
-        : this(inner, (IRawJetStreamPublisher)inner, objectStore, serializer, options, logger)
+        : this(inner, (IRawJetStreamPublisher)inner, objectStore, serializer, typeAliasRegistry, options, logger)
     {
     }
 
@@ -36,6 +39,7 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
         IRawJetStreamPublisher rawPublisher,
         IObjectStore objectStore,
         IMessageSerializer serializer,
+        IMessageTypeAliasRegistry typeAliasRegistry,
         IOptions<PayloadOffloadingOptions> options,
         ILogger<OffloadingJetStreamPublisher> logger)
     {
@@ -43,12 +47,24 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
         _rawPublisher = rawPublisher;
         _objectStore = objectStore;
         _serializer = serializer;
+        _typeAliasRegistry = typeAliasRegistry;
         _options = options.Value;
         _logger = logger;
     }
 
     public async Task PublishAsync<T>(string subject, T message, string? messageId, MessageHeaders? headers = null, CancellationToken cancellationToken = default)
     {
+        MessageSecurity.RejectReservedHeaders(
+            headers,
+            [
+                _options.ClaimCheckHeaderName,
+                _options.ClaimCheckTypeHeaderName,
+                "Content-Type",
+                "Nats-Msg-Id",
+                "traceparent",
+                "tracestate"
+            ]);
+
         // Enforce messageId requirement at decorator level for consistency
         if (string.IsNullOrWhiteSpace(messageId))
         {
@@ -84,7 +100,7 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
         CancellationToken cancellationToken)
     {
         // Generate a unique object key
-        var objectKey = $"{_options.ObjectKeyPrefix}/{subject}/{Guid.NewGuid():N}";
+        var objectKey = MessageSecurity.ValidateObjectStoreKey($"{_options.ObjectKeyPrefix}/{subject}/{Guid.NewGuid():N}");
         var claimCheckRef = $"objstore://{objectKey}";
 
         _logger.LogDebug(
@@ -100,6 +116,7 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
         var claimCheckHeaders = new Dictionary<string, string>
         {
             [_options.ClaimCheckHeaderName] = claimCheckRef,
+            [_options.ClaimCheckTypeHeaderName] = _typeAliasRegistry.GetAlias(typeof(T)),
             ["Content-Type"] = _serializer.GetContentType<T>()
         };
 

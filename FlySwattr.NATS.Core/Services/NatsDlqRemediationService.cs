@@ -15,6 +15,7 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
     private readonly IDlqStore _dlqStore;
     private readonly IJetStreamPublisher _publisher;
     private readonly IMessageSerializer _serializer;
+    private readonly IMessageTypeAliasRegistry _typeAliasRegistry;
     private readonly IObjectStore? _objectStore;
     private readonly IDlqNotificationService? _notificationService;
     private readonly IRawJetStreamPublisher? _rawPublisher;
@@ -24,6 +25,7 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
         IDlqStore dlqStore,
         IJetStreamPublisher publisher,
         IMessageSerializer serializer,
+        IMessageTypeAliasRegistry typeAliasRegistry,
         ILogger<NatsDlqRemediationService> logger,
         IObjectStore? objectStore = null,
         IDlqNotificationService? notificationService = null)
@@ -31,6 +33,7 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
         _dlqStore = dlqStore ?? throw new ArgumentNullException(nameof(dlqStore));
         _publisher = publisher ?? throw new ArgumentNullException(nameof(publisher));
         _serializer = serializer ?? throw new ArgumentNullException(nameof(serializer));
+        _typeAliasRegistry = typeAliasRegistry ?? throw new ArgumentNullException(nameof(typeAliasRegistry));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _objectStore = objectStore;
         _notificationService = notificationService;
@@ -40,6 +43,7 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
         IDlqStore dlqStore,
         IJetStreamPublisher publisher,
         IMessageSerializer serializer,
+        IMessageTypeAliasRegistry typeAliasRegistry,
         ILogger<NatsDlqRemediationService> logger,
         IRawJetStreamPublisher rawPublisher,
         IObjectStore? objectStore,
@@ -48,6 +52,7 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
         _dlqStore = dlqStore ?? throw new ArgumentNullException(nameof(dlqStore));
         _publisher = publisher ?? throw new ArgumentNullException(nameof(publisher));
         _serializer = serializer ?? throw new ArgumentNullException(nameof(serializer));
+        _typeAliasRegistry = typeAliasRegistry ?? throw new ArgumentNullException(nameof(typeAliasRegistry));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _rawPublisher = rawPublisher;
         _objectStore = objectStore;
@@ -378,17 +383,14 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
         };
     }
 
-    private static Type? ResolveRuntimeType(string? originalMessageType)
+    private Type? ResolveRuntimeType(string? originalMessageType)
     {
         if (string.IsNullOrWhiteSpace(originalMessageType))
         {
             return null;
         }
 
-        return Type.GetType(originalMessageType, throwOnError: false)
-               ?? AppDomain.CurrentDomain.GetAssemblies()
-                   .Select(a => a.GetType(originalMessageType, throwOnError: false, ignoreCase: false))
-                   .FirstOrDefault(t => t != null);
+        return _typeAliasRegistry.Resolve(originalMessageType);
     }
 
     private object DeserializePayload(byte[] payload, Type runtimeType)

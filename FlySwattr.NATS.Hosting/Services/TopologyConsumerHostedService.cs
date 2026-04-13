@@ -131,6 +131,7 @@ internal class TopologyConsumerHostedService<TSource> : IHostedService
         var notificationService = _serviceProvider.GetService<IDlqNotificationService>();
         var offloadingOptions = _serviceProvider.GetService<Microsoft.Extensions.Options.IOptions<FlySwattr.NATS.Core.Configuration.PayloadOffloadingOptions>>()?.Value;
         var dlqRegistry = _serviceProvider.GetRequiredService<IDlqPolicyRegistry>();
+        var typeAliasRegistry = _serviceProvider.GetRequiredService<IMessageTypeAliasRegistry>();
 
         // Register policy if provided
         if (spec.DeadLetterPolicy != null)
@@ -145,6 +146,7 @@ internal class TopologyConsumerHostedService<TSource> : IHostedService
             defaultPoisonHandlerType,
             dlqPublisher,
             serializer,
+            typeAliasRegistry,
             objectStore,
             notificationService,
             dlqRegistry,

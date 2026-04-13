@@ -1,8 +1,12 @@
+using System.Reflection;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core;
+using FlySwattr.NATS.Core.Configuration;
+using FlySwattr.NATS.Core.Services;
 using FlySwattr.NATS.Hosting.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using NATS.Client.JetStream;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
@@ -19,6 +23,7 @@ public class TopologyConsumerHostedServiceTests
     private readonly ITopologyReadySignal _topologyReadySignal;
     private readonly INatsJSContext _jsContext;
     private readonly IDlqPolicyRegistry _dlqPolicyRegistry;
+    private readonly IMessageTypeAliasRegistry _typeAliasRegistry;
     private readonly TestTopology _topologySource;
     private readonly TopologyBuilder<TestTopology> _builder;
 
@@ -29,6 +34,7 @@ public class TopologyConsumerHostedServiceTests
         _topologyReadySignal = Substitute.For<ITopologyReadySignal>();
         _jsContext = Substitute.For<INatsJSContext>();
         _dlqPolicyRegistry = Substitute.For<IDlqPolicyRegistry>();
+        _typeAliasRegistry = new MessageTypeAliasRegistry(Microsoft.Extensions.Options.Options.Create(new MessageTypeAliasOptions()));
         _topologySource = new TestTopology();
         _builder = new TopologyBuilder<TestTopology>();
 
@@ -38,16 +44,42 @@ public class TopologyConsumerHostedServiceTests
 
     private void SetupDefaultServiceProviderBehavior()
     {
-        _serviceProvider.GetService(typeof(INatsJSContext)).Returns(_jsContext);
-        _serviceProvider.GetService(typeof(IDlqPolicyRegistry)).Returns(_dlqPolicyRegistry);
-
-        // Mock required services - use a service collection to properly resolve types
         var loggerFactory = Substitute.For<ILoggerFactory>();
         loggerFactory.CreateLogger(Arg.Any<string>()).Returns(Substitute.For<ILogger>());
-        _serviceProvider.GetService(typeof(ILoggerFactory)).Returns(loggerFactory);
+        _serviceProvider.GetService(Arg.Any<Type>()).Returns(callInfo =>
+        {
+            var serviceType = callInfo.ArgAt<Type>(0);
 
-        // Mock GetRequiredService pattern
-        _serviceProvider.GetService(Arg.Is<Type>(t => t == typeof(IDlqPolicyRegistry))).Returns(_dlqPolicyRegistry);
+            if (serviceType == typeof(INatsJSContext))
+            {
+                return _jsContext;
+            }
+
+            if (serviceType == typeof(IDlqPolicyRegistry))
+            {
+                return _dlqPolicyRegistry;
+            }
+
+            if (serviceType == typeof(IMessageTypeAliasRegistry))
+            {
+                return _typeAliasRegistry;
+            }
+
+            if (serviceType == typeof(ILoggerFactory))
+            {
+                return loggerFactory;
+            }
+
+            if (serviceType.IsGenericType && serviceType.GetGenericTypeDefinition() == typeof(ILogger<>))
+            {
+                return typeof(NullLogger<>)
+                    .MakeGenericType(serviceType.GenericTypeArguments[0])
+                    .GetProperty(nameof(NullLogger<object>.Instance), BindingFlags.Public | BindingFlags.Static)!
+                    .GetValue(null);
+            }
+
+            return null;
+        });
     }
 
     private TopologyConsumerHostedService<TestTopology> CreateSut(

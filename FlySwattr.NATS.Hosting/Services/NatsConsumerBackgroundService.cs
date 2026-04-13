@@ -6,6 +6,7 @@ using CommunityToolkit.HighPerformance.Buffers;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core.Configuration;
 using FlySwattr.NATS.Abstractions.Exceptions;
+using FlySwattr.NATS.Core.Services;
 using FlySwattr.NATS.Core.Telemetry;
 using FlySwattr.NATS.Hosting.Health;
 using Microsoft.Extensions.Hosting;
@@ -284,6 +285,7 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
         var objectKey = claimCheckRef.StartsWith("objstore://", StringComparison.OrdinalIgnoreCase)
             ? claimCheckRef["objstore://".Length..]
             : claimCheckRef;
+        objectKey = MessageSecurity.ValidateObjectStoreKey(objectKey, nameof(claimCheckRef));
 
         using var memoryStream = new MemoryStream();
         await _objectStore!.GetAsync(objectKey, memoryStream, cancellationToken);

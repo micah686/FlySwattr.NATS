@@ -2,8 +2,11 @@ using System.Buffers;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Abstractions.Exceptions;
 using FlySwattr.NATS.Core;
+using FlySwattr.NATS.Core.Configuration;
+using FlySwattr.NATS.Core.Services;
 using FlySwattr.NATS.Hosting.Services;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
 using Shouldly;
@@ -27,6 +30,7 @@ public class DefaultDlqPoisonHandlerTests
     private IObjectStore _objectStore = null!;
     private IDlqNotificationService _notificationService = null!;
     private IDlqPolicyRegistry _policyRegistry = null!;
+    private IMessageTypeAliasRegistry _typeAliasRegistry = null!;
     private ILogger<DefaultDlqPoisonHandler<TestMessage>> _logger = null!;
     private IJsMessageContext<TestMessage> _context = null!;
 
@@ -38,6 +42,7 @@ public class DefaultDlqPoisonHandlerTests
         _objectStore = Substitute.For<IObjectStore>();
         _notificationService = Substitute.For<IDlqNotificationService>();
         _policyRegistry = Substitute.For<IDlqPolicyRegistry>();
+        _typeAliasRegistry = new MessageTypeAliasRegistry(Options.Create(new MessageTypeAliasOptions()));
         _logger = Substitute.For<ILogger<DefaultDlqPoisonHandler<TestMessage>>>();
         _logger.IsEnabled(default).ReturnsForAnyArgs(true);
         _context = CreateMockContext();
@@ -70,6 +75,7 @@ public class DefaultDlqPoisonHandlerTests
         return new DefaultDlqPoisonHandler<TestMessage>(
             publisher ?? _publisher,
             serializer ?? _serializer,
+            _typeAliasRegistry,
             objectStore ?? _objectStore,
             notificationService ?? _notificationService,
             _policyRegistry,
@@ -218,6 +224,7 @@ public class DefaultDlqPoisonHandlerTests
         capturedDlqMessage.OriginalStream.ShouldBe("orders-stream");
         capturedDlqMessage.OriginalConsumer.ShouldBe("orders-consumer");
         capturedDlqMessage.OriginalSequence.ShouldBe(42ul);
+        capturedDlqMessage.OriginalMessageType.ShouldBe(nameof(TestMessage));
     }
 
     #endregion
@@ -278,6 +285,36 @@ public class DefaultDlqPoisonHandlerTests
         capturedDlqMessage.OriginalHeaders["TraceID"].ShouldBe("trace-12345");
         capturedDlqMessage.OriginalHeaders["CorrelationID"].ShouldBe("corr-67890");
         capturedDlqMessage.OriginalHeaders["X-Custom-Header"].ShouldBe("custom-value");
+    }
+
+    [Test]
+    public async Task HandleAsync_ShouldSanitizeStoredErrorReason()
+    {
+        var policy = new DeadLetterPolicy { SourceStream = "orders-stream", SourceConsumer = "orders-consumer", TargetStream = StreamName.From("dlq"), TargetSubject = "dlq.orders" };
+        _policyRegistry.Get("orders-stream", "orders-consumer").Returns(policy);
+        _serializer.Serialize(Arg.Any<IBufferWriter<byte>>(), Arg.Any<TestMessage>());
+        _serializer.GetContentType<TestMessage>().Returns("application/json");
+
+        DlqMessage? capturedDlqMessage = null;
+        _publisher.PublishAsync(
+                Arg.Any<string>(),
+                Arg.Any<DlqMessage>(),
+                Arg.Any<string>(),
+                Arg.Any<MessageHeaders?>(),
+                Arg.Any<CancellationToken>())
+            .Returns(callInfo =>
+            {
+                capturedDlqMessage = callInfo.Arg<DlqMessage>();
+                return Task.CompletedTask;
+            });
+
+        var handler = CreateHandler();
+        var exception = new InvalidOperationException("bad\r\nsecret\tvalue");
+
+        await handler.HandleAsync(_context, "orders-stream", "orders-consumer", 3, exception, CancellationToken.None);
+
+        capturedDlqMessage.ShouldNotBeNull();
+        capturedDlqMessage.ErrorReason.ShouldBe("InvalidOperationException: bad secret value");
     }
 
     #endregion
@@ -561,6 +598,7 @@ public class DefaultDlqPoisonHandlerTests
         var handler = new DefaultDlqPoisonHandler<TestMessage>(
             _publisher,
             _serializer,
+            _typeAliasRegistry,
             null, // Explicitly null
             _notificationService,
             _policyRegistry,
