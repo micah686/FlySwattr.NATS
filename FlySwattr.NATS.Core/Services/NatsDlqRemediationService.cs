@@ -390,7 +390,12 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
             return null;
         }
 
-        return _typeAliasRegistry.Resolve(originalMessageType);
+        var type = _typeAliasRegistry.Resolve(originalMessageType);
+        if (type == null)
+        {
+            LogTypeAliasNotResolved(originalMessageType);
+        }
+        return type;
     }
 
     private object DeserializePayload(byte[] payload, Type runtimeType)
@@ -474,4 +479,11 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Exception while deleting DLQ entry {Id}")]
     private partial void LogDeleteException(string id, Exception ex);
+
+    [LoggerMessage(Level = LogLevel.Warning,
+        Message = "DLQ replay: cannot resolve type alias '{Alias}' to a runtime type. " +
+                  "Falling back to raw-bytes replay. " +
+                  "Register the type explicitly via MessageTypeAliasOptions or IMessageTypeAliasRegistry.Register<T>() " +
+                  "to enable typed replay and correct consumer deserialization.")]
+    private partial void LogTypeAliasNotResolved(string alias);
 }

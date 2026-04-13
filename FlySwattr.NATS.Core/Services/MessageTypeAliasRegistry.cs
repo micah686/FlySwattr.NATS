@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Reflection;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core.Configuration;
 using Microsoft.Extensions.Options;
@@ -29,32 +28,23 @@ internal sealed class MessageTypeAliasRegistry : IMessageTypeAliasRegistry
     {
         ArgumentNullException.ThrowIfNull(messageType);
 
-        return _typeToAlias.GetOrAdd(messageType, static type => type.Name);
+        return _typeToAlias.GetOrAdd(messageType, type =>
+        {
+            var alias = type.Name;
+            // Mirror into the reverse lookup so Resolve() works for types encountered at
+            // runtime without requiring an explicit Register<T>() call. TryAdd is used so
+            // a pre-registered explicit alias always wins over the implicit default.
+            _aliasToType.TryAdd(alias, type);
+            return alias;
+        });
     }
 
     public Type? Resolve(string alias)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(alias);
 
-        if (_aliasToType.TryGetValue(alias, out var explicitType))
-        {
-            return explicitType;
-        }
-
-        return AppDomain.CurrentDomain.GetAssemblies()
-            .SelectMany(static assembly =>
-            {
-                try
-                {
-                    return assembly.GetTypes();
-                }
-                catch (ReflectionTypeLoadException ex)
-                {
-                    return ex.Types.OfType<Type>();
-                }
-            })
-            .FirstOrDefault(type => string.Equals(type.Name, alias, StringComparison.Ordinal) ||
-                                    string.Equals(type.FullName, alias, StringComparison.Ordinal));
+        _aliasToType.TryGetValue(alias, out var type);
+        return type;
     }
 
     public void Register<T>(string alias)
