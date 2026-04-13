@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 // ReSharper disable CheckNamespace
 // ReSharper disable once IdentifierTypo
 namespace FlySwattr.NATS.Abstractions;
@@ -15,6 +17,48 @@ public enum DlqMessageStatus
     Resolved,
     /// <summary>Message has been archived without resolution.</summary>
     Archived
+}
+
+/// <summary>
+/// Controls how replayed DLQ messages should behave with respect to JetStream de-duplication.
+/// </summary>
+public enum DlqReplayMode
+{
+    /// <summary>
+    /// Reuse a stable message ID derived from the DLQ entry ID so repeated replays are de-duplicated.
+    /// </summary>
+    Idempotent,
+
+    /// <summary>
+    /// Generate a fresh message ID for each replay so every replay is treated as a new event.
+    /// </summary>
+    NewEvent
+}
+
+/// <summary>
+/// Result of a DLQ entry update attempt.
+/// </summary>
+/// <param name="Outcome">Whether the update succeeded, conflicted, or the entry was missing.</param>
+/// <param name="Revision">The new store revision when the update succeeded.</param>
+public record DlqEntryUpdateResult(DlqEntryUpdateOutcome Outcome, ulong? Revision = null)
+{
+    /// <summary>True when the entry was updated successfully.</summary>
+    public bool Succeeded => Outcome == DlqEntryUpdateOutcome.Updated;
+}
+
+/// <summary>
+/// Outcome of a DLQ entry update attempt.
+/// </summary>
+public enum DlqEntryUpdateOutcome
+{
+    /// <summary>The entry was updated successfully.</summary>
+    Updated,
+
+    /// <summary>The entry was not found.</summary>
+    NotFound,
+
+    /// <summary>The entry changed since it was last read.</summary>
+    Conflict
 }
 
 /// <summary>
@@ -55,6 +99,16 @@ public record DlqMessageEntry
     /// <summary>Original headers of the failed message.</summary>
     public Dictionary<string, string>? OriginalHeaders { get; init; }
 
+    /// <summary>The original CLR message type when known.</summary>
+    public string? OriginalMessageType { get; init; }
+
+    /// <summary>The serializer implementation that wrote the payload when known.</summary>
+    public string? SerializerType { get; init; }
+
     /// <summary>Current status of this DLQ entry.</summary>
     public DlqMessageStatus Status { get; init; } = DlqMessageStatus.Pending;
+
+    /// <summary>The current KV revision for optimistic concurrency control.</summary>
+    [JsonIgnore]
+    public ulong? StoreRevision { get; init; }
 }

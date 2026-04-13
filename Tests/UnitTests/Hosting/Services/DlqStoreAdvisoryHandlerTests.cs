@@ -73,8 +73,7 @@ public class DlqStoreAdvisoryHandlerTests
         capturedEntry.OriginalStream.ShouldBe("orders-stream");
         capturedEntry.OriginalConsumer.ShouldBe("orders-consumer");
         
-        // OriginalSubject is approximated from stream.consumer since advisory doesn't include it
-        capturedEntry.OriginalSubject.ShouldBe("orders-stream.orders-consumer");
+        capturedEntry.OriginalSubject.ShouldBe(string.Empty);
         
         capturedEntry.OriginalSequence.ShouldBe(12345ul);
         capturedEntry.DeliveryCount.ShouldBe(5);
@@ -193,6 +192,38 @@ public class DlqStoreAdvisoryHandlerTests
         // Assert
         capturedEntry.ShouldNotBeNull();
         capturedEntry.Id.ShouldBe("simple-stream.simple-consumer.42");
+    }
+
+    [Test]
+    public async Task HandleMaxDeliveriesExceededAsync_ShouldPreserveActualSubject_WhenProvided()
+    {
+        // Arrange
+        var advisory = new ConsumerMaxDeliveriesAdvisory(
+            Type: "io.nats.jetstream.advisory.v1.max_deliver",
+            Id: "advisory-with-subject",
+            Timestamp: DateTimeOffset.UtcNow,
+            Stream: "orders-stream",
+            Consumer: "orders-consumer",
+            StreamSeq: 314,
+            Deliveries: 4,
+            Subject: "orders.created");
+
+        DlqMessageEntry? capturedEntry = null;
+        _dlqStore.StoreAsync(Arg.Any<DlqMessageEntry>(), Arg.Any<CancellationToken>())
+            .Returns(callInfo =>
+            {
+                capturedEntry = callInfo.Arg<DlqMessageEntry>();
+                return Task.CompletedTask;
+            });
+
+        var handler = CreateHandler();
+
+        // Act
+        await handler.HandleMaxDeliveriesExceededAsync(advisory, CancellationToken.None);
+
+        // Assert
+        capturedEntry.ShouldNotBeNull();
+        capturedEntry.OriginalSubject.ShouldBe("orders.created");
     }
 
     #endregion

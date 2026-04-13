@@ -1,8 +1,9 @@
 using System.Buffers;
-using System.Collections.Concurrent;
 using System.Text.Json;
 using FlySwattr.NATS.Abstractions;
 using MemoryPack;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace FlySwattr.NATS.Core.Serializers;
 
@@ -16,17 +17,16 @@ public class HybridNatsSerializer : IMessageSerializer
     private readonly MemoryPackSerializerOptions? _memoryPackOptions;
     private readonly JsonSerializerOptions _jsonOptions;
     private readonly int _maxPayloadSize;
-    
-    // Cache for attribute lookups to avoid reflection on every call
-    private static readonly ConcurrentDictionary<Type, bool> IsMemoryPackableCache = new();
-    
-    public const string ContentTypeMemoryPack = "application/x-memorypack";
+
+    public const string ContentTypeMemoryPack = "application/x-memorypack; v=1";
     public const string ContentTypeJson = "application/json";
 
     public HybridNatsSerializer(
         MemoryPackSerializerOptions? memoryPackOptions = null,
         JsonSerializerOptions? jsonOptions = null,
-        int maxPayloadSize = 10 * 1024 * 1024) // 10MB default
+        int maxPayloadSize = 10 * 1024 * 1024, // 10MB default
+        bool enforceSchemaFingerprint = true,
+        ILogger<HybridNatsSerializer>? logger = null)
     {
         _memoryPackOptions = memoryPackOptions;
         _jsonOptions = jsonOptions ?? new JsonSerializerOptions
@@ -39,15 +39,19 @@ public class HybridNatsSerializer : IMessageSerializer
             throw new ArgumentOutOfRangeException(nameof(maxPayloadSize), "Max payload size must be greater than zero.");
         }
         _maxPayloadSize = maxPayloadSize;
+
+        // Configure the static envelope serializer with fingerprint enforcement setting
+        MemoryPackSchemaEnvelopeSerializer.EnforceSchemaFingerprint = enforceSchemaFingerprint;
+        MemoryPackSchemaEnvelopeSerializer.Logger = logger ?? (ILogger)NullLogger.Instance;
     }
 
     public void Serialize<T>(IBufferWriter<byte> writer, T message)
     {
-        if (IsMemoryPackable<T>())
+        if (MemoryPackSchemaMetadata.IsMemoryPackable<T>())
         {
             // Fast path: MemoryPack for [MemoryPackable] types
             var limitingWriter = new SizeLimitingBufferWriter(writer, _maxPayloadSize);
-            MemoryPackSerializer.Serialize(limitingWriter, message, _memoryPackOptions);
+            MemoryPackSchemaEnvelopeSerializer.Serialize(limitingWriter, message, _memoryPackOptions);
         }
         else
         {
@@ -60,12 +64,12 @@ public class HybridNatsSerializer : IMessageSerializer
 
     public T Deserialize<T>(ReadOnlyMemory<byte> data)
     {
-        if (IsMemoryPackable<T>())
+        if (MemoryPackSchemaMetadata.IsMemoryPackable<T>())
         {
             try
             {
                 // Fast path: MemoryPack
-                return MemoryPackSerializer.Deserialize<T>(data.Span, _memoryPackOptions)
+                return MemoryPackSchemaEnvelopeSerializer.Deserialize<T>(data.Span, _memoryPackOptions)
                        ?? throw new MemoryPackSerializationException($"MemoryPack deserialization returned null for type {typeof(T).Name}");
             }
             catch (Exception ex) when (ex is not MemoryPackSerializationException)
@@ -83,16 +87,30 @@ public class HybridNatsSerializer : IMessageSerializer
 
     public string GetContentType<T>()
     {
-        return IsMemoryPackable<T>() ? ContentTypeMemoryPack : ContentTypeJson;
+        return MemoryPackSchemaMetadata.IsMemoryPackable<T>() ? ContentTypeMemoryPack : ContentTypeJson;
     }
 
     /// <summary>
-    /// Checks if a type is decorated with [MemoryPackable] attribute.
-    /// Results are cached for performance.
+    /// Attempts to parse the wire format version from a content type header value.
+    /// Returns true if a version parameter was found.
     /// </summary>
-    private static bool IsMemoryPackable<T>()
+    public static bool TryParseContentTypeVersion(string? contentType, out int version)
     {
-        return IsMemoryPackableCache.GetOrAdd(typeof(T), type =>
-            type.IsDefined(typeof(MemoryPackableAttribute), inherit: false));
+        version = 0;
+        if (string.IsNullOrEmpty(contentType))
+            return false;
+
+        const string versionPrefix = "v=";
+        var idx = contentType.IndexOf(versionPrefix, StringComparison.OrdinalIgnoreCase);
+        if (idx < 0)
+            return false;
+
+        var versionSpan = contentType.AsSpan(idx + versionPrefix.Length).Trim();
+        // Find the end of the version number (next ';' or end of string)
+        var endIdx = versionSpan.IndexOf(';');
+        if (endIdx >= 0)
+            versionSpan = versionSpan[..endIdx].Trim();
+
+        return int.TryParse(versionSpan, out version);
     }
 }

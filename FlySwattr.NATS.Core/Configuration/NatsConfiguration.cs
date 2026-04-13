@@ -24,4 +24,11 @@ public class NatsConfiguration
     /// to the offloading threshold.
     /// </remarks>
     public int MaxPayloadSize { get; set; } = 10 * 1024 * 1024; // 10MB
+
+    /// <summary>
+    /// Enforce strict schema fingerprint matching during MemoryPack deserialization.
+    /// When enabled (default), fingerprint mismatches throw an exception.
+    /// When disabled, fingerprint mismatches emit a warning log instead.
+    /// </summary>
+    public bool EnforceSchemaFingerprint { get; set; } = true;
 }

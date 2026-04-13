@@ -4,7 +4,10 @@ using CommunityToolkit.HighPerformance.Buffers;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Abstractions.Exceptions;
 using FlySwattr.NATS.Core;
+using FlySwattr.NATS.Core.Configuration;
+using FlySwattr.NATS.Core.Services;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace FlySwattr.NATS.Hosting.Services;
 
@@ -21,24 +24,30 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
 
     private readonly IJetStreamPublisher? _dlqPublisher;
     private readonly IMessageSerializer? _serializer;
+    private readonly IMessageTypeAliasRegistry _typeAliasRegistry;
     private readonly IObjectStore? _objectStore;
     private readonly IDlqNotificationService? _notificationService;
     private readonly IDlqPolicyRegistry _dlqPolicyRegistry;
+    private readonly DlqStoreFailureOptions _failureOptions;
     private readonly ILogger _logger;
 
     public DefaultDlqPoisonHandler(
         IJetStreamPublisher? dlqPublisher,
         IMessageSerializer? serializer,
+        IMessageTypeAliasRegistry typeAliasRegistry,
         IObjectStore? objectStore,
         IDlqNotificationService? notificationService,
         IDlqPolicyRegistry dlqPolicyRegistry,
-        ILogger<DefaultDlqPoisonHandler<T>> logger)
+        ILogger<DefaultDlqPoisonHandler<T>> logger,
+        IOptions<DlqStoreFailureOptions>? failureOptions = null)
     {
         _dlqPublisher = dlqPublisher;
         _serializer = serializer;
+        _typeAliasRegistry = typeAliasRegistry;
         _objectStore = objectStore;
         _notificationService = notificationService;
         _dlqPolicyRegistry = dlqPolicyRegistry;
+        _failureOptions = failureOptions?.Value ?? new DlqStoreFailureOptions();
         _logger = logger;
     }
 
@@ -130,7 +139,7 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
             if (bufferWriter.WrittenCount > MaxDlqPayloadSize && _objectStore != null)
             {
                 // Offload to object store
-                var objectKey = $"dlq-payload/{streamName}/{consumerName}/{context.Sequence}-{Guid.NewGuid():N}";
+                var objectKey = MessageSecurity.ValidateObjectStoreKey($"dlq-payload/{streamName}/{consumerName}/{context.Sequence}-{Guid.NewGuid():N}");
                 using var payloadStream = bufferWriter.WrittenMemory.AsStream();
                 await _objectStore.PutAsync(objectKey, payloadStream, token);
 
@@ -144,9 +153,28 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
             }
             else
             {
-                LogLargePayloadWithoutObjectStore(bufferWriter.WrittenCount, MaxDlqPayloadSize);
-                payload = Array.Empty<byte>();
-                contentType = $"truncated:size={bufferWriter.WrittenCount}";
+                // Payload exceeds inline limit and no object store is available.
+                // Apply the configured large-payload fallback policy.
+                switch (_failureOptions.LargePayloadFallback)
+                {
+                    case LargePayloadFallbackPolicy.FailDlq:
+                        throw new InvalidOperationException(
+                            $"Payload size ({bufferWriter.WrittenCount} bytes) exceeds inline limit ({MaxDlqPayloadSize} bytes) " +
+                            "and no object store is available. Policy: FailDlq.");
+
+                    case LargePayloadFallbackPolicy.ForceInline:
+                        LogForceInlinePayload(bufferWriter.WrittenCount, MaxDlqPayloadSize);
+                        payload = bufferWriter.WrittenMemory.ToArray();
+                        contentType = _serializer.GetContentType<T>();
+                        break;
+
+                    case LargePayloadFallbackPolicy.TruncateAndLog:
+                    default:
+                        LogLargePayloadWithoutObjectStore(bufferWriter.WrittenCount, MaxDlqPayloadSize);
+                        payload = Array.Empty<byte>();
+                        contentType = $"truncated:size={bufferWriter.WrittenCount}";
+                        break;
+                }
             }
 
             serializerType = _serializer.GetType().FullName ?? "Unknown";
@@ -169,9 +197,9 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
             FailedAt = DateTimeOffset.UtcNow,
             Payload = payload,
             PayloadEncoding = contentType,
-            ErrorReason = ex.Message,
+            ErrorReason = MessageSecurity.SanitizeExceptionMessage(ex),
             OriginalHeaders = context.Headers.Headers,
-            OriginalMessageType = typeof(T).AssemblyQualifiedName ?? typeof(T).FullName,
+            OriginalMessageType = _typeAliasRegistry.GetAlias(typeof(T)),
             SerializerType = serializerType
         };
     }
@@ -192,7 +220,7 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
                 OriginalSubject: context.Subject,
                 OriginalSequence: context.Sequence,
                 DeliveryCount: (int)context.NumDelivered,
-                ErrorReason: ex.Message,
+                ErrorReason: MessageSecurity.SanitizeExceptionMessage(ex),
                 OccurredAt: DateTimeOffset.UtcNow
             );
             await _notificationService!.NotifyAsync(notification, token);
@@ -220,6 +248,9 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Large payload ({ActualSize} bytes) exceeds inline limit ({MaxSize} bytes) but no object store available. Payload will be truncated.")]
     private partial void LogLargePayloadWithoutObjectStore(int actualSize, int maxSize);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Large payload ({ActualSize} bytes) exceeds inline limit ({MaxSize} bytes). Policy: ForceInline — storing full payload inline (may exceed NATS limits).")]
+    private partial void LogForceInlinePayload(int actualSize, int maxSize);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Handler failed for {StreamName}/{ConsumerName} (Delivery {DeliveryCount}), sending NAK with backoff")]
     private partial void LogHandlerFailedWithNak(string streamName, string consumerName, uint deliveryCount, Exception exception);

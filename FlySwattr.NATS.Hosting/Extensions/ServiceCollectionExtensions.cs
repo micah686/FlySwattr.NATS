@@ -1,5 +1,6 @@
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core;
+using FlySwattr.NATS.Core.Configuration;
 using FlySwattr.NATS.Hosting.Configuration;
 using FlySwattr.NATS.Hosting.Health;
 using FlySwattr.NATS.Hosting.Middleware;
@@ -8,6 +9,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using NATS.Client.JetStream;
 using Polly;
 
@@ -55,94 +57,29 @@ public static class ServiceCollectionExtensions
         {
             var options = new NatsConsumerOptions();
             configureOptions?.Invoke(options);
-            
-            var jsContext = sp.GetRequiredService<INatsJSContext>();
-            var logger = sp.GetRequiredService<ILogger<NatsConsumerBackgroundService<TMessage>>>();
-            
-            // Get consumer (sync-over-async during startup - consider factory pattern for production)
-            var consumerTask = jsContext.GetConsumerAsync(streamName, consumerName);
-            var consumer = consumerTask.GetAwaiter().GetResult();
-            
-            var consumeOpts = new NatsJSConsumeOpts { MaxMsgs = options.MaxConcurrency };
-            
-            // Resolve optional dependencies
-            var dlqPublisher = options.DlqPublisherServiceKey != null
-                ? sp.GetKeyedService<IJetStreamPublisher>(options.DlqPublisherServiceKey)
-                : sp.GetService<IJetStreamPublisher>();
-                
-            var serializer = sp.GetService<IMessageSerializer>();
-            
-            var objectStore = options.ObjectStoreServiceKey != null
-                ? sp.GetKeyedService<IObjectStore>(options.ObjectStoreServiceKey)
-                : sp.GetService<IObjectStore>();
-                
-            var notificationService = sp.GetService<IDlqNotificationService>();
 
-            // Resolve resilience pipeline (provided by Resilience package)
-            var resiliencePipeline = options.ResiliencePipelineKey != null
-                ? sp.GetKeyedService<ResiliencePipeline>(options.ResiliencePipelineKey)
-                : null;
-
-            // Resolve health metrics for zombie detection
-            var healthMetrics = sp.GetService<IConsumerHealthMetrics>();
-
-            // Resolve topology signal for Safety Mode startup coordination
-            var topologyReadySignal = sp.GetService<ITopologyReadySignal>();
-
-            // Resolve middleware pipeline
-            var middlewares = ResolveMiddlewares<TMessage>(sp, options);
-            
-            // Resolve or create poison message handler
-            IPoisonMessageHandler<TMessage> poisonHandler;
-            if (options.PoisonHandlerKey != null)
-            {
-                poisonHandler = sp.GetRequiredKeyedService<IPoisonMessageHandler<TMessage>>(options.PoisonHandlerKey);
-            }
-            else
-            {
-                // Register policy if provided in options and not already registered (best effort)
-                // In a real app, policies should be registered via TopologyManager, but for manual consumer setup:
-                var registry = sp.GetRequiredService<IDlqPolicyRegistry>();
-                if (options.DlqPolicy != null)
-                {
-                    registry.Register(streamName, consumerName, options.DlqPolicy);
-                }
-                
-                poisonHandler = new DefaultDlqPoisonHandler<TMessage>(
-                    dlqPublisher,
-                    serializer,
-                    objectStore,
-                    notificationService,
-                    registry,
-                    sp.GetRequiredService<ILogger<DefaultDlqPoisonHandler<TMessage>>>()
-                );
-            }
-
-            return new NatsConsumerBackgroundService<TMessage>(
-                consumer,
+            return new ConfiguredNatsConsumerHostedService<TMessage>(
+                sp,
                 streamName,
                 consumerName,
                 handler,
-                consumeOpts,
-                logger,
-                poisonHandler,
-                options.MaxConcurrency,
-                resiliencePipeline,
-                healthMetrics,
-                topologyReadySignal,
-                middlewares
-            );
+                options);
         });
     }
 
     /// <summary>
     /// Resolves and instantiates the middleware pipeline for a consumer.
     /// </summary>
-    private static IEnumerable<IConsumerMiddleware<TMessage>> ResolveMiddlewares<TMessage>(
+    internal static IEnumerable<IConsumerMiddleware<TMessage>> ResolveMiddlewares<TMessage>(
         IServiceProvider sp, 
         NatsConsumerOptions options)
     {
         var middlewares = new List<IConsumerMiddleware<TMessage>>();
+
+        if (ShouldEnableWireCompatibilityMiddleware(sp))
+        {
+            middlewares.Add(ActivatorUtilities.CreateInstance<WireVersionCheckMiddleware<TMessage>>(sp));
+        }
 
         // Add built-in middleware if enabled
         if (options.EnableLoggingMiddleware)
@@ -165,6 +102,13 @@ public static class ServiceCollectionExtensions
         }
 
         return middlewares;
+    }
+
+    internal static bool ShouldEnableWireCompatibilityMiddleware(IServiceProvider sp)
+    {
+        var options = sp.GetService<IOptions<WireCompatibilityOptions>>()?.Value;
+        return options is not null &&
+               (options.MinAcceptedVersion.HasValue || options.MaxAcceptedVersion.HasValue);
     }
 
     /// <summary>
@@ -340,6 +284,12 @@ public class NatsConsumerOptions
     /// Default: true.
     /// </summary>
     public bool EnableValidationMiddleware { get; set; } = true;
+
+    /// <summary>
+    /// Maximum time to wait for an ACK operation to complete after successful handler execution.
+    /// Default: 5 seconds.
+    /// </summary>
+    public TimeSpan AckTimeout { get; set; } = TimeSpan.FromSeconds(5);
 
     /// <summary>
     /// Custom middleware types to include in the pipeline.

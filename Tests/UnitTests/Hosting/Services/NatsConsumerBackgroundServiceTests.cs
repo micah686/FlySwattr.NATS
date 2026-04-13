@@ -25,11 +25,12 @@ public class NatsConsumerBackgroundServiceTests
             ILogger logger,
             IPoisonMessageHandler<T> poisonHandler,
             int? maxDegreeOfParallelism = null,
+            TimeSpan? ackTimeout = null,
             ResiliencePipeline? resiliencePipeline = null,
             IConsumerHealthMetrics? healthMetrics = null,
             ITopologyReadySignal? topologyReadySignal = null,
             IEnumerable<IConsumerMiddleware<T>>? middlewares = null) 
-            : base(consumer, streamName, consumerName, handler, consumeOpts, logger, poisonHandler, maxDegreeOfParallelism, resiliencePipeline, healthMetrics, topologyReadySignal, middlewares)
+            : base(consumer, streamName, consumerName, handler, consumeOpts, logger, poisonHandler, maxDegreeOfParallelism, ackTimeout, resiliencePipeline, healthMetrics, topologyReadySignal, middlewares)
         {
         }
 
@@ -280,6 +281,121 @@ public class NatsConsumerBackgroundServiceTests
         ackCount.ShouldBe(2);
     }
 
+    [Test]
+    public async Task ExecuteAsync_ShouldUseConfiguredAckTimeout()
+    {
+        // Arrange
+        var consumer = Substitute.For<INatsJSConsumer>();
+        var logger = Substitute.For<ILogger>();
+        var poisonHandler = Substitute.For<IPoisonMessageHandler<string>>();
+
+        var messagesYielded = new TaskCompletionSource();
+        var ackTokenCaptured = new TaskCompletionSource<CancellationToken>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var msg = Substitute.For<INatsJSMsg<string>>();
+        msg.Data.Returns("msg-ack-timeout");
+        msg.Subject.Returns("test.subject");
+        msg.AckAsync(Arg.Any<AckOpts?>(), Arg.Any<CancellationToken>())
+            .Returns(callInfo =>
+            {
+                var token = callInfo.ArgAt<CancellationToken>(1);
+                ackTokenCaptured.TrySetResult(token);
+                return new ValueTask(Task.Delay(Timeout.Infinite, token));
+            });
+
+        consumer.ConsumeAsync<string>(
+            Arg.Any<INatsDeserialize<string>>(),
+            Arg.Any<NatsJSConsumeOpts>(),
+            Arg.Any<CancellationToken>())
+            .Returns(c => CreateMessageStream([msg], messagesYielded, c.Arg<CancellationToken>()));
+
+        Func<IJsMessageContext<string>, Task> handler = _ => Task.CompletedTask;
+
+        var service = new TestableNatsConsumerBackgroundService<string>(
+            consumer,
+            "stream",
+            "consumer",
+            handler,
+            new NatsJSConsumeOpts(),
+            logger,
+            poisonHandler,
+            ackTimeout: TimeSpan.FromMilliseconds(50));
+
+        using var cts = new CancellationTokenSource();
+
+        // Act
+        await service.StartAsync(cts.Token);
+        await messagesYielded.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var ackToken = await ackTokenCaptured.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.Delay(200);
+        await cts.CancelAsync();
+        try { await service.StopAsync(CancellationToken.None); } catch { }
+
+        // Assert
+        ackToken.IsCancellationRequested.ShouldBeTrue();
+    }
+
+    [Test]
+    public async Task ExecuteAsync_ShouldDrainQueuedMessagesAndNakOnShutdown()
+    {
+        // Arrange
+        var consumer = Substitute.For<INatsJSConsumer>();
+        var logger = Substitute.For<ILogger>();
+        var poisonHandler = Substitute.For<IPoisonMessageHandler<string>>();
+
+        var firstHandlerEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirstHandler = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var messagesYielded = new TaskCompletionSource();
+
+        var firstMsg = Substitute.For<INatsJSMsg<string>>();
+        firstMsg.Data.Returns("first");
+        firstMsg.Subject.Returns("test.subject.1");
+        firstMsg.AckAsync(Arg.Any<AckOpts?>(), Arg.Any<CancellationToken>()).Returns(ValueTask.CompletedTask);
+
+        var secondMsg = Substitute.For<INatsJSMsg<string>>();
+        secondMsg.Data.Returns("second");
+        secondMsg.Subject.Returns("test.subject.2");
+        secondMsg.NakAsync(default, default, default).ReturnsForAnyArgs(ValueTask.CompletedTask);
+
+        consumer.ConsumeAsync<string>(
+            Arg.Any<INatsDeserialize<string>>(),
+            Arg.Any<NatsJSConsumeOpts>(),
+            Arg.Any<CancellationToken>())
+            .Returns(c => CreateSequencedMessageStream(firstMsg, secondMsg, firstHandlerEntered.Task, messagesYielded, c.Arg<CancellationToken>()));
+
+        Func<IJsMessageContext<string>, Task> handler = async ctx =>
+        {
+            if (ctx.Message == "first")
+            {
+                firstHandlerEntered.TrySetResult();
+                await releaseFirstHandler.Task;
+            }
+        };
+
+        var service = new TestableNatsConsumerBackgroundService<string>(
+            consumer,
+            "stream",
+            "consumer",
+            handler,
+            new NatsJSConsumeOpts(),
+            logger,
+            poisonHandler,
+            maxDegreeOfParallelism: 1);
+
+        using var cts = new CancellationTokenSource();
+
+        // Act
+        await service.StartAsync(cts.Token);
+        await firstHandlerEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await messagesYielded.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        await cts.CancelAsync();
+        await WaitForNakAsync(secondMsg, TimeSpan.FromSeconds(5));
+
+        releaseFirstHandler.TrySetResult();
+        try { await service.StopAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5)); } catch { }
+    }
+
     /// <summary>
     /// Helper method to create an async enumerable from a list of messages.
     /// </summary>
@@ -302,5 +418,49 @@ public class NatsConsumerBackgroundServiceTests
             await Task.Delay(Timeout.Infinite, cancellationToken);
         }
         catch (OperationCanceledException) { }
+    }
+
+    private static async IAsyncEnumerable<INatsJSMsg<string>> CreateSequencedMessageStream(
+        INatsJSMsg<string> first,
+        INatsJSMsg<string> second,
+        Task firstHandlerStarted,
+        TaskCompletionSource completionSignal,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        if (cancellationToken.IsCancellationRequested) yield break;
+
+        yield return first;
+        await firstHandlerStarted.WaitAsync(cancellationToken);
+
+        if (cancellationToken.IsCancellationRequested) yield break;
+
+        yield return second;
+        completionSignal.TrySetResult();
+
+        try
+        {
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    private static async Task WaitForNakAsync(INatsJSMsg<string> message, TimeSpan timeout)
+    {
+        using var cts = new CancellationTokenSource(timeout);
+
+        while (!cts.IsCancellationRequested)
+        {
+            try
+            {
+                await message.Received(1).NakAsync(default, TimeSpan.FromSeconds(1), Arg.Any<CancellationToken>());
+                return;
+            }
+            catch
+            {
+                await Task.Delay(50, cts.Token);
+            }
+        }
+
+        await message.Received(1).NakAsync(default, TimeSpan.FromSeconds(1), Arg.Any<CancellationToken>());
     }
 }

@@ -5,6 +5,7 @@
     <Platform Name="x86" />
   </Configurations>
   <Folder Name="/Tests/">
+    <Project Path="Tests/Benchmarks/Benchmarks.csproj" />
     <Project Path="Tests/IntegrationTests/IntegrationTests.csproj" />
     <Project Path="Tests/UnitTests/UnitTests.csproj" />
   </Folder>

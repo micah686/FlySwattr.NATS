@@ -173,6 +173,40 @@ public class SizeLimitingBufferWriterTests
         result.Length.ShouldBeGreaterThan(0);
     }
 
+    [Test]
+    public void GetMemory_ShouldNotExposeMoreThanRemainingCapacity()
+    {
+        // Arrange
+        var innerWriter = new ArrayBufferWriter<byte>(256);
+        var sut = CreateSut(innerWriter, maxSize: 100);
+
+        var first = sut.GetMemory(60);
+        first.Length.ShouldBe(60);
+        sut.Advance(60);
+
+        // Act
+        var second = sut.GetMemory();
+
+        // Assert
+        second.Length.ShouldBe(40);
+    }
+
+    [Test]
+    public void GetMemory_ShouldTrackHighWaterMarkAcrossMultipleReservations()
+    {
+        // Arrange
+        var innerWriter = new ArrayBufferWriter<byte>(256);
+        var sut = CreateSut(innerWriter, maxSize: 100);
+
+        // Act
+        var first = sut.GetMemory(60);
+        first.Length.ShouldBe(60);
+
+        // Assert
+        var exception = Should.Throw<InvalidOperationException>(() => sut.GetMemory(50));
+        exception.Message.ShouldContain("100");
+    }
+
     #endregion
 
     #region GetSpan Tests
@@ -203,6 +237,40 @@ public class SizeLimitingBufferWriterTests
 
         // Assert - should return a span (default size hint behavior)
         result.Length.ShouldBeGreaterThan(0);
+    }
+
+    [Test]
+    public void GetSpan_ShouldNotExposeMoreThanRemainingCapacity()
+    {
+        // Arrange
+        var innerWriter = new ArrayBufferWriter<byte>(256);
+        var sut = CreateSut(innerWriter, maxSize: 100);
+
+        var first = sut.GetSpan(70);
+        first.Length.ShouldBe(70);
+        sut.Advance(70);
+
+        // Act
+        var second = sut.GetSpan();
+
+        // Assert
+        second.Length.ShouldBe(30);
+    }
+
+    [Test]
+    public void GetSpan_ShouldTrackHighWaterMarkAcrossMultipleReservations()
+    {
+        // Arrange
+        var innerWriter = new ArrayBufferWriter<byte>(256);
+        var sut = CreateSut(innerWriter, maxSize: 100);
+
+        // Act
+        var first = sut.GetSpan(80);
+        first.Length.ShouldBe(80);
+
+        // Assert
+        var exception = Should.Throw<InvalidOperationException>(() => sut.GetSpan(30));
+        exception.Message.ShouldContain("100");
     }
 
     #endregion

@@ -1,5 +1,6 @@
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core;
+using FlySwattr.NATS.Core.Configuration;
 using FlySwattr.NATS.Hosting.Extensions;
 using FlySwattr.NATS.Hosting.Health;
 using Microsoft.Extensions.DependencyInjection;
@@ -109,7 +110,8 @@ internal class TopologyConsumerHostedService<TSource> : IHostedService
             EnableLoggingMiddleware = registration.Options.EnableLoggingMiddleware,
             EnableValidationMiddleware = registration.Options.EnableValidationMiddleware,
             ResiliencePipelineKey = registration.Options.ResiliencePipelineKey,
-            DlqPolicy = spec.DeadLetterPolicy
+            DlqPolicy = spec.DeadLetterPolicy,
+            AckTimeout = registration.Options.AckTimeout
         };
 
         foreach (var middlewareType in registration.Options.MiddlewareTypes)
@@ -129,7 +131,9 @@ internal class TopologyConsumerHostedService<TSource> : IHostedService
         var serializer = _serviceProvider.GetService<IMessageSerializer>();
         var objectStore = _serviceProvider.GetService<IObjectStore>();
         var notificationService = _serviceProvider.GetService<IDlqNotificationService>();
+        var offloadingOptions = _serviceProvider.GetService<Microsoft.Extensions.Options.IOptions<FlySwattr.NATS.Core.Configuration.PayloadOffloadingOptions>>()?.Value;
         var dlqRegistry = _serviceProvider.GetRequiredService<IDlqPolicyRegistry>();
+        var typeAliasRegistry = _serviceProvider.GetRequiredService<IMessageTypeAliasRegistry>();
 
         // Register policy if provided
         if (spec.DeadLetterPolicy != null)
@@ -144,6 +148,7 @@ internal class TopologyConsumerHostedService<TSource> : IHostedService
             defaultPoisonHandlerType,
             dlqPublisher,
             serializer,
+            typeAliasRegistry,
             objectStore,
             notificationService,
             dlqRegistry,
@@ -169,7 +174,11 @@ internal class TopologyConsumerHostedService<TSource> : IHostedService
             consumeOpts,
             workerLogger,
             poisonHandler,
+            serializer,
+            objectStore,
+            offloadingOptions,
             maxConcurrency,
+            options.AckTimeout,
             resiliencePipeline,
             healthMetrics,
             _readySignal,
@@ -188,6 +197,13 @@ internal class TopologyConsumerHostedService<TSource> : IHostedService
         var listType = typeof(List<>).MakeGenericType(middlewareInterfaceType);
         var middlewares = Activator.CreateInstance(listType)!;
         var addMethod = listType.GetMethod("Add")!;
+
+        if (ServiceCollectionExtensions.ShouldEnableWireCompatibilityMiddleware(sp))
+        {
+            var wireCompatibilityMiddlewareType = typeof(Middleware.WireVersionCheckMiddleware<>).MakeGenericType(messageType);
+            var wireCompatibilityMiddleware = ActivatorUtilities.CreateInstance(sp, wireCompatibilityMiddlewareType);
+            addMethod.Invoke(middlewares, [wireCompatibilityMiddleware]);
+        }
 
         if (options.EnableLoggingMiddleware)
         {

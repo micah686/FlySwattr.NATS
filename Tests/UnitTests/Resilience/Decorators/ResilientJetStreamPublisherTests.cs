@@ -159,6 +159,24 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         await _inner.Received(1).PublishAsync(subject, message, messageId, null, Arg.Any<CancellationToken>());
     }
 
+    [Test]
+    public async Task PublishAsync_ShouldNotRetry_OnBrokenCircuitException()
+    {
+        // Arrange
+        var subject = "test.subject";
+        var message = "payload";
+        var messageId = "msg-broken-circuit";
+
+        _inner.PublishAsync(subject, message, messageId, Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
+            .Returns(_ => throw new BrokenCircuitException());
+
+        // Act & Assert
+        await Assert.ThrowsAsync<BrokenCircuitException>(
+            async () => await _sut.PublishAsync(subject, message, messageId));
+
+        await _inner.Received(1).PublishAsync(subject, message, messageId, null, Arg.Any<CancellationToken>());
+    }
+
     /// <summary>
     /// Verifies that driver-layer IOException exceptions ARE treated as transient and trigger 
     /// retries. This is critical when NATS driver MaxReconnect=0 (fail fast) and we rely 
@@ -839,5 +857,4 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
 
     #endregion
 }
-
 

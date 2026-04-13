@@ -14,7 +14,7 @@ internal class MemoryPackNatsSerializer<T> : INatsSerialize<T>, INatsDeserialize
     public static readonly MemoryPackNatsSerializer<T> Default = new();
     
     public void Serialize(IBufferWriter<byte> bufferWriter, T value)
-        => MemoryPack.MemoryPackSerializer.Serialize(bufferWriter, value);
+        => MemoryPackSchemaEnvelopeSerializer.Serialize(bufferWriter, value);
     public T? Deserialize(in ReadOnlySequence<byte> buffer)
-        => MemoryPack.MemoryPackSerializer.Deserialize<T>(buffer);
+        => MemoryPackSchemaEnvelopeSerializer.Deserialize<T>(buffer.ToArray());
 }

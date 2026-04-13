@@ -9,6 +9,11 @@ using ZiggyCreatures.Caching.Fusion;
 
 namespace FlySwattr.NATS.Caching.Extensions;
 
+internal static class CachingServiceKeys
+{
+    internal const string InnerKeyValueStoreFactory = "caching-inner-key-value-store-factory";
+}
+
 public static class ServiceCollectionExtensions
 {
     /// <summary>
@@ -22,6 +27,11 @@ public static class ServiceCollectionExtensions
         this IServiceCollection services, 
         Action<FusionCacheConfiguration>? configureCache = null)
     {
+        if (!services.Any(d => d.ServiceType == typeof(NatsCoreServicesMarker)))
+        {
+            throw new InvalidOperationException("AddFlySwattrNatsCaching requires AddFlySwattrNatsCore to be registered first.");
+        }
+
         // 1. Register configuration with Options pattern
         if (configureCache != null)
         {
@@ -43,29 +53,45 @@ public static class ServiceCollectionExtensions
                 opts.FactorySoftTimeout = TimeSpan.FromMilliseconds(500);
             });
 
-        // 3. Decorate the Store Factory
-        // We replace the factory from Core to wrap stores with caching
-        // Note: This assumes AddFlySwattrNatsCore has already been called.
-        services.Replace(ServiceDescriptor.Singleton<Func<string, IKeyValueStore>>(sp =>
+        services.TryAddSingleton<NatsCachingMarker>();
+
+        // 3. Decorate the Store Factory via a keyed inner registration so other decorators
+        // can compose without reconstructing the raw store graph.
+        var descriptor = services.LastOrDefault(d => d.ServiceType == typeof(Func<string, IKeyValueStore>));
+        if (descriptor == null)
+        {
+            throw new InvalidOperationException("Func<string, IKeyValueStore> is not registered. Ensure NATS Core is registered before adding caching.");
+        }
+
+        services.Remove(descriptor);
+
+        if (descriptor.ImplementationInstance != null)
+        {
+            services.AddKeyedSingleton(typeof(Func<string, IKeyValueStore>), CachingServiceKeys.InnerKeyValueStoreFactory, descriptor.ImplementationInstance);
+        }
+        else if (descriptor.ImplementationFactory != null)
+        {
+            services.AddKeyedSingleton(typeof(Func<string, IKeyValueStore>), CachingServiceKeys.InnerKeyValueStoreFactory, (sp, _) => descriptor.ImplementationFactory(sp));
+        }
+        else if (descriptor.ImplementationType != null)
+        {
+            services.AddKeyedSingleton(typeof(Func<string, IKeyValueStore>), CachingServiceKeys.InnerKeyValueStoreFactory, descriptor.ImplementationType);
+        }
+
+        services.AddSingleton<Func<string, IKeyValueStore>>(sp =>
         {
             var fusionCache = sp.GetRequiredService<IFusionCache>();
             var loggerFactory = sp.GetRequiredService<ILoggerFactory>();
             var cacheConfig = sp.GetRequiredService<IOptions<FusionCacheConfiguration>>().Value;
-            
-            // Re-resolve the dependencies needed for the Core NatsKeyValueStore
-            var kvContext = sp.GetRequiredService<global::NATS.Client.KeyValueStore.INatsKVContext>();
+            var innerFactory = sp.GetRequiredKeyedService<Func<string, IKeyValueStore>>(CachingServiceKeys.InnerKeyValueStoreFactory);
             
             return bucket =>
             {
-                // 1. Inner Store (Raw NATS)
-                var innerLogger = loggerFactory.CreateLogger<FlySwattr.NATS.Core.Stores.NatsKeyValueStore>();
-                var inner = new FlySwattr.NATS.Core.Stores.NatsKeyValueStore(kvContext, bucket, innerLogger);
-
-                // 2. Outer Store (Cached)
+                var inner = innerFactory(bucket);
                 var cacheLogger = loggerFactory.CreateLogger<CachingKeyValueStore>();
                 return new CachingKeyValueStore(inner, fusionCache, cacheConfig, bucket, cacheLogger);
             };
-        }));
+        });
 
         return services;
     }

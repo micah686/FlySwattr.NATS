@@ -1,5 +1,6 @@
 using FlySwattr.NATS.Caching.Extensions;
 using FlySwattr.NATS.Configuration;
+using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core.Extensions;
 using FlySwattr.NATS.DistributedLock.Extensions;
 using FlySwattr.NATS.Hosting.Extensions;
@@ -7,7 +8,10 @@ using FlySwattr.NATS.Resilience.Extensions;
 using FlySwattr.NATS.Topology.Extensions;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using NATS.Client.Core;
 
 namespace FlySwattr.NATS.Extensions;
 
@@ -93,6 +97,17 @@ public static class ServiceCollectionExtensions
             opts.CircuitBreakerBreakDuration = options.ConsumerResilience.CircuitBreakerBreakDuration;
         });
 
+        // 0. Eager Connection Warmup (before everything else)
+        if (options.EagerConnect)
+        {
+            services.AddSingleton<IHostedService>(sp =>
+            {
+                var connection = sp.GetRequiredService<NatsConnection>();
+                var logger = sp.GetRequiredService<ILogger<FlySwattr.NATS.Hosting.Services.NatsConnectionWarmupService>>();
+                return new FlySwattr.NATS.Hosting.Services.NatsConnectionWarmupService(connection, logger, options.ConnectionWarmupTimeout);
+            });
+        }
+
         // 1. Core NATS (always required)
         // Establishes connection, serializers, bus, and store factories
         services.AddFlySwattrNatsCore(coreOpts =>
@@ -104,6 +119,7 @@ public static class ServiceCollectionExtensions
             coreOpts.MaxReconnect = options.Core.MaxReconnect;
             coreOpts.MaxConcurrency = options.Core.MaxConcurrency;
             coreOpts.MaxPayloadSize = options.Core.MaxPayloadSize;
+            coreOpts.EnforceSchemaFingerprint = options.EnforceSchemaFingerprint;
         });
 
         // 2. Payload Offloading (Claim Check pattern)
@@ -175,6 +191,7 @@ public static class ServiceCollectionExtensions
                 if (options.EnablePayloadOffloading)
                 {
                     startupOpts.PayloadOffloadingBucketName = options.ClaimCheckBucket;
+                    startupOpts.ClaimCheckTtl = options.ClaimCheckTtl;
                 }
             });
         }
@@ -200,6 +217,38 @@ public static class ServiceCollectionExtensions
             services.AddNatsDlqAdvisoryListener();
         }
 
+        // 9. Claim-Check Cleanup (Layer 3 — optional background sweep)
+        if (options.EnableClaimCheckCleanup && options.EnablePayloadOffloading)
+        {
+            services.AddSingleton<IHostedService>(sp =>
+            {
+                var objectStore = sp.GetRequiredKeyedService<IObjectStore>(options.ClaimCheckBucket);
+                var logger = sp.GetRequiredService<ILogger<FlySwattr.NATS.Hosting.Services.ClaimCheckCleanupService>>();
+                return new FlySwattr.NATS.Hosting.Services.ClaimCheckCleanupService(
+                    objectStore, logger, options.ClaimCheckTtl, options.ClaimCheckSweepInterval);
+            });
+        }
+
+        ValidateDecoratorOrdering(services);
         return services;
     }
+
+    private static void ValidateDecoratorOrdering(IServiceCollection services)
+    {
+        var offloadingIndex = FindLastRegistrationIndex<NatsPayloadOffloadingMarker>(services);
+        var resilienceIndex = FindLastRegistrationIndex<NatsResilienceMarker>(services);
+
+        if (offloadingIndex >= 0 && resilienceIndex >= 0 && offloadingIndex > resilienceIndex)
+        {
+            throw new InvalidOperationException("Payload offloading must be registered before resilience so the decorator chain remains Core -> Offloading -> Resilience.");
+        }
+    }
+
+    private static int FindLastRegistrationIndex<TMarker>(IServiceCollection services)
+        => services
+            .Select((descriptor, index) => (descriptor, index))
+            .Where(x => x.descriptor.ServiceType == typeof(TMarker))
+            .Select(x => x.index)
+            .DefaultIfEmpty(-1)
+            .Max();
 }

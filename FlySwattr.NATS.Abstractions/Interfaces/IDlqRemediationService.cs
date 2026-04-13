@@ -43,9 +43,13 @@ public interface IDlqRemediationService
     /// 4. Mark the entry as Resolved on success
     /// </remarks>
     /// <param name="id">The unique identifier of the DLQ entry.</param>
+    /// <param name="replayMode">Controls whether replay uses a stable or unique message ID.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The result of the replay operation.</returns>
-    Task<DlqRemediationResult> ReplayAsync(string id, CancellationToken cancellationToken = default);
+    Task<DlqRemediationResult> ReplayAsync(
+        string id,
+        DlqReplayMode replayMode = DlqReplayMode.Idempotent,
+        CancellationToken cancellationToken = default);
     
     /// <summary>
     /// Replays a DLQ message with a modified payload.
@@ -57,9 +61,14 @@ public interface IDlqRemediationService
     /// <typeparam name="T">The type of the modified payload.</typeparam>
     /// <param name="id">The unique identifier of the DLQ entry.</param>
     /// <param name="modifiedPayload">The corrected payload to publish.</param>
+    /// <param name="replayMode">Controls whether replay uses a stable or unique message ID.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The result of the replay operation.</returns>
-    Task<DlqRemediationResult> ReplayWithModificationAsync<T>(string id, T modifiedPayload, CancellationToken cancellationToken = default);
+    Task<DlqRemediationResult> ReplayWithModificationAsync<T>(
+        string id,
+        T modifiedPayload,
+        DlqReplayMode replayMode = DlqReplayMode.Idempotent,
+        CancellationToken cancellationToken = default);
     
     /// <summary>
     /// Archives a DLQ entry without replaying it.

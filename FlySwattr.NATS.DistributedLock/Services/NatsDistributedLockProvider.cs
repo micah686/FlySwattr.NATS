@@ -18,6 +18,7 @@ internal class NatsDistributedLockProvider : IDistributedLockProvider
     private readonly TimeSpan _ttl;
     private const string BucketName = "topology_locks";
     private static readonly TimeSpan DefaultTtl = TimeSpan.FromMinutes(5);
+    private readonly string _bucketName;
 
     public NatsDistributedLockProvider(INatsKVContext kvContext, ILogger<NatsDistributedLockProvider> logger)
         : this(kvContext, logger, DefaultTtl)
@@ -29,13 +30,17 @@ internal class NatsDistributedLockProvider : IDistributedLockProvider
         _kvContext = kvContext;
         _logger = logger;
         _ttl = ttl;
+        _bucketName = GetBucketNameForTtl(ttl);
     }
 
     public IDistributedLock CreateLock(string name)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
-        return new NatsDistributedLock(_kvContext, name, _logger, BucketName, _ttl);
+        return new NatsDistributedLock(_kvContext, name, _logger, _bucketName, _ttl);
     }
+
+    internal static string GetBucketNameForTtl(TimeSpan ttl)
+        => $"{BucketName}_{Math.Max(1L, (long)Math.Ceiling(ttl.TotalMilliseconds))}ms";
 
     private sealed class NatsDistributedLock : IDistributedLock
     {
@@ -60,25 +65,23 @@ internal class NatsDistributedLockProvider : IDistributedLockProvider
             _ttl = ttl;
         }
 
-        #region Obsolete Methods
-        //These are only here to satisfy the DistributedLock.Core interfaces, but should not be used.
-        
-        [Obsolete("Prefer TryAcquireAsync to avoid thread pool starvation. This method may deadlock in SynchronizationContext environments.")]
-        public IDistributedSynchronizationHandle? TryAcquire(TimeSpan timeout = default, CancellationToken cancellationToken = default)
-        {
-            _logger.LogWarning("TryAcquire should not be used. Use AcquireAsync instead.");
-            // Task.Run offloads to a thread pool thread without a SynchronizationContext, preventing deadlock
-            return Task.Run(() => TryAcquireAsync(timeout, cancellationToken).AsTask(), cancellationToken).GetAwaiter().GetResult();
-        }
+        #region Obsolete
+        // Explicit interface implementations for the synchronous IDistributedLock members.
+        // Explicit implementation means these methods are invisible on the concrete type and
+        // only reachable via an IDistributedLock-typed variable.
+        // Obsolete(error:true) turns any such call-site into a compilation error, so the methods
+        // satisfy the interface contract without being callable in practice.
+        [Obsolete("Synchronous locking is not supported. Use TryAcquireAsync instead.", error: true)]
+        [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+        IDistributedSynchronizationHandle? IDistributedLock.TryAcquire(TimeSpan timeout, CancellationToken cancellationToken)
+            => throw new NotSupportedException("Synchronous locking is not supported. Use TryAcquireAsync instead.");
 
-        [Obsolete("Prefer AcquireAsync to avoid thread pool starvation. This method may deadlock in SynchronizationContext environments.")]
-        public IDistributedSynchronizationHandle Acquire(TimeSpan? timeout = null, CancellationToken cancellationToken = default)
-        {
-            _logger.LogWarning("Acquire should not be used. Use AcquireAsync instead.");
-            // Task.Run offloads to a thread pool thread without a SynchronizationContext, preventing deadlock
-            return Task.Run(() => AcquireAsync(timeout, cancellationToken).AsTask(), cancellationToken).GetAwaiter().GetResult();
-        }
-        #endregion        
+        [Obsolete("Synchronous locking is not supported. Use AcquireAsync instead.", error: true)]
+        [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+        IDistributedSynchronizationHandle IDistributedLock.Acquire(TimeSpan? timeout, CancellationToken cancellationToken)
+            => throw new NotSupportedException("Synchronous locking is not supported. Use AcquireAsync instead.");
+        #endregion
+        
 
         public async ValueTask<IDistributedSynchronizationHandle?> TryAcquireAsync(TimeSpan timeout = default, CancellationToken cancellationToken = default)
         {
@@ -373,8 +376,8 @@ internal class NatsDistributedLockProvider : IDistributedLockProvider
             _logger = logger;
             _currentRevision = initialRevision;
             
-            // Start heartbeat at half the TTL interval
-            _heartbeatTask = HeartbeatLoopAsync(ttl / 2, _heartbeatCts.Token);
+            // Start heartbeat at one third of the TTL interval to give more recovery margin.
+            _heartbeatTask = HeartbeatLoopAsync(TimeSpan.FromTicks(Math.Max(1, ttl.Ticks / 3)), _heartbeatCts.Token);
         }
 
         private async Task HeartbeatLoopAsync(TimeSpan interval, CancellationToken ct)
@@ -438,6 +441,7 @@ internal class NatsDistributedLockProvider : IDistributedLockProvider
             }
         }
 
+        [Obsolete("Synchronous dispose is best-effort only. Prefer DisposeAsync for deterministic release.", error: false)]
         public void Dispose()
         {
             // Fire-and-forget with best-effort error handling

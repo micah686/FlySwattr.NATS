@@ -1,6 +1,8 @@
 using System.Text.Json;
 using FlySwattr.NATS.Abstractions;
+using FlySwattr.NATS.Core.Configuration;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using NATS.Client.JetStream.Models;
 using NATS.Client.KeyValueStore;
 
@@ -16,20 +18,22 @@ internal class NatsDlqStore : IDlqStore
     private const string BucketName = "fs-dlq-entries";
     
     private readonly INatsKVContext _kvContext;
-    private readonly IKeyValueStore _store;
     private readonly ILogger<NatsDlqStore> _logger;
+    private readonly DlqStoreFailureOptions _failureOptions;
     
     private readonly SemaphoreSlim _initLock = new(1, 1);
     private bool _isInitialized;
+    private bool _fallbackMode;
+    private INatsKVStore? _store;
 
     public NatsDlqStore(
         INatsKVContext kvContext,
-        Func<string, IKeyValueStore> storeFactory,
-        ILogger<NatsDlqStore> logger)
+        ILogger<NatsDlqStore> logger,
+        IOptions<DlqStoreFailureOptions>? failureOptions = null)
     {
         _kvContext = kvContext;
-        _store = storeFactory(BucketName);
         _logger = logger;
+        _failureOptions = failureOptions?.Value ?? new DlqStoreFailureOptions();
     }
 
     private async ValueTask EnsureInitializedAsync(CancellationToken cancellationToken)
@@ -46,7 +50,7 @@ internal class NatsDlqStore : IDlqStore
                 // First check if the bucket already exists to avoid conflict errors
                 try
                 {
-                    await _kvContext.GetStoreAsync(BucketName, cancellationToken: cancellationToken);
+                    _store = await _kvContext.GetStoreAsync(BucketName, cancellationToken: cancellationToken);
                     _logger.LogDebug("DLQ KV bucket {BucketName} already exists", BucketName);
                 }
                 catch
@@ -58,14 +62,33 @@ internal class NatsDlqStore : IDlqStore
                         Description = "Dead Letter Queue Storage",
                         History = 1
                     }, cancellationToken: cancellationToken);
+                    _store = await _kvContext.GetStoreAsync(BucketName, cancellationToken: cancellationToken);
                     
                     _logger.LogDebug("Created DLQ KV bucket {BucketName}", BucketName);
                 }
             }
             catch (Exception ex)
             {
-                // Log and continue - if we still can't create it or get it, we'll let actual operations fail
-                _logger.LogWarning(ex, "Attempt to ensure DLQ bucket {BucketName} failed. Proceeding hoping it exists or is accessible.", BucketName);
+                switch (_failureOptions.InitializationFailurePolicy)
+                {
+                    case DlqStoreFailurePolicy.Propagate:
+                        _logger.LogError(ex, "DLQ bucket {BucketName} initialization failed. Policy: Propagate — re-throwing.", BucketName);
+                        throw;
+
+                    case DlqStoreFailurePolicy.FallbackToLogOnly:
+                        _logger.LogWarning(ex,
+                            "DLQ bucket {BucketName} initialization failed. Policy: FallbackToLogOnly — " +
+                            "DLQ entries will be written to logs instead of KV store.", BucketName);
+                        _fallbackMode = true;
+                        break;
+
+                    case DlqStoreFailurePolicy.LogAndContinue:
+                    default:
+                        _logger.LogWarning(ex,
+                            "Attempt to ensure DLQ bucket {BucketName} failed. Policy: LogAndContinue — " +
+                            "proceeding; individual operations may fail.", BucketName);
+                        break;
+                }
             }
 
             _isInitialized = true;
@@ -73,6 +96,48 @@ internal class NatsDlqStore : IDlqStore
         finally
         {
             _initLock.Release();
+        }
+    }
+
+    private INatsKVStore Store
+        => _store ?? throw new InvalidOperationException("DLQ KV bucket is not initialized.");
+
+    /// <summary>
+    /// Checks if the store is in fallback mode or has no store reference,
+    /// and applies the configured operation failure policy.
+    /// Returns true if the caller should short-circuit (fallback handled).
+    /// </summary>
+    private bool TryHandleUnavailable(string operation, string id)
+    {
+        if (!_fallbackMode && _store != null)
+            return false;
+
+        if (_fallbackMode)
+        {
+            _logger.LogError(
+                "DLQ store is in fallback-to-log mode. Operation {Operation} for entry {Id} " +
+                "will not be persisted to KV store.", operation, id);
+            return true;
+        }
+
+        // _store is null — initialization failed but policy allowed continue
+        switch (_failureOptions.OperationFailurePolicy)
+        {
+            case DlqStoreFailurePolicy.Propagate:
+                throw new InvalidOperationException(
+                    $"DLQ KV bucket is not initialized. Cannot perform {operation} for entry {id}.");
+
+            case DlqStoreFailurePolicy.FallbackToLogOnly:
+                _logger.LogError(
+                    "DLQ store unavailable. Operation {Operation} for entry {Id} " +
+                    "will be logged only.", operation, id);
+                return true;
+
+            case DlqStoreFailurePolicy.LogAndContinue:
+            default:
+                _logger.LogWarning(
+                    "DLQ store unavailable. Operation {Operation} for entry {Id} skipped.", operation, id);
+                return true;
         }
     }
 
@@ -111,11 +176,22 @@ internal class NatsDlqStore : IDlqStore
 
         await EnsureInitializedAsync(cancellationToken);
 
+        if (TryHandleUnavailable("Store", entry.Id))
+        {
+            // Log the full entry for manual recovery
+            _logger.LogError(
+                "DLQ entry logged (not persisted): Id={Id}, Stream={Stream}, Consumer={Consumer}, " +
+                "Subject={Subject}, Sequence={Sequence}, Error={Error}",
+                entry.Id, entry.OriginalStream, entry.OriginalConsumer,
+                entry.OriginalSubject, entry.OriginalSequence, entry.ErrorReason);
+            return;
+        }
+
         try
         {
             var key = BuildKey(entry.OriginalStream, entry.OriginalConsumer, entry.Id);
             var json = JsonSerializer.Serialize(entry);
-            await _store.PutAsync(key, json, cancellationToken);
+            await Store.PutAsync(key, json, cancellationToken: cancellationToken);
             
             _logger.LogDebug("Stored DLQ entry {MessageId} for {Stream}/{Consumer} with key {Key}", 
                 entry.Id, entry.OriginalStream, entry.OriginalConsumer, key);
@@ -134,17 +210,24 @@ internal class NatsDlqStore : IDlqStore
 
         await EnsureInitializedAsync(cancellationToken);
 
+        if (TryHandleUnavailable("Get", id))
+            return null;
+
         try
         {
             // The id parameter is the full hierarchical key
-            var json = await _store.GetAsync<string>(id, cancellationToken);
-            
-            if (string.IsNullOrEmpty(json))
+            var kvEntry = await Store.GetEntryAsync<string>(id, cancellationToken: cancellationToken);
+            if (string.IsNullOrEmpty(kvEntry.Value))
             {
                 return null;
             }
 
-            return JsonSerializer.Deserialize<DlqMessageEntry>(json);
+            var entry = JsonSerializer.Deserialize<DlqMessageEntry>(kvEntry.Value);
+            return entry is null ? null : entry with { StoreRevision = kvEntry.Revision };
+        }
+        catch (NatsKVKeyNotFoundException)
+        {
+            return null;
         }
         catch (Exception ex)
         {
@@ -162,6 +245,9 @@ internal class NatsDlqStore : IDlqStore
     {
         await EnsureInitializedAsync(cancellationToken);
 
+        if (TryHandleUnavailable("List", "(all)"))
+            return Array.Empty<DlqMessageEntry>();
+
         try
         {
             var pattern = BuildFilterPattern(filterStream, filterConsumer);
@@ -169,7 +255,7 @@ internal class NatsDlqStore : IDlqStore
             
             var entries = new List<DlqMessageEntry>();
             
-            await foreach (var key in _store.GetKeysAsync([pattern], cancellationToken))
+            await foreach (var key in Store.GetKeysAsync([pattern], cancellationToken: cancellationToken))
             {
                 if (entries.Count >= limit) 
                     break;
@@ -193,28 +279,55 @@ internal class NatsDlqStore : IDlqStore
     }
 
     /// <inheritdoc />
-    public async Task<bool> UpdateStatusAsync(string id, DlqMessageStatus status, CancellationToken cancellationToken = default)
+    public async Task<DlqEntryUpdateResult> UpdateStatusAsync(
+        string id,
+        DlqMessageStatus status,
+        ulong? expectedRevision = null,
+        CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
 
         await EnsureInitializedAsync(cancellationToken);
 
+        if (TryHandleUnavailable("UpdateStatus", id))
+            return new DlqEntryUpdateResult(DlqEntryUpdateOutcome.NotFound);
+
         try
         {
-            var entry = await GetAsync(id, cancellationToken);
-            if (entry == null)
+            var kvEntry = await Store.GetEntryAsync<string>(id, cancellationToken: cancellationToken);
+            if (string.IsNullOrEmpty(kvEntry.Value))
             {
                 _logger.LogWarning("Cannot update status for DLQ entry {MessageId}: not found", id);
-                return false;
+                return new DlqEntryUpdateResult(DlqEntryUpdateOutcome.NotFound);
             }
 
-            var updatedEntry = entry with { Status = status };
-            // Re-store with the same key (id is already the full hierarchical key)
+            var entry = JsonSerializer.Deserialize<DlqMessageEntry>(kvEntry.Value);
+            if (entry == null)
+            {
+                throw new JsonException($"DLQ entry {id} could not be deserialized.");
+            }
+
+            var updatedEntry = entry with { Status = status, StoreRevision = null };
             var json = JsonSerializer.Serialize(updatedEntry);
-            await _store.PutAsync(id, json, cancellationToken);
-            
-            _logger.LogDebug("Updated DLQ entry {MessageId} status to {Status}", id, status);
-            return true;
+            var newRevision = await Store.UpdateAsync(
+                id,
+                json,
+                expectedRevision ?? kvEntry.Revision,
+                serializer: null,
+                cancellationToken: cancellationToken);
+
+            _logger.LogDebug("Updated DLQ entry {MessageId} status to {Status} at revision {Revision}", id, status, newRevision);
+            return new DlqEntryUpdateResult(DlqEntryUpdateOutcome.Updated, newRevision);
+        }
+        catch (NatsKVKeyNotFoundException)
+        {
+            _logger.LogWarning("Cannot update status for DLQ entry {MessageId}: not found", id);
+            return new DlqEntryUpdateResult(DlqEntryUpdateOutcome.NotFound);
+        }
+        catch (NatsKVWrongLastRevisionException)
+        {
+            _logger.LogWarning("Cannot update status for DLQ entry {MessageId}: revision conflict", id);
+            return new DlqEntryUpdateResult(DlqEntryUpdateOutcome.Conflict);
         }
         catch (Exception ex)
         {
@@ -230,6 +343,9 @@ internal class NatsDlqStore : IDlqStore
 
         await EnsureInitializedAsync(cancellationToken);
 
+        if (TryHandleUnavailable("Delete", id))
+            return false;
+
         try
         {
             // Check if entry exists first (id is the full hierarchical key)
@@ -240,7 +356,7 @@ internal class NatsDlqStore : IDlqStore
                 return false;
             }
 
-            await _store.DeleteAsync(id, cancellationToken);
+            await Store.DeleteAsync(id, cancellationToken: cancellationToken);
             _logger.LogDebug("Deleted DLQ entry {MessageId}", id);
             return true;
         }

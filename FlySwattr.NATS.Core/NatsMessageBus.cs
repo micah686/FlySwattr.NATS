@@ -2,6 +2,8 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using FlySwattr.NATS.Abstractions;
+using FlySwattr.NATS.Core.Services;
+using FlySwattr.NATS.Core.Serializers;
 using FlySwattr.NATS.Core.Telemetry;
 using Microsoft.Extensions.Logging;
 using NATS.Client.Core;
@@ -10,21 +12,34 @@ namespace FlySwattr.NATS.Core;
 
 public class NatsMessageBus : IMessageBus, IAsyncDisposable
 {
+    private static readonly string[] ReservedHeaders =
+    [
+        "traceparent",
+        "tracestate"
+    ];
+
     private readonly INatsConnection _connection;
     private readonly ILogger<NatsMessageBus> _logger;
+    private readonly Func<double> _randomNextDouble;
     private readonly ConcurrentDictionary<Guid, Task> _backgroundTasks = new();
     private readonly ConcurrentDictionary<Guid, IAsyncDisposable> _subscriptions = new();
     private readonly CancellationTokenSource _cts = new();
-    private bool _disposed;
+    private int _disposed;
 
     public event EventHandler<NatsConnectionState>? ConnectionStateChanged;
 
     private static readonly TimeSpan DefaultRequestTimeout = TimeSpan.FromSeconds(30);
 
     public NatsMessageBus(INatsConnection connection, ILogger<NatsMessageBus> logger)
+        : this(connection, logger, () => Random.Shared.NextDouble())
+    {
+    }
+
+    internal NatsMessageBus(INatsConnection connection, ILogger<NatsMessageBus> logger, Func<double> randomNextDouble)
     {
         _connection = connection;
         _logger = logger;
+        _randomNextDouble = randomNextDouble;
 
         // Use events for connection state monitoring to avoid polling overhead.
         _connection.ConnectionOpened += OnConnectionEvent;
@@ -67,6 +82,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
 
     public async Task PublishAsync<T>(string subject, T message, CancellationToken cancellationToken = default)
     {
+        MessageSecurity.ValidatePublishSubject(subject);
         var stopwatch = Stopwatch.StartNew();
         using var activity = NatsTelemetry.ActivitySource.StartActivity($"{subject} publish", ActivityKind.Producer);
         if (activity != null)
@@ -78,6 +94,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
 
         var natsHeaders = new NatsHeaders();
         NatsTelemetry.InjectTraceContext(activity, natsHeaders);
+        MemoryPackSchemaMetadata.AddHeadersIfNeeded<T>(natsHeaders);
         
         await _connection.PublishAsync(subject, message, headers: natsHeaders, cancellationToken: cancellationToken);
         
@@ -90,6 +107,8 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
 
     public async Task PublishAsync<T>(string subject, T message, MessageHeaders? headers, CancellationToken cancellationToken = default)
     {
+        MessageSecurity.ValidatePublishSubject(subject);
+        MessageSecurity.RejectReservedHeaders(headers, ReservedHeaders);
         var stopwatch = Stopwatch.StartNew();
         using var activity = NatsTelemetry.ActivitySource.StartActivity($"{subject} publish", ActivityKind.Producer);
         if (activity != null)
@@ -124,6 +143,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
         }
         
         NatsTelemetry.InjectTraceContext(activity, natsHeaders);
+        MemoryPackSchemaMetadata.AddHeadersIfNeeded<T>(natsHeaders);
         
         await _connection.PublishAsync(subject, message, headers: natsHeaders, cancellationToken: cancellationToken);
         
@@ -134,12 +154,13 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
         NatsTelemetry.PublishDuration.Record(stopwatch.Elapsed.TotalMilliseconds, tags);
     }
 
-    public async Task SubscribeAsync<T>(string subject, Func<IMessageContext<T>, Task> handler, string? queueGroup = null, CancellationToken cancellationToken = default)
+    public async Task<ISubscription> SubscribeAsync<T>(string subject, Func<IMessageContext<T>, Task> handler, string? queueGroup = null, CancellationToken cancellationToken = default)
     {
         var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
         var token = linkedCts.Token;
         var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var taskId = Guid.NewGuid();
+        var subscriptionHandle = new NatsSubscriptionHandle(taskId, StopSubscriptionAsync);
 
         _logger.LogInformation("Starting subscription for {Subject}", subject);
 
@@ -217,11 +238,12 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Subscription loop failed for {Subject}. Reconnecting in {Backoff}s...", subject, backoff.TotalSeconds);
+                    var jitteredBackoff = ApplyJitter(backoff);
+                    _logger.LogError(ex, "Subscription loop failed for {Subject}. Reconnecting in {BackoffMs}ms...", subject, jitteredBackoff.TotalMilliseconds);
 
                     try
                     {
-                        await Task.Delay(backoff, token);
+                        await Task.Delay(jitteredBackoff, token);
                     }
                     catch (OperationCanceledException) { break; }
 
@@ -261,12 +283,48 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
         catch (TimeoutException)
         {
             _logger.LogWarning("Subscription to {Subject} timed out waiting for initial connection.", subject);
+            await linkedCts.CancelAsync();
             throw new TimeoutException($"Subscription to {subject} timed out waiting for initial connection.");
         }
         catch when (token.IsCancellationRequested)
         {
             _logger.LogWarning("SubscribeAsync cancelled for {Subject} during initial wait", subject);
         }
+
+        return subscriptionHandle;
+    }
+
+    private async Task StopSubscriptionAsync(Guid subscriptionId, CancellationToken cancellationToken)
+    {
+        if (_subscriptions.TryRemove(subscriptionId, out var subscription))
+        {
+            await subscription.DisposeAsync();
+        }
+
+        if (_backgroundTasks.TryGetValue(subscriptionId, out var task))
+        {
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutCts.CancelAfter(TimeSpan.FromSeconds(30));
+            try
+            {
+                await task.WaitAsync(timeoutCts.Token);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("Timed out waiting for subscription {SubscriptionId} to stop", subscriptionId);
+            }
+        }
+    }
+
+    private TimeSpan ApplyJitter(TimeSpan baseDelay)
+    {
+        var jitterFactor = 1.0 + (_randomNextDouble() - 0.5) * 0.5;
+        var jitteredMs = Math.Max(1, baseDelay.TotalMilliseconds * jitterFactor);
+        return TimeSpan.FromMilliseconds(jitteredMs);
     }
 
     public async Task<TResponse?> RequestAsync<TRequest, TResponse>(string subject, TRequest request, TimeSpan timeout, CancellationToken cancellationToken = default)
@@ -294,8 +352,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (_disposed) return;
-        _disposed = true;
+        if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
 
         // Unsubscribe events
         _connection.ConnectionOpened -= OnConnectionEvent;
@@ -303,26 +360,10 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
         _connection.ReconnectFailed -= OnConnectionEvent;
 
         await _cts.CancelAsync();
-        
-        var subscriptionsSnapshot = _subscriptions.ToArray();
 
-        foreach (var kvp in subscriptionsSnapshot)
-        {
-            try
-            {
-                _subscriptions.TryRemove(kvp.Key, out _);
-                await kvp.Value.DisposeAsync();
-            }
-            catch (OperationCanceledException)
-            {
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Error disposing subscription {Id}", kvp.Key);
-            }
-        }
-        _subscriptions.Clear();
-        
+        // Background tasks own their subscriptions: each task disposes its own INatsSub in its
+        // finally block and then removes itself from _subscriptions.  Wait for them to finish
+        // before touching the dictionary so we don't double-dispose the same sub concurrently.
         using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         try
         {
@@ -339,8 +380,48 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
         {
             _logger.LogWarning(ex, "Error during message bus shutdown");
         }
+
+        // Safety net: dispose any subscriptions whose background tasks did not complete in time.
+        // TryRemove ensures a subscription is only disposed once even if a slow task is still
+        // winding down and tries to remove the same entry after we do.
+        foreach (var kvp in _subscriptions)
+        {
+            if (_subscriptions.TryRemove(kvp.Key, out var sub))
+            {
+                try { await sub.DisposeAsync(); }
+                catch (OperationCanceledException) { }
+                catch (Exception ex) { _logger.LogWarning(ex, "Error disposing subscription {Id}", kvp.Key); }
+            }
+        }
+
         _cts.Dispose();
     }
+}
+
+internal sealed class NatsSubscriptionHandle : ISubscription
+{
+    private readonly Func<Guid, CancellationToken, Task> _stopAsync;
+    private int _stopped;
+
+    public NatsSubscriptionHandle(Guid id, Func<Guid, CancellationToken, Task> stopAsync)
+    {
+        Id = id;
+        _stopAsync = stopAsync;
+    }
+
+    public Guid Id { get; }
+
+    public async Task StopAsync(CancellationToken cancellationToken = default)
+    {
+        if (Interlocked.Exchange(ref _stopped, 1) != 0)
+        {
+            return;
+        }
+
+        await _stopAsync(Id, cancellationToken);
+    }
+
+    public ValueTask DisposeAsync() => new(StopAsync());
 }
 
 internal class MessageContext<T> : IMessageContext<T>

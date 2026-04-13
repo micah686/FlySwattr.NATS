@@ -2,6 +2,7 @@ using System.Text.Json;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core.Configuration;
 using FlySwattr.NATS.Core.Serializers;
+using FlySwattr.NATS.Core.Services;
 using FlySwattr.NATS.Core.Stores;
 using MemoryPack;
 using Microsoft.Extensions.DependencyInjection;
@@ -23,14 +24,21 @@ public static class ServiceCollectionExtensions
     {
         // 1. Configuration
         services.AddOptions<NatsConfiguration>().Configure(configure);
+        services.AddOptions<MessageTypeAliasOptions>();
+        services.AddOptions<WireCompatibilityOptions>();
+        services.AddOptions<DlqStoreFailureOptions>();
         services.AddSingleton(sp => sp.GetRequiredService<IOptions<NatsConfiguration>>().Value);
+        services.TryAddSingleton<NatsCoreServicesMarker>();
 
         // 2. Serializers
         services.AddSingleton<INatsSerializerRegistry, HybridSerializerRegistry>();
         services.AddSingleton<IMessageSerializer>(sp =>
         {
             var config = sp.GetRequiredService<NatsConfiguration>();
-            return new HybridNatsSerializer(maxPayloadSize: config.MaxPayloadSize);
+            return new HybridNatsSerializer(
+                maxPayloadSize: config.MaxPayloadSize,
+                enforceSchemaFingerprint: config.EnforceSchemaFingerprint,
+                logger: sp.GetRequiredService<ILogger<HybridNatsSerializer>>());
         });
         
         
@@ -59,15 +67,18 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<INatsObjContext>(sp => new NatsObjContext(sp.GetRequiredService<INatsJSContext>()));
 
         services.AddSingleton<IMessageBus, NatsMessageBus>();
+        services.AddSingleton<BackgroundTaskManager>();
+        services.AddSingleton<IMessageTypeAliasRegistry, MessageTypeAliasRegistry>();
         
         // Register NatsJetStreamBus as the implementation
         services.AddSingleton<NatsJetStreamBus>(sp =>
         {
-            
             return new NatsJetStreamBus(
                 sp.GetRequiredService<INatsJSContext>(),
                 sp.GetRequiredService<ILogger<NatsJetStreamBus>>(),
-                sp.GetRequiredService<IMessageSerializer>());
+                sp.GetRequiredService<IMessageSerializer>(),
+                sp.GetRequiredService<BackgroundTaskManager>(),
+                sp.GetService<IOptions<WireCompatibilityOptions>>());
         });
         
         // 4. Stores (Factories returning Core implementations)
@@ -99,10 +110,26 @@ public static class ServiceCollectionExtensions
             sp.GetRequiredService<IDlqStore>(),
             sp.GetRequiredService<IJetStreamPublisher>(),
             sp.GetRequiredService<IMessageSerializer>(),
+            sp.GetRequiredService<IMessageTypeAliasRegistry>(),
             sp.GetRequiredService<ILogger<Services.NatsDlqRemediationService>>(),
+            sp.GetRequiredService<NatsJetStreamBus>(),
             sp.GetService<IObjectStore>(),
             sp.GetService<IDlqNotificationService>()
         ));
+
+        return services;
+    }
+
+    public static IServiceCollection AddMessageTypeAlias<TMessage>(
+        this IServiceCollection services,
+        string alias)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(alias);
+
+        services.Configure<MessageTypeAliasOptions>(options =>
+        {
+            options.AliasMappings[alias] = typeof(TMessage);
+        });
 
         return services;
     }
@@ -125,8 +152,19 @@ public static class ServiceCollectionExtensions
         Action<PayloadOffloadingOptions>? configure = null,
         string objectStoreBucket = "claim-checks")
     {
+        if (!services.Any(d => d.ServiceType == typeof(NatsCoreServicesMarker)))
+        {
+            throw new InvalidOperationException("AddPayloadOffloading requires AddFlySwattrNatsCore to be registered first.");
+        }
+
+        if (services.Any(d => d.ServiceType == typeof(NatsResilienceMarker)))
+        {
+            throw new InvalidOperationException("AddPayloadOffloading must be registered before AddFlySwattrNatsResilience so resilience wraps the offloading decorators.");
+        }
+
         // 1. Register Configuration
         services.AddOptions<PayloadOffloadingOptions>().Configure(configure ?? (_ => { }));
+        services.TryAddSingleton<NatsPayloadOffloadingMarker>();
 
         // 2. Register a keyed IObjectStore for claim checks if not already registered
         services.AddKeyedSingleton<IObjectStore>(objectStoreBucket, (sp, _) =>
@@ -143,10 +181,12 @@ public static class ServiceCollectionExtensions
             var coreBus = sp.GetRequiredService<NatsJetStreamBus>();
             var objectStore = sp.GetRequiredKeyedService<IObjectStore>(objectStoreBucket);
             var serializer = sp.GetRequiredService<IMessageSerializer>();
+            var typeAliasRegistry = sp.GetRequiredService<IMessageTypeAliasRegistry>();
             var options = sp.GetRequiredService<IOptions<PayloadOffloadingOptions>>();
             var logger = sp.GetRequiredService<ILogger<Decorators.OffloadingJetStreamPublisher>>();
 
-            return new Decorators.OffloadingJetStreamPublisher(coreBus, objectStore, serializer, options, logger);
+            return new Decorators.OffloadingJetStreamPublisher(coreBus, coreBus, objectStore, serializer, typeAliasRegistry, options, logger,
+                sp.GetService<IOptions<WireCompatibilityOptions>>());
         }));
 
         // 4. Replace IJetStreamConsumer with Offloading decorator

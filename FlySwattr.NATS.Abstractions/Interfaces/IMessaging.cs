@@ -36,7 +36,7 @@ public interface IMessageBus
     /// <param name="handler">The handler to process incoming messages.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>A task representing the asynchronous operation.</returns>
-    Task SubscribeAsync<T>(string subject, Func<IMessageContext<T>, Task> handler, string? queueGroup = null, CancellationToken cancellationToken = default);
+    Task<ISubscription> SubscribeAsync<T>(string subject, Func<IMessageContext<T>, Task> handler, string? queueGroup = null, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Sends a request and waits for a response.
@@ -49,6 +49,12 @@ public interface IMessageBus
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The response message, or default if no response is received.</returns>
     Task<TResponse?> RequestAsync<TRequest, TResponse>(string subject, TRequest request, TimeSpan timeout, CancellationToken cancellationToken = default);
+}
+
+public interface ISubscription : IAsyncDisposable
+{
+    Guid Id { get; }
+    Task StopAsync(CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -90,6 +96,28 @@ public interface IJetStreamPublisher
     /// <returns>A task representing the asynchronous operation.</returns>
     /// <exception cref="ArgumentException">Thrown when <paramref name="messageId"/> is null or whitespace.</exception>
     Task PublishAsync<T>(string subject, T message, string? messageId, MessageHeaders? headers = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Publishes a batch of messages to JetStream subjects concurrently.
+    /// All publishes are issued in parallel and all acks are awaited.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// If any messages in the batch fail, an <see cref="AggregateException"/> is thrown
+    /// containing one inner exception per failed message. The exception message includes
+    /// the index and message ID of each failure so callers can identify which messages need retry.
+    /// </para>
+    /// <para>
+    /// Messages that succeed are not rolled back — JetStream does not support transactional batches.
+    /// </para>
+    /// </remarks>
+    /// <typeparam name="T">The type of the messages.</typeparam>
+    /// <param name="messages">The batch of messages to publish.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    Task PublishBatchAsync<T>(
+        IReadOnlyList<BatchMessage<T>> messages,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -121,4 +149,3 @@ public interface IJetStreamConsumer
     /// <returns>A task representing the asynchronous operation.</returns>
     Task ConsumePullAsync<T>(StreamName stream, ConsumerName consumer, Func<IJsMessageContext<T>, Task> handler, JetStreamConsumeOptions? options = null, CancellationToken cancellationToken = default);
 }
-

@@ -15,6 +15,23 @@ Implements `IJetStreamPublisher` and `IJetStreamConsumer` using the modern `NATS
 Optimized for both performance and compatibility.
 *   **MemoryPack (Fast Path):** Uses `MemoryPack` for high-performance, zero-allocation binary serialization for internal communication.
 *   **System.Text.Json (Fallback):** Automatically falls back to standard JSON for external interoperability or types not decorated with `[MemoryPackable]`.
+*   **Schema Safety:** `[MemoryPackable]` messages are wrapped in a versioned schema envelope containing a schema id, explicit version, and structural fingerprint. Raw legacy MemoryPack payloads are rejected, and enveloped payloads fail closed on schema mismatch instead of silently corrupting data.
+
+Use `[MessageSchema(n)]` on breaking contract revisions:
+
+```csharp
+using FlySwattr.NATS.Abstractions.Attributes;
+using MemoryPack;
+
+[MemoryPackable]
+[MessageSchema(2)]
+public partial record InvoiceIssuedV2
+{
+    public required string InvoiceId { get; init; }
+    public decimal Amount { get; init; }
+    public string? CurrencyCode { get; init; }
+}
+```
 
 ### 3. Automatic Claim Check (Payload Offloading)
 Solves the "1MB NATS Payload Limit" problem transparently.

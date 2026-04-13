@@ -10,6 +10,7 @@
     </PropertyGroup>
 
     <ItemGroup>
+        <PackageReference Include="MemoryPack" Version="1.21.4" />
         <PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.0" />
         <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="8.0.0" />
         <PackageReference Include="Microsoft.Testing.Extensions.Retry" Version="2.2.1" />

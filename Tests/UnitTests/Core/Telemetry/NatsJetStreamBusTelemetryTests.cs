@@ -254,6 +254,26 @@ public class NatsJetStreamBusTelemetryTests : IAsyncDisposable
         capturedHeaders["X-Tenant-Id"].ToString().ShouldBe("tenant-abc");
     }
 
+    [Test]
+    public async Task PublishAsync_ShouldRejectReservedHeaders()
+    {
+        var subject = $"test.subject.{Guid.NewGuid():N}";
+        var message = new TestMessage("test-data");
+        var headers = new MessageHeaders(new Dictionary<string, string>
+        {
+            ["Nats-Msg-Id"] = "override"
+        });
+
+        await Should.ThrowAsync<ArgumentException>(() => _bus.PublishAsync(subject, message, "msg-1", headers));
+    }
+
+    [Test]
+    public async Task PublishAsync_ShouldValidateSubject()
+    {
+        await Should.ThrowAsync<Exception>(() =>
+            _bus.PublishAsync("invalid..subject", new TestMessage("test-data"), "msg-1"));
+    }
+
     #endregion
 
     #region Publish Validation Tests

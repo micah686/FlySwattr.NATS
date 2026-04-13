@@ -124,6 +124,13 @@ public class ObjectStoreSpec
     public StorageType StorageType { get; set; } = StorageType.File;
 
     /// <summary>
+    /// Maximum age of objects in the store. Zero means unlimited.
+    /// Used as a safety net for claim-check cleanup (Layer 2).
+    /// Default: 0 (unlimited)
+    /// </summary>
+    public TimeSpan MaxAge { get; set; } = TimeSpan.Zero;
+
+    /// <summary>
     /// Maximum size of the object store in bytes. -1 means unlimited.
     /// Default: -1 (unlimited)
     /// </summary>

@@ -1,11 +1,16 @@
-using System.Collections.Concurrent;
+using System.Buffers;
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Abstractions.Exceptions;
+using FlySwattr.NATS.Core.Configuration;
+using FlySwattr.NATS.Core.Services;
+using FlySwattr.NATS.Core.Serializers;
 using FlySwattr.NATS.Core.Telemetry;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using NATS.Client.Core;
 using NATS.Client.JetStream;
 using NATS.Client.JetStream.Models;
@@ -13,38 +18,83 @@ using NATS.Client.JetStream.Models;
 // ReSharper disable once IdentifierTypo
 namespace FlySwattr.NATS.Core;
 
-public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncDisposable
+internal interface IRawJetStreamPublisher
 {
+    Task PublishRawAsync(string subject, ReadOnlyMemory<byte> payload, string? messageId, MessageHeaders? headers = null, CancellationToken cancellationToken = default);
+}
+
+internal interface IRawJetStreamConsumer
+{
+    Task ConsumeRawAsync(
+        StreamName stream,
+        SubjectName subject,
+        Func<IJsMessageContext<byte[]>, Task> handler,
+        JetStreamConsumeOptions? options = null,
+        CancellationToken cancellationToken = default);
+
+    Task ConsumePullRawAsync(
+        StreamName stream,
+        ConsumerName consumer,
+        Func<IJsMessageContext<byte[]>, Task> handler,
+        JetStreamConsumeOptions? options = null,
+        CancellationToken cancellationToken = default);
+}
+
+public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJetStreamPublisher, IRawJetStreamConsumer, IAsyncDisposable
+{
+    private readonly string[] _reservedPublishHeaders;
+    private readonly string[] _reservedRawPublishHeaders;
+
     private readonly INatsJSContext _jsContext;
     private readonly ILogger<NatsJetStreamBus> _logger;
     private readonly IMessageSerializer _serializer;
-
-    private readonly ConcurrentDictionary<Guid, Task> _backgroundTasks = new();
-    private readonly ConcurrentDictionary<Guid, IDisposable> _backgroundServices = new();
-    private readonly ConcurrentDictionary<Guid, CancellationTokenSource> _linkedTokenSources = new();
-    private readonly CancellationTokenSource _cts = new();
-    private readonly Timer _cleanupTimer;
+    private readonly BackgroundTaskManager _backgroundTaskManager;
+    private readonly WireCompatibilityOptions _wireOptions;
+    private int _disposed;
 
     public NatsJetStreamBus(
         INatsJSContext jsContext,
         ILogger<NatsJetStreamBus> logger,
-        IMessageSerializer serializer)
+        IMessageSerializer serializer,
+        IOptions<WireCompatibilityOptions>? wireOptions = null)
+        : this(
+            jsContext,
+            logger,
+            serializer,
+            new BackgroundTaskManager(NullLogger<BackgroundTaskManager>.Instance),
+            wireOptions)
+    {
+    }
+
+    internal NatsJetStreamBus(
+        INatsJSContext jsContext,
+        ILogger<NatsJetStreamBus> logger,
+        IMessageSerializer serializer,
+        BackgroundTaskManager backgroundTaskManager,
+        IOptions<WireCompatibilityOptions>? wireOptions = null)
     {
         _jsContext = jsContext;
         _logger = logger;
         _serializer = serializer;
-        _cleanupTimer = new Timer(CleanupCompletedTasks, null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
-    }
+        _backgroundTaskManager = backgroundTaskManager;
+        _wireOptions = wireOptions?.Value ?? new WireCompatibilityOptions();
 
-    private void CleanupCompletedTasks(object? state)
-    {
-        foreach (var kvp in _backgroundTasks)
-        {
-            if (kvp.Value.IsCompleted)
-            {
-                _backgroundTasks.TryRemove(kvp.Key, out _);
-            }
-        }
+        // Build reserved header lists including the version header
+        _reservedPublishHeaders =
+        [
+            "Content-Type",
+            "Nats-Msg-Id",
+            "traceparent",
+            "tracestate",
+            _wireOptions.VersionHeaderName
+        ];
+        _reservedRawPublishHeaders =
+        [
+            "Nats-Msg-Id",
+            "traceparent",
+            "tracestate",
+            _wireOptions.VersionHeaderName
+        ];
     }
 
     public Task PublishAsync<T>(string subject, T message, CancellationToken cancellationToken = default)
@@ -58,6 +108,8 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
     public async Task PublishAsync<T>(string subject, T message, string? messageId, MessageHeaders? headers = null, CancellationToken cancellationToken = default)
     {
         var stopwatch = Stopwatch.StartNew();
+        MessageSecurity.ValidatePublishSubject(subject);
+        MessageSecurity.RejectReservedHeaders(headers, _reservedPublishHeaders);
         
         // Require a caller-provided message ID for true application-level idempotency.
         // Auto-generating GUIDs would defeat JetStream's deduplication on retries.
@@ -81,7 +133,8 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
         var natsHeaders = new NatsHeaders
         {
             ["Content-Type"] = _serializer.GetContentType<T>(),
-            ["Nats-Msg-Id"] = messageId
+            ["Nats-Msg-Id"] = messageId,
+            [_wireOptions.VersionHeaderName] = _wireOptions.ProtocolVersion.ToString()
         };
 
         // Merge custom headers if provided
@@ -94,6 +147,7 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
         }
         
         NatsTelemetry.InjectTraceContext(activity, natsHeaders);
+        MemoryPackSchemaMetadata.AddHeadersIfNeeded<T>(natsHeaders);
 
         // Pass the message directly to NATS.Net - let the configured MemoryPackSerializerRegistry
         // handle serialization. Do NOT pre-serialize here as that causes double-serialization.
@@ -115,15 +169,155 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
         _logger.LogDebug("Published JetStream message to {Subject} with MsgId {MsgId}", subject, messageId);
     }
 
-    public async Task ConsumeAsync<T>(
+    public async Task PublishBatchAsync<T>(
+        IReadOnlyList<BatchMessage<T>> messages,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(messages);
+        if (messages.Count == 0) return;
+
+        // Validate all messages upfront
+        for (var i = 0; i < messages.Count; i++)
+        {
+            var msg = messages[i];
+            MessageSecurity.ValidatePublishSubject(msg.Subject);
+            MessageSecurity.RejectReservedHeaders(msg.Headers, _reservedPublishHeaders);
+
+            if (string.IsNullOrWhiteSpace(msg.MessageId))
+            {
+                throw new ArgumentException(
+                    $"Batch message at index {i} has a null or empty messageId. " +
+                    "A messageId must be provided for JetStream publishing to ensure application-level idempotency.",
+                    nameof(messages));
+            }
+        }
+
+        // Publish all concurrently
+        var tasks = new Task[messages.Count];
+        for (var i = 0; i < messages.Count; i++)
+        {
+            var msg = messages[i];
+            tasks[i] = PublishAsync(msg.Subject, msg.Message, msg.MessageId, msg.Headers, cancellationToken);
+        }
+
+        // Collect failures
+        var exceptions = new List<Exception>();
+        for (var i = 0; i < tasks.Length; i++)
+        {
+            try
+            {
+                await tasks[i];
+            }
+            catch (Exception ex)
+            {
+                exceptions.Add(new InvalidOperationException(
+                    $"Batch message at index {i} (MessageId: '{messages[i].MessageId}') failed: {ex.Message}", ex));
+            }
+        }
+
+        if (exceptions.Count > 0)
+        {
+            throw new AggregateException(
+                $"{exceptions.Count} of {messages.Count} batch message(s) failed to publish.", exceptions);
+        }
+    }
+
+    public async Task PublishRawAsync(string subject, ReadOnlyMemory<byte> payload, string? messageId, MessageHeaders? headers = null, CancellationToken cancellationToken = default)
+    {
+        MessageSecurity.ValidatePublishSubject(subject);
+        MessageSecurity.RejectReservedHeaders(headers, _reservedRawPublishHeaders);
+
+        if (string.IsNullOrWhiteSpace(messageId))
+        {
+            throw new ArgumentException(
+                "A messageId must be provided for JetStream publishing to ensure application-level idempotency. " +
+                "Use a business-key-derived ID (e.g., 'Order123-Created') to enable proper de-duplication across retries.",
+                nameof(messageId));
+        }
+
+        var natsHeaders = new NatsHeaders
+        {
+            ["Nats-Msg-Id"] = messageId,
+            [_wireOptions.VersionHeaderName] = _wireOptions.ProtocolVersion.ToString()
+        };
+
+        if (headers != null)
+        {
+            foreach (var header in headers.Headers)
+            {
+                natsHeaders[header.Key] = header.Value;
+            }
+        }
+
+        var ack = await _jsContext.PublishAsync(
+            subject,
+            payload.ToArray(),
+            serializer: RawByteArraySerializer.Instance,
+            headers: natsHeaders,
+            opts: new NatsJSPubOpts { MsgId = messageId },
+            cancellationToken: cancellationToken);
+
+        ack.EnsureSuccess();
+    }
+
+    public Task ConsumeAsync<T>(
         StreamName stream,
         SubjectName subject,
         Func<IJsMessageContext<T>, Task> handler,
         JetStreamConsumeOptions? options = null,
         CancellationToken cancellationToken = default)
+        => ConsumeAsyncInternal(stream, subject, handler, options, cancellationToken);
+
+    public Task ConsumePullAsync<T>(
+        StreamName stream,
+        ConsumerName consumer,
+        Func<IJsMessageContext<T>, Task> handler,
+        JetStreamConsumeOptions? options = null,
+        CancellationToken cancellationToken = default)
+        => ConsumePullAsyncInternal(stream, consumer, handler, options, cancellationToken);
+
+    public Task ConsumeRawAsync(
+        StreamName stream,
+        SubjectName subject,
+        Func<IJsMessageContext<byte[]>, Task> handler,
+        JetStreamConsumeOptions? options = null,
+        CancellationToken cancellationToken = default)
+        => ConsumeInternalAsync(stream, subject, null, handler, options, cancellationToken, RawByteArraySerializer.Instance);
+
+    public Task ConsumePullRawAsync(
+        StreamName stream,
+        ConsumerName consumer,
+        Func<IJsMessageContext<byte[]>, Task> handler,
+        JetStreamConsumeOptions? options = null,
+        CancellationToken cancellationToken = default)
+        => ConsumeInternalAsync(stream, null, consumer, handler, options, cancellationToken, RawByteArraySerializer.Instance);
+
+    private Task ConsumeInternalAsync<T>(
+        StreamName stream,
+        SubjectName? subject,
+        ConsumerName? consumer,
+        Func<IJsMessageContext<T>, Task> handler,
+        JetStreamConsumeOptions? options,
+        CancellationToken cancellationToken,
+        INatsDeserialize<T>? deserializer = null)
+    {
+        if (consumer is null)
+        {
+            return ConsumeAsyncInternal(stream, subject ?? throw new ArgumentNullException(nameof(subject)), handler, options, cancellationToken, deserializer);
+        }
+
+        return ConsumePullAsyncInternal(stream, consumer ?? throw new ArgumentNullException(nameof(consumer)), handler, options, cancellationToken, deserializer);
+    }
+
+    private async Task ConsumeAsyncInternal<T>(
+        StreamName stream,
+        SubjectName subject,
+        Func<IJsMessageContext<T>, Task> handler,
+        JetStreamConsumeOptions? options,
+        CancellationToken cancellationToken,
+        INatsDeserialize<T>? deserializer = null)
     {
         var opts = options ?? JetStreamConsumeOptions.Default;
-        // Note: maxConcurrency is enforced by the Resilience decorator, not here in Core
         string? consumerName = opts.QueueGroup?.Value;
 
         try
@@ -135,50 +329,27 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
             }
             else
             {
-                 var config = new ConsumerConfig
-                 {
-                     Name = "ephemeral_" + Guid.NewGuid().ToString("N"),
-                     FilterSubject = subject.Value,
-                     DeliverPolicy = ConsumerConfigDeliverPolicy.New,
-                     AckPolicy = ConsumerConfigAckPolicy.Explicit
-                 };
-                 consumer = await _jsContext.CreateOrUpdateConsumerAsync(stream.Value, config, cancellationToken);
+                var config = new ConsumerConfig
+                {
+                    Name = "ephemeral_" + Guid.NewGuid().ToString("N"),
+                    FilterSubject = subject.Value,
+                    DeliverPolicy = ConsumerConfigDeliverPolicy.New,
+                    AckPolicy = ConsumerConfigAckPolicy.Explicit
+                };
+                consumer = await _jsContext.CreateOrUpdateConsumerAsync(stream.Value, config, cancellationToken);
             }
-            
+
             var effectiveParallelism = opts.MaxDegreeOfParallelism ?? 10;
-            
             var service = new BasicNatsConsumerService<T>(
                 consumer,
                 stream.Value,
                 consumerName ?? consumer.Info?.Name ?? "unknown_consumer",
                 handler,
                 _logger,
-                effectiveParallelism
-            );
+                effectiveParallelism,
+                deserializer);
 
-            var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
-            var taskId = Guid.NewGuid();
-
-            // Store the CTS so it can be properly disposed during shutdown
-            _linkedTokenSources.TryAdd(taskId, linkedCts);
-
-            await service.StartAsync(linkedCts.Token);
-            _backgroundServices.TryAdd(taskId, service);
-
-            if (service.ExecuteTask is Task task && !task.IsCompleted)
-            {
-                // Wrap the task with cleanup logic that properly handles exceptions
-                var wrappedTask = WrapTaskWithCleanupAsync(task, taskId, linkedCts);
-                _backgroundTasks.TryAdd(taskId, wrappedTask);
-            }
-            else
-            {
-                // Task completed synchronously - clean up immediately
-                _linkedTokenSources.TryRemove(taskId, out _);
-                _backgroundServices.TryRemove(taskId, out _);
-                await StopAndDisposeServiceAsync(service);
-                linkedCts.Dispose();
-            }
+            await StartBackgroundConsumerAsync(service, cancellationToken);
         }
         catch (Exception ex)
         {
@@ -192,53 +363,29 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
         }
     }
 
-    public async Task ConsumePullAsync<T>(
+    private async Task ConsumePullAsyncInternal<T>(
         StreamName stream,
         ConsumerName consumer,
         Func<IJsMessageContext<T>, Task> handler,
-        JetStreamConsumeOptions? options = null,
-        CancellationToken cancellationToken = default)
+        JetStreamConsumeOptions? options,
+        CancellationToken cancellationToken,
+        INatsDeserialize<T>? deserializer = null)
     {
         var opts = options ?? JetStreamConsumeOptions.Default;
-        // Note: maxConcurrency is enforced by the Resilience decorator, not here in Core
         try
         {
             var jsConsumer = await _jsContext.GetConsumerAsync(stream.Value, consumer.Value, cancellationToken);
-
             var effectiveParallelism = opts.MaxDegreeOfParallelism ?? 10;
-            
             var service = new BasicNatsConsumerService<T>(
                 jsConsumer,
                 stream.Value,
                 consumer.Value,
                 handler,
                 _logger,
-                effectiveParallelism
-            );
+                effectiveParallelism,
+                deserializer);
 
-            var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
-            var taskId = Guid.NewGuid();
-
-            // Store the CTS so it can be properly disposed during shutdown
-            _linkedTokenSources.TryAdd(taskId, linkedCts);
-
-            await service.StartAsync(linkedCts.Token);
-            _backgroundServices.TryAdd(taskId, service);
-
-            if (service.ExecuteTask is Task task && !task.IsCompleted)
-            {
-                // Wrap the task with cleanup logic that properly handles exceptions
-                var wrappedTask = WrapTaskWithCleanupAsync(task, taskId, linkedCts);
-                _backgroundTasks.TryAdd(taskId, wrappedTask);
-            }
-            else
-            {
-                // Task completed synchronously - clean up immediately
-                _linkedTokenSources.TryRemove(taskId, out _);
-                _backgroundServices.TryRemove(taskId, out _);
-                await StopAndDisposeServiceAsync(service);
-                linkedCts.Dispose();
-            }
+            await StartBackgroundConsumerAsync(service, cancellationToken);
         }
         catch (Exception ex)
         {
@@ -251,111 +398,14 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IAsyncD
         }
     }
 
-    private async Task WrapTaskWithCleanupAsync(Task task, Guid taskId, CancellationTokenSource linkedCts)
-    {
-        try
-        {
-            await task;
-        }
-        catch (OperationCanceledException)
-        {
-            // Expected during shutdown - don't log as error
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Background consumer faulted");
-        }
-        finally
-        {
-            // Clean up resources
-            _backgroundTasks.TryRemove(taskId, out _);
-            _linkedTokenSources.TryRemove(taskId, out _);
-
-            if (_backgroundServices.TryRemove(taskId, out var svc) && svc is IDisposable disposable)
-            {
-                await StopAndDisposeServiceAsync(disposable);
-            }
-
-            try
-            {
-                linkedCts.Dispose();
-            }
-            catch (ObjectDisposedException)
-            {
-                // Already disposed - ignore
-            }
-        }
-    }
-
-    private async Task StopAndDisposeServiceAsync(IDisposable svc)
-    {
-        if (svc is BackgroundService bgSvc)
-        {
-            try
-            {
-                await bgSvc.StopAsync(CancellationToken.None);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Error stopping background service");
-            }
-        }
-
-        try
-        {
-            svc.Dispose();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Error disposing background service");
-        }
-    }
+    private Task StartBackgroundConsumerAsync<T>(BasicNatsConsumerService<T> service, CancellationToken cancellationToken)
+        => _backgroundTaskManager.StartAsync(service, cancellationToken);
 
     public async ValueTask DisposeAsync()
     {
-        _cts.Cancel();
-        try
-        {
-            await Task.WhenAll(_backgroundTasks.Values);
-        }
-        catch (OperationCanceledException)
-        {
-            // Expected during shutdown
-        }
-        catch (AggregateException ae) when (ae.InnerExceptions.All(e => e is OperationCanceledException))
-        {
-            // All inner exceptions are cancellation - expected
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Error during JetStream bus shutdown");
-        }
+        if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
 
-        var stopTasks = new List<Task>();
-        foreach (var svc in _backgroundServices.Values)
-        {
-            stopTasks.Add(StopAndDisposeServiceAsync(svc));
-        }
-
-        await Task.WhenAll(stopTasks);
-        _backgroundServices.Clear();
-
-        // Dispose any remaining linked token sources
-        foreach (var cts in _linkedTokenSources.Values)
-        {
-            try
-            {
-                cts.Dispose();
-            }
-            catch (ObjectDisposedException)
-            {
-                // Already disposed - ignore
-            }
-        }
-        _linkedTokenSources.Clear();
-
-        await _cleanupTimer.DisposeAsync();
-        _cts.Dispose();
+        await _backgroundTaskManager.DisposeAsync();
     }
 }
 
@@ -367,6 +417,7 @@ internal class BasicNatsConsumerService<T> : BackgroundService
     private readonly Func<IJsMessageContext<T>, Task> _handler;
     private readonly ILogger _logger;
     private readonly int _maxMsgs;
+    private readonly INatsDeserialize<T>? _deserializer;
 
     public BasicNatsConsumerService(
         INatsJSConsumer consumer,
@@ -374,7 +425,8 @@ internal class BasicNatsConsumerService<T> : BackgroundService
         string consumerName,
         Func<IJsMessageContext<T>, Task> handler,
         ILogger logger,
-        int maxMsgs)
+        int maxMsgs,
+        INatsDeserialize<T>? deserializer = null)
     {
         _consumer = consumer;
         _stream = stream;
@@ -382,6 +434,7 @@ internal class BasicNatsConsumerService<T> : BackgroundService
         _handler = handler;
         _logger = logger;
         _maxMsgs = maxMsgs;
+        _deserializer = deserializer;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -396,7 +449,11 @@ internal class BasicNatsConsumerService<T> : BackgroundService
                     Expires = TimeSpan.FromSeconds(30)
                 };
 
-                await foreach (var msg in _consumer.ConsumeAsync<T>(opts: opts, cancellationToken: stoppingToken))
+                var messages = _deserializer == null
+                    ? _consumer.ConsumeAsync<T>(opts: opts, cancellationToken: stoppingToken)
+                    : _consumer.ConsumeAsync(_deserializer, opts: opts, cancellationToken: stoppingToken);
+
+                await foreach (var msg in messages)
                 {
                     var handlerStopwatch = Stopwatch.StartNew();
                     var tags = new TagList 
@@ -466,6 +523,18 @@ internal class BasicNatsConsumerService<T> : BackgroundService
             }
         }
     }
+}
+
+internal sealed class RawByteArraySerializer : INatsSerialize<byte[]>, INatsDeserialize<byte[]>
+{
+    public static RawByteArraySerializer Instance { get; } = new();
+
+    public void Serialize(IBufferWriter<byte> bufferWriter, byte[] value)
+    {
+        bufferWriter.Write(value);
+    }
+
+    public byte[]? Deserialize(in ReadOnlySequence<byte> buffer) => buffer.ToArray();
 }
 
 internal class JsMessageContext<T> : IJsMessageContext<T>

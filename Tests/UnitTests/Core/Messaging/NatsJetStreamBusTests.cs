@@ -2,7 +2,9 @@ using System.Buffers;
 using System.Diagnostics;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core;
+using FlySwattr.NATS.Core.Configuration;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using NATS.Client.Core;
 using NATS.Client.JetStream;
 using NATS.Client.JetStream.Models;
@@ -86,6 +88,61 @@ public class NatsJetStreamBusTests : IAsyncDisposable
         // Act & Assert
         await Assert.ThrowsAsync<NatsNoRespondersException>(async () =>
             await _bus.PublishAsync("test.subject", new TestMessage("test"), "msg-1"));
+    }
+
+    [Test]
+    public async Task PublishAsync_ShouldRejectReservedHeaders()
+    {
+        var headers = new MessageHeaders(new Dictionary<string, string>
+        {
+            ["Content-Type"] = "text/plain"
+        });
+
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await _bus.PublishAsync("test.subject", new TestMessage("test"), "msg-1", headers));
+    }
+
+    [Test]
+    public async Task PublishAsync_ShouldValidateSubject()
+    {
+        await Assert.ThrowsAsync<Exception>(async () =>
+            await _bus.PublishAsync("test..subject", new TestMessage("test"), "msg-1"));
+    }
+
+    [Test]
+    public async Task PublishAsync_ShouldStampConfiguredWireVersionHeader()
+    {
+        // Arrange
+        var bus = new NatsJetStreamBus(
+            _jsContext,
+            _logger,
+            _serializer,
+            Options.Create(new WireCompatibilityOptions
+            {
+                ProtocolVersion = 7,
+                VersionHeaderName = "X-Test-Wire-Version"
+            }));
+
+        NatsHeaders? publishedHeaders = null;
+        _jsContext.PublishAsync(
+                Arg.Any<string>(),
+                Arg.Any<TestMessage>(),
+                Arg.Any<INatsSerialize<TestMessage>>(),
+                Arg.Any<NatsJSPubOpts>(),
+                Arg.Any<NatsHeaders>(),
+                Arg.Any<CancellationToken>())
+            .Returns(callInfo =>
+            {
+                publishedHeaders = callInfo.ArgAt<NatsHeaders>(4);
+                return new PubAckResponse { Stream = "TEST" };
+            });
+
+        // Act
+        await bus.PublishAsync("test.subject", new TestMessage("test"), "msg-1");
+
+        // Assert
+        await Assert.That(publishedHeaders).IsNotNull();
+        await Assert.That(publishedHeaders!["X-Test-Wire-Version"]).IsEqualTo("7");
     }
 
     private record TestMessage(string Data);
@@ -199,10 +256,10 @@ public class NatsJetStreamBusTests : IAsyncDisposable
         // Arrange
         var consumer = Substitute.For<INatsJSConsumer>();
         consumer.Info.Returns(new ConsumerInfo { Name = "test-consumer", StreamName = "test-stream", Config = new ConsumerConfig() });
-        
+
         _jsContext.CreateOrUpdateConsumerAsync(
-            Arg.Any<string>(), 
-            Arg.Any<ConsumerConfig>(), 
+            Arg.Any<string>(),
+            Arg.Any<ConsumerConfig>(),
             Arg.Any<CancellationToken>())
             .Returns(consumer);
 
@@ -224,6 +281,39 @@ public class NatsJetStreamBusTests : IAsyncDisposable
         // Assert
         // If we reached here without hanging, it means DisposeAsync didn't deadlock.
         // We can't easily verify private fields, but we've exercised the path.
+    }
+
+    [Test]
+    public async Task DisposeAsync_CalledConcurrently_ShouldBeIdempotent()
+    {
+        // Arrange: register a consumer so there is state to clean up
+        var consumer = Substitute.For<INatsJSConsumer>();
+        consumer.Info.Returns(new ConsumerInfo { Name = "test-consumer", StreamName = "test-stream", Config = new ConsumerConfig() });
+
+        _jsContext.CreateOrUpdateConsumerAsync(
+                Arg.Any<string>(),
+                Arg.Any<ConsumerConfig>(),
+                Arg.Any<CancellationToken>())
+            .Returns(consumer);
+
+        consumer.ConsumeAsync<object>(
+                Arg.Any<INatsDeserialize<object>>(),
+                Arg.Any<NatsJSConsumeOpts>(),
+                Arg.Any<CancellationToken>())
+            .Returns(CreateEmptyAsyncEnumerable());
+
+        await _bus.ConsumeAsync<object>(
+            StreamName.From("test-stream"),
+            SubjectName.From("test.subject"),
+            _ => Task.CompletedTask);
+
+        // Act: concurrent DisposeAsync calls must not throw or hang
+        await Task.WhenAll(
+            _bus.DisposeAsync().AsTask(),
+            _bus.DisposeAsync().AsTask(),
+            _bus.DisposeAsync().AsTask());
+
+        // Assert: reached here means no deadlock and no unhandled exception
     }
 
     [Test]

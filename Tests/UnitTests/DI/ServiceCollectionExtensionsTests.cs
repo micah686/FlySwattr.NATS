@@ -1,10 +1,18 @@
 using FlySwattr.NATS.Abstractions;
+using FlySwattr.NATS.Caching.Extensions;
+using FlySwattr.NATS.Caching.Stores;
 using FlySwattr.NATS.Configuration;
+using FlySwattr.NATS.Core.Stores;
+using FlySwattr.NATS.Core.Configuration;
 using FlySwattr.NATS.Extensions;
+using FlySwattr.NATS.Hosting.Extensions;
+using FlySwattr.NATS.Hosting.Middleware;
+using FlySwattr.NATS.Resilience.Extensions;
 using FlySwattr.NATS.Hosting.Health;
 using Medallion.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
 using TUnit.Core;
 
 namespace UnitTests.DI;
@@ -135,6 +143,85 @@ public class ServiceCollectionExtensionsTests
         var offloadingInner = GetInnerService(resilientInner!);
         await Assert.That(offloadingInner).IsNotNull();
         await Assert.That(offloadingInner!.GetType().Name).Contains("NatsJetStreamBus");
+    }
+
+    [Test]
+    public async Task AddPayloadOffloading_AfterResilience_ShouldThrow()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+
+        FlySwattr.NATS.Core.Extensions.ServiceCollectionExtensions.AddFlySwattrNatsCore(services, opts =>
+        {
+            opts.Url = "nats://localhost:4222";
+        });
+
+        FlySwattr.NATS.Resilience.Extensions.ServiceCollectionExtensions.AddFlySwattrNatsResilience(services);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            Task.FromResult(FlySwattr.NATS.Core.Extensions.ServiceCollectionExtensions.AddPayloadOffloading(services)));
+    }
+
+    [Test]
+    public async Task AddFlySwattrNatsCaching_ShouldDecorateFactory_UsingKeyedInnerFactory()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+
+        FlySwattr.NATS.Core.Extensions.ServiceCollectionExtensions.AddFlySwattrNatsCore(services, opts =>
+        {
+            opts.Url = "nats://localhost:4222";
+        });
+
+        FlySwattr.NATS.Caching.Extensions.ServiceCollectionExtensions.AddFlySwattrNatsCaching(services);
+
+        var provider = services.BuildServiceProvider(new ServiceProviderOptions
+        {
+            ValidateOnBuild = true,
+            ValidateScopes = true
+        });
+
+        var decoratedFactory = provider.GetRequiredService<Func<string, IKeyValueStore>>();
+        var innerFactory = provider.GetRequiredKeyedService<Func<string, IKeyValueStore>>(CachingServiceKeys.InnerKeyValueStoreFactory);
+
+        var decoratedStore = decoratedFactory("orders");
+        var innerStore = innerFactory("orders");
+
+        await Assert.That(decoratedStore.GetType()).IsEqualTo(typeof(CachingKeyValueStore));
+        await Assert.That(innerStore.GetType()).IsEqualTo(typeof(NatsKeyValueStore));
+    }
+
+    [Test]
+    public async Task ResolveMiddlewares_ShouldIncludeWireVersionCheck_WhenVersionBoundsConfigured()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddOptions<WireCompatibilityOptions>().Configure(options =>
+        {
+            options.MinAcceptedVersion = 1;
+        });
+
+        var provider = services.BuildServiceProvider();
+        var middlewares = FlySwattr.NATS.Hosting.Extensions.ServiceCollectionExtensions
+            .ResolveMiddlewares<object>(provider, new NatsConsumerOptions())
+            .ToList();
+
+        await Assert.That(middlewares.Any(m => m is WireVersionCheckMiddleware<object>)).IsTrue();
+    }
+
+    [Test]
+    public async Task ResolveMiddlewares_ShouldSkipWireVersionCheck_WhenVersionBoundsNotConfigured()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddOptions<WireCompatibilityOptions>();
+
+        var provider = services.BuildServiceProvider();
+        var middlewares = FlySwattr.NATS.Hosting.Extensions.ServiceCollectionExtensions
+            .ResolveMiddlewares<object>(provider, new NatsConsumerOptions())
+            .ToList();
+
+        await Assert.That(middlewares.Any(m => m is WireVersionCheckMiddleware<object>)).IsFalse();
     }
     
     private object? GetInnerService(object service)

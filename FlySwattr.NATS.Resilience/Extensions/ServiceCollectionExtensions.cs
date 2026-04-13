@@ -33,11 +33,17 @@ public static class ServiceCollectionExtensions
         this IServiceCollection services, 
         Action<BulkheadConfiguration>? configure = null)
     {
+        if (!services.Any(d => d.ServiceType == typeof(NatsCoreServicesMarker)))
+        {
+            throw new InvalidOperationException("AddFlySwattrNatsResilience requires AddFlySwattrNatsCore to be registered first.");
+        }
+
         // 1. Register Configuration & Managers
         services.AddOptions<BulkheadConfiguration>().Configure(configure ?? (_ => { }));
         services.AddSingleton<BulkheadManager>();
         services.AddSingleton<ConsumerSemaphoreManager>();
         services.AddSingleton<HierarchicalResilienceBuilder>();
+        services.TryAddSingleton<NatsResilienceMarker>();
 
         // 2. Decorate Publisher and Consumer generically
         Decorate<IJetStreamPublisher, ResilientJetStreamPublisher>(services);

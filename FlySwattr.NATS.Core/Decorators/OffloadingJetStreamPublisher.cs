@@ -1,6 +1,8 @@
 using System.Buffers;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core.Configuration;
+using FlySwattr.NATS.Core.Services;
+using FlySwattr.NATS.Core.Serializers;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -14,27 +16,60 @@ namespace FlySwattr.NATS.Core.Decorators;
 internal class OffloadingJetStreamPublisher : IJetStreamPublisher
 {
     private readonly IJetStreamPublisher _inner;
+    private readonly IRawJetStreamPublisher _rawPublisher;
     private readonly IObjectStore _objectStore;
     private readonly IMessageSerializer _serializer;
+    private readonly IMessageTypeAliasRegistry _typeAliasRegistry;
     private readonly PayloadOffloadingOptions _options;
+    private readonly WireCompatibilityOptions _wireOptions;
     private readonly ILogger<OffloadingJetStreamPublisher> _logger;
 
     public OffloadingJetStreamPublisher(
         IJetStreamPublisher inner,
         IObjectStore objectStore,
         IMessageSerializer serializer,
+        IMessageTypeAliasRegistry typeAliasRegistry,
         IOptions<PayloadOffloadingOptions> options,
-        ILogger<OffloadingJetStreamPublisher> logger)
+        ILogger<OffloadingJetStreamPublisher> logger,
+        IOptions<WireCompatibilityOptions>? wireOptions = null)
+        : this(inner, (IRawJetStreamPublisher)inner, objectStore, serializer, typeAliasRegistry, options, logger, wireOptions)
+    {
+    }
+
+    public OffloadingJetStreamPublisher(
+        IJetStreamPublisher inner,
+        IRawJetStreamPublisher rawPublisher,
+        IObjectStore objectStore,
+        IMessageSerializer serializer,
+        IMessageTypeAliasRegistry typeAliasRegistry,
+        IOptions<PayloadOffloadingOptions> options,
+        ILogger<OffloadingJetStreamPublisher> logger,
+        IOptions<WireCompatibilityOptions>? wireOptions = null)
     {
         _inner = inner;
+        _rawPublisher = rawPublisher;
         _objectStore = objectStore;
         _serializer = serializer;
+        _typeAliasRegistry = typeAliasRegistry;
         _options = options.Value;
+        _wireOptions = wireOptions?.Value ?? new WireCompatibilityOptions();
         _logger = logger;
     }
 
     public async Task PublishAsync<T>(string subject, T message, string? messageId, MessageHeaders? headers = null, CancellationToken cancellationToken = default)
     {
+        MessageSecurity.RejectReservedHeaders(
+            headers,
+            [
+                _options.ClaimCheckHeaderName,
+                _options.ClaimCheckTypeHeaderName,
+                "Content-Type",
+                "Nats-Msg-Id",
+                "traceparent",
+                "tracestate",
+                _wireOptions.VersionHeaderName
+            ]);
+
         // Enforce messageId requirement at decorator level for consistency
         if (string.IsNullOrWhiteSpace(messageId))
         {
@@ -48,8 +83,9 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
         var bufferWriter = new ArrayBufferWriter<byte>();
         _serializer.Serialize(bufferWriter, message);
         var payload = bufferWriter.WrittenMemory;
+        var payloadSizeForThreshold = MemoryPackSchemaEnvelopeSerializer.GetLogicalPayloadSize(payload.Span);
 
-        if (payload.Length > _options.ThresholdBytes)
+        if (payloadSizeForThreshold > _options.ThresholdBytes)
         {
             await PublishWithOffloadingAsync(subject, message, payload, messageId, headers, cancellationToken);
         }
@@ -57,6 +93,111 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
         {
             // Under threshold - pass through to inner publisher
             await _inner.PublishAsync(subject, message, messageId, headers, cancellationToken);
+        }
+    }
+
+    public async Task PublishBatchAsync<T>(
+        IReadOnlyList<BatchMessage<T>> messages,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(messages);
+        if (messages.Count == 0) return;
+
+        // Process each message: offload if needed, then collect for batch publish
+        var processedMessages = new List<BatchMessage<T>>(messages.Count);
+        var uploadedKeys = new List<string>();
+
+        try
+        {
+            foreach (var msg in messages)
+            {
+                MessageSecurity.RejectReservedHeaders(
+                    msg.Headers,
+                    [
+                        _options.ClaimCheckHeaderName,
+                        _options.ClaimCheckTypeHeaderName,
+                        "Content-Type",
+                        "Nats-Msg-Id",
+                        "traceparent",
+                        "tracestate",
+                        _wireOptions.VersionHeaderName
+                    ]);
+
+                if (string.IsNullOrWhiteSpace(msg.MessageId))
+                {
+                    throw new ArgumentException(
+                        "A messageId must be provided for JetStream publishing to ensure application-level idempotency.",
+                        nameof(messages));
+                }
+
+                // Serialize to check size
+                var bufferWriter = new ArrayBufferWriter<byte>();
+                _serializer.Serialize(bufferWriter, msg.Message);
+                var payload = bufferWriter.WrittenMemory;
+                var payloadSize = MemoryPackSchemaEnvelopeSerializer.GetLogicalPayloadSize(payload.Span);
+
+                if (payloadSize > _options.ThresholdBytes)
+                {
+                    // Upload to object store
+                    var objectKey = MessageSecurity.ValidateObjectStoreKey(
+                        $"{_options.ObjectKeyPrefix}/{msg.Subject}/{Guid.NewGuid():N}");
+                    var claimCheckRef = $"objstore://{objectKey}";
+
+                    using var payloadStream = new MemoryStream(payload.ToArray());
+                    await _objectStore.PutAsync(objectKey, payloadStream, cancellationToken);
+                    uploadedKeys.Add(objectKey);
+
+                    var claimCheckHeaders = new Dictionary<string, string>
+                    {
+                        [_options.ClaimCheckHeaderName] = claimCheckRef,
+                        [_options.ClaimCheckTypeHeaderName] = _typeAliasRegistry.GetAlias(typeof(T)),
+                        ["Content-Type"] = _serializer.GetContentType<T>()
+                    };
+
+                    if (msg.Headers != null)
+                    {
+                        foreach (var header in msg.Headers.Headers)
+                        {
+                            claimCheckHeaders[header.Key] = header.Value;
+                        }
+                    }
+
+                    // Will be published as raw empty payload with claim-check headers
+                    // Since inner.PublishBatchAsync expects typed messages, delegate to individual raw publishes
+                    await _rawPublisher.PublishRawAsync(
+                        msg.Subject,
+                        ReadOnlyMemory<byte>.Empty,
+                        msg.MessageId,
+                        new MessageHeaders(claimCheckHeaders),
+                        cancellationToken);
+                }
+                else
+                {
+                    processedMessages.Add(msg);
+                }
+            }
+
+            // Batch-publish the non-offloaded messages through the inner publisher
+            if (processedMessages.Count > 0)
+            {
+                await _inner.PublishBatchAsync(processedMessages, cancellationToken);
+            }
+        }
+        catch
+        {
+            // Compensating action: clean up any uploaded objects on failure
+            foreach (var key in uploadedKeys)
+            {
+                try
+                {
+                    await _objectStore.DeleteAsync(key, cancellationToken);
+                }
+                catch (Exception cleanupEx)
+                {
+                    _logger.LogError(cleanupEx, "Failed to clean up orphaned object {ObjectKey}", key);
+                }
+            }
+            throw;
         }
     }
 
@@ -69,7 +210,7 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
         CancellationToken cancellationToken)
     {
         // Generate a unique object key
-        var objectKey = $"{_options.ObjectKeyPrefix}/{subject}/{Guid.NewGuid():N}";
+        var objectKey = MessageSecurity.ValidateObjectStoreKey($"{_options.ObjectKeyPrefix}/{subject}/{Guid.NewGuid():N}");
         var claimCheckRef = $"objstore://{objectKey}";
 
         _logger.LogDebug(
@@ -81,18 +222,12 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
         using var payloadStream = new MemoryStream(payload.ToArray());
         await _objectStore.PutAsync(objectKey, payloadStream, cancellationToken);
 
-        // Create a claim check wrapper message with the reference
-        var claimCheck = new ClaimCheckMessage
-        {
-            ObjectStoreRef = claimCheckRef,
-            OriginalType = typeof(T).AssemblyQualifiedName ?? typeof(T).FullName ?? typeof(T).Name,
-            OriginalSize = payload.Length
-        };
-
-        // Build headers with the claim check reference
+        // Build headers with the claim check reference and preserve the original content type.
         var claimCheckHeaders = new Dictionary<string, string>
         {
-            [_options.ClaimCheckHeaderName] = claimCheckRef
+            [_options.ClaimCheckHeaderName] = claimCheckRef,
+            [_options.ClaimCheckTypeHeaderName] = _typeAliasRegistry.GetAlias(typeof(T)),
+            ["Content-Type"] = _serializer.GetContentType<T>()
         };
 
         // Merge any existing headers
@@ -106,8 +241,13 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
 
         try
         {
-            // Publish the claim check wrapper instead of the original message
-            await _inner.PublishAsync(subject, claimCheck, messageId, new MessageHeaders(claimCheckHeaders), cancellationToken);
+            // Publish an empty payload with headers so consumers can hydrate before business deserialization.
+            await _rawPublisher.PublishRawAsync(
+                subject,
+                ReadOnlyMemory<byte>.Empty,
+                messageId,
+                new MessageHeaders(claimCheckHeaders),
+                cancellationToken);
 
             _logger.LogInformation(
                 "Published large message ({Size} bytes) to {Subject} via claim check {ObjectKey}",
@@ -140,30 +280,7 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
                     objectKey);
             }
 
-            throw; // Re-throw the original publish exception
+            throw;
         }
     }
-}
-
-/// <summary>
-/// Internal marker message used for claim check references.
-/// This is published instead of the original large payload.
-/// </summary>
-[MemoryPack.MemoryPackable]
-internal partial class ClaimCheckMessage
-{
-    /// <summary>
-    /// Reference to the offloaded payload in object store (e.g., "objstore://claimcheck/subject/guid")
-    /// </summary>
-    public string ObjectStoreRef { get; set; } = string.Empty;
-
-    /// <summary>
-    /// Assembly-qualified type name of the original message for deserialization
-    /// </summary>
-    public string OriginalType { get; set; } = string.Empty;
-
-    /// <summary>
-    /// Original payload size in bytes (for logging/diagnostics)
-    /// </summary>
-    public int OriginalSize { get; set; }
 }

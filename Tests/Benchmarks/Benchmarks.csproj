@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net10.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="BenchmarkDotNet" Version="0.14.0" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="../../FlySwattr.NATS.Core/FlySwattr.NATS.Core.csproj" />
+        <ProjectReference Include="../../FlySwattr.NATS.Hosting/FlySwattr.NATS.Hosting.csproj" />
+        <ProjectReference Include="../../FlySwattr.NATS.Resilience/FlySwattr.NATS.Resilience.csproj" />
+    </ItemGroup>
+
+</Project>

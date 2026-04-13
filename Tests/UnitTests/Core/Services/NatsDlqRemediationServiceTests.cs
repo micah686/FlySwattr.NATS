@@ -1,7 +1,10 @@
 using System.Text;
 using FlySwattr.NATS.Abstractions;
+using FlySwattr.NATS.Core;
+using FlySwattr.NATS.Core.Configuration;
 using FlySwattr.NATS.Core.Services;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using NSubstitute;
 using NSubstitute.ExceptionExtensions;
 using Shouldly;
@@ -20,6 +23,7 @@ public class NatsDlqRemediationServiceTests
     private readonly IDlqStore _dlqStore;
     private readonly IJetStreamPublisher _publisher;
     private readonly IMessageSerializer _serializer;
+    private readonly IMessageTypeAliasRegistry _typeAliasRegistry;
     private readonly IObjectStore _objectStore;
     private readonly ILogger<NatsDlqRemediationService> _logger;
     private readonly NatsDlqRemediationService _sut;
@@ -29,6 +33,8 @@ public class NatsDlqRemediationServiceTests
         _dlqStore = Substitute.For<IDlqStore>();
         _publisher = Substitute.For<IJetStreamPublisher>();
         _serializer = Substitute.For<IMessageSerializer>();
+        _typeAliasRegistry = new MessageTypeAliasRegistry(Options.Create(new MessageTypeAliasOptions()));
+        _typeAliasRegistry.Register<TestPayload>(nameof(TestPayload));
         _objectStore = Substitute.For<IObjectStore>();
         _logger = Substitute.For<ILogger<NatsDlqRemediationService>>();
 
@@ -36,6 +42,7 @@ public class NatsDlqRemediationServiceTests
             _dlqStore,
             _publisher,
             _serializer,
+            _typeAliasRegistry,
             _logger,
             _objectStore);
     }
@@ -51,8 +58,7 @@ public class NatsDlqRemediationServiceTests
         var entry = CreateTestEntry(entryId, payload: inlinePayload);
         
         _dlqStore.GetAsync(entryId, Arg.Any<CancellationToken>()).Returns(entry);
-        _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<CancellationToken>())
-            .Returns(true);
+        SetupSuccessfulStatusUpdates();
 
         // Act
         var result = await _sut.ReplayAsync(entryId);
@@ -86,8 +92,7 @@ public class NatsDlqRemediationServiceTests
             payloadEncoding: $"objstore://{objectKey}");
 
         _dlqStore.GetAsync(entryId, Arg.Any<CancellationToken>()).Returns(entry);
-        _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<CancellationToken>())
-            .Returns(true);
+        SetupSuccessfulStatusUpdates();
 
         // Mock object store to write payload to the provided stream
         _objectStore.GetAsync(objectKey, Arg.Any<Stream>(), Arg.Any<CancellationToken>())
@@ -133,8 +138,7 @@ public class NatsDlqRemediationServiceTests
             headers: headers);
 
         _dlqStore.GetAsync(entryId, Arg.Any<CancellationToken>()).Returns(entry);
-        _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<CancellationToken>())
-            .Returns(true);
+        SetupSuccessfulStatusUpdates();
 
         _objectStore.GetAsync(objectKey, Arg.Any<Stream>(), Arg.Any<CancellationToken>())
             .Returns(callInfo =>
@@ -168,8 +172,7 @@ public class NatsDlqRemediationServiceTests
             headers: null);
 
         _dlqStore.GetAsync(entryId, Arg.Any<CancellationToken>()).Returns(entry);
-        _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<CancellationToken>())
-            .Returns(true);
+        SetupSuccessfulStatusUpdates();
 
         // Act
         var result = await _sut.ReplayAsync(entryId);
@@ -196,8 +199,7 @@ public class NatsDlqRemediationServiceTests
         var entry = CreateTestEntry(entryId, payload: Array.Empty<byte>());
 
         _dlqStore.GetAsync(entryId, Arg.Any<CancellationToken>()).Returns(entry);
-        _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<CancellationToken>())
-            .Returns(true);
+        SetupSuccessfulStatusUpdates();
 
         // Act
         var result = await _sut.ReplayAsync(entryId);
@@ -220,8 +222,7 @@ public class NatsDlqRemediationServiceTests
         string? capturedMessageId = null;
 
         _dlqStore.GetAsync(entryId, Arg.Any<CancellationToken>()).Returns(entry);
-        _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<CancellationToken>())
-            .Returns(true);
+        SetupSuccessfulStatusUpdates();
 
         _publisher.PublishAsync(Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<string>(), Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(callInfo =>
@@ -233,14 +234,9 @@ public class NatsDlqRemediationServiceTests
         // Act
         await _sut.ReplayAsync(entryId);
 
-        // Assert: Message ID should follow replay-{id}-{ticks} format
+        // Assert: Message ID should be stable for idempotent replay
         capturedMessageId.ShouldNotBeNull();
-        capturedMessageId.ShouldStartWith($"replay-{entryId}-");
-        
-        // Extract ticks and verify it's a valid number
-        var ticksPart = capturedMessageId.Substring($"replay-{entryId}-".Length);
-        long.TryParse(ticksPart, out var ticks).ShouldBeTrue();
-        ticks.ShouldBeGreaterThan(0);
+        capturedMessageId.ShouldBe($"replay-{entryId}");
     }
 
     [Test]
@@ -253,8 +249,7 @@ public class NatsDlqRemediationServiceTests
         string? capturedMessageId = null;
 
         _dlqStore.GetAsync(entryId, Arg.Any<CancellationToken>()).Returns(entry);
-        _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<CancellationToken>())
-            .Returns(true);
+        SetupSuccessfulStatusUpdates();
 
         _publisher.PublishAsync(Arg.Any<string>(), Arg.Any<TestPayload>(), Arg.Any<string>(), Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(callInfo =>
@@ -266,13 +261,13 @@ public class NatsDlqRemediationServiceTests
         // Act
         await _sut.ReplayWithModificationAsync(entryId, modifiedPayload);
 
-        // Assert: Message ID should follow replay-modified-{id}-{ticks} format
+        // Assert: Message ID should be stable for idempotent replay
         capturedMessageId.ShouldNotBeNull();
-        capturedMessageId.ShouldStartWith($"replay-modified-{entryId}-");
+        capturedMessageId.ShouldBe($"replay-modified-{entryId}");
     }
 
     [Test]
-    public async Task ReplayAsync_UsesDistinctMessageIds_AcrossMultipleReplays()
+    public async Task ReplayAsync_UsesStableMessageIds_AcrossMultipleReplays_ByDefault()
     {
         // Arrange
         var entryId = "stream.consumer.msg-dedup-test";
@@ -280,8 +275,14 @@ public class NatsDlqRemediationServiceTests
         var capturedMessageIds = new List<string>();
 
         _dlqStore.GetAsync(entryId, Arg.Any<CancellationToken>()).Returns(entry);
-        _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<CancellationToken>())
-            .Returns(true);
+        _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<ulong?>(), Arg.Any<CancellationToken>())
+            .Returns(
+                new DlqEntryUpdateResult(DlqEntryUpdateOutcome.Updated, 8),
+                new DlqEntryUpdateResult(DlqEntryUpdateOutcome.Updated, 9),
+                new DlqEntryUpdateResult(DlqEntryUpdateOutcome.Updated, 10),
+                new DlqEntryUpdateResult(DlqEntryUpdateOutcome.Updated, 11),
+                new DlqEntryUpdateResult(DlqEntryUpdateOutcome.Updated, 12),
+                new DlqEntryUpdateResult(DlqEntryUpdateOutcome.Updated, 13));
 
         _publisher.PublishAsync(Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<string>(), Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(callInfo =>
@@ -292,14 +293,45 @@ public class NatsDlqRemediationServiceTests
 
         // Act: Replay multiple times in quick succession
         await _sut.ReplayAsync(entryId);
-        await Task.Delay(1); // Ensure tick differences
         await _sut.ReplayAsync(entryId);
-        await Task.Delay(1);
         await _sut.ReplayAsync(entryId);
 
-        // Assert: Each replay should have a unique message ID
+        // Assert: Each replay should use the same message ID
         capturedMessageIds.Count.ShouldBe(3);
-        capturedMessageIds.Distinct().Count().ShouldBe(3, "All message IDs should be unique");
+        capturedMessageIds.Distinct().Single().ShouldBe($"replay-{entryId}");
+    }
+
+    [Test]
+    public async Task ReplayAsync_UsesDistinctMessageIds_WhenReplayModeIsNewEvent()
+    {
+        // Arrange
+        var entryId = "stream.consumer.msg-dedup-test";
+        var entry = CreateTestEntry(entryId, payload: Encoding.UTF8.GetBytes("test"));
+        var capturedMessageIds = new List<string>();
+
+        _dlqStore.GetAsync(entryId, Arg.Any<CancellationToken>()).Returns(entry);
+        _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<ulong?>(), Arg.Any<CancellationToken>())
+            .Returns(
+                new DlqEntryUpdateResult(DlqEntryUpdateOutcome.Updated, 8),
+                new DlqEntryUpdateResult(DlqEntryUpdateOutcome.Updated, 9),
+                new DlqEntryUpdateResult(DlqEntryUpdateOutcome.Updated, 10),
+                new DlqEntryUpdateResult(DlqEntryUpdateOutcome.Updated, 11));
+
+        _publisher.PublishAsync(Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<string>(), Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
+            .Returns(callInfo =>
+            {
+                capturedMessageIds.Add(callInfo.ArgAt<string>(2));
+                return Task.CompletedTask;
+            });
+
+        // Act
+        await _sut.ReplayAsync(entryId, DlqReplayMode.NewEvent);
+        await _sut.ReplayAsync(entryId, DlqReplayMode.NewEvent);
+
+        // Assert
+        capturedMessageIds.Count.ShouldBe(2);
+        capturedMessageIds.Distinct().Count().ShouldBe(2);
+        capturedMessageIds.ShouldAllBe(id => id.StartsWith($"replay-{entryId}-"));
     }
 
     #endregion
@@ -314,8 +346,10 @@ public class NatsDlqRemediationServiceTests
         var entry = CreateTestEntry(entryId, payload: Encoding.UTF8.GetBytes("test"));
 
         _dlqStore.GetAsync(entryId, Arg.Any<CancellationToken>()).Returns(entry);
-        _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<CancellationToken>())
-            .Returns(true);
+        _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<ulong?>(), Arg.Any<CancellationToken>())
+            .Returns(
+                new DlqEntryUpdateResult(DlqEntryUpdateOutcome.Updated, 8),
+                new DlqEntryUpdateResult(DlqEntryUpdateOutcome.Updated, 9));
 
         _publisher.PublishAsync(Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<string>(), Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .ThrowsAsync(new IOException("NATS connection lost"));
@@ -331,8 +365,8 @@ public class NatsDlqRemediationServiceTests
         // Verify status update sequence: Processing -> Pending (revert)
         Received.InOrder(() =>
         {
-            _dlqStore.UpdateStatusAsync(entryId, DlqMessageStatus.Processing, Arg.Any<CancellationToken>());
-            _dlqStore.UpdateStatusAsync(entryId, DlqMessageStatus.Pending, Arg.Any<CancellationToken>());
+            _dlqStore.UpdateStatusAsync(entryId, DlqMessageStatus.Processing, entry.StoreRevision, Arg.Any<CancellationToken>());
+            _dlqStore.UpdateStatusAsync(entryId, DlqMessageStatus.Pending, 8, Arg.Any<CancellationToken>());
         });
     }
 
@@ -345,8 +379,10 @@ public class NatsDlqRemediationServiceTests
         var expectedException = new InvalidOperationException("Message too large for JetStream");
 
         _dlqStore.GetAsync(entryId, Arg.Any<CancellationToken>()).Returns(entry);
-        _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<CancellationToken>())
-            .Returns(true);
+        _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<ulong?>(), Arg.Any<CancellationToken>())
+            .Returns(
+                new DlqEntryUpdateResult(DlqEntryUpdateOutcome.Updated, 8),
+                new DlqEntryUpdateResult(DlqEntryUpdateOutcome.Updated, 9));
 
         _publisher.PublishAsync(Arg.Any<string>(), Arg.Any<byte[]>(), Arg.Any<string>(), Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .ThrowsAsync(expectedException);
@@ -361,6 +397,31 @@ public class NatsDlqRemediationServiceTests
     }
 
     [Test]
+    public async Task ReplayAsync_ReturnsFailed_WhenProcessingTransitionConflicts()
+    {
+        // Arrange
+        var entryId = "stream.consumer.msg-conflict";
+        var entry = CreateTestEntry(entryId, payload: Encoding.UTF8.GetBytes("test"));
+        _dlqStore.GetAsync(entryId, Arg.Any<CancellationToken>()).Returns(entry);
+        _dlqStore.UpdateStatusAsync(entryId, DlqMessageStatus.Processing, entry.StoreRevision, Arg.Any<CancellationToken>())
+            .Returns(new DlqEntryUpdateResult(DlqEntryUpdateOutcome.Conflict));
+
+        // Act
+        var result = await _sut.ReplayAsync(entryId);
+
+        // Assert
+        result.Success.ShouldBeFalse();
+        result.Action.ShouldBe(DlqRemediationAction.Failed);
+        result.ErrorMessage!.ShouldContain("modified concurrently");
+        await _publisher.DidNotReceive().PublishAsync(
+            Arg.Any<string>(),
+            Arg.Any<byte[]>(),
+            Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Test]
     public async Task ReplayAsync_HandlesStatusUpdateFailure_AfterPublishSucceeds()
     {
         // Critical scenario: Publish succeeds but status update fails
@@ -369,27 +430,18 @@ public class NatsDlqRemediationServiceTests
         // Arrange
         var entryId = "stream.consumer.msg-partial-fail";
         var entry = CreateTestEntry(entryId, payload: Encoding.UTF8.GetBytes("test"));
-        var statusUpdateCount = 0;
-
         _dlqStore.GetAsync(entryId, Arg.Any<CancellationToken>()).Returns(entry);
-        
-        // First call (Processing) succeeds, second call (Resolved) fails
-        _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<CancellationToken>())
-            .Returns(callInfo =>
-            {
-                statusUpdateCount++;
-                if (statusUpdateCount == 2) // The Resolved status update
-                {
-                    throw new IOException("KV store unavailable");
-                }
-                return Task.FromResult(true);
-            });
+        _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<ulong?>(), Arg.Any<CancellationToken>())
+            .Returns(
+                new DlqEntryUpdateResult(DlqEntryUpdateOutcome.Updated, 8),
+                new DlqEntryUpdateResult(DlqEntryUpdateOutcome.Conflict));
 
         // Act
         var result = await _sut.ReplayAsync(entryId);
 
         // Assert: The operation should return Failed since post-publish status update threw
-        // This is the documented "at-least-once" risk - message was published but status wasn't updated
+        result.ErrorMessage!.ShouldContain("modified concurrently");
+
         result.Success.ShouldBeFalse();
         result.Action.ShouldBe(DlqRemediationAction.Failed);
         
@@ -411,8 +463,10 @@ public class NatsDlqRemediationServiceTests
         var modifiedPayload = new TestPayload { Data = "modified" };
 
         _dlqStore.GetAsync(entryId, Arg.Any<CancellationToken>()).Returns(entry);
-        _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<CancellationToken>())
-            .Returns(true);
+        _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<ulong?>(), Arg.Any<CancellationToken>())
+            .Returns(
+                new DlqEntryUpdateResult(DlqEntryUpdateOutcome.Updated, 8),
+                new DlqEntryUpdateResult(DlqEntryUpdateOutcome.Updated, 9));
 
         _publisher.PublishAsync(Arg.Any<string>(), Arg.Any<TestPayload>(), Arg.Any<string>(), Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .ThrowsAsync(new TimeoutException("Publish timeout"));
@@ -428,6 +482,7 @@ public class NatsDlqRemediationServiceTests
         await _dlqStore.Received(1).UpdateStatusAsync(
             entryId, 
             DlqMessageStatus.Pending, 
+            8,
             Arg.Any<CancellationToken>());
     }
 
@@ -448,8 +503,7 @@ public class NatsDlqRemediationServiceTests
         TestPayload? capturedPayload = null;
 
         _dlqStore.GetAsync(entryId, Arg.Any<CancellationToken>()).Returns(entry);
-        _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<CancellationToken>())
-            .Returns(true);
+        SetupSuccessfulStatusUpdates();
 
         _publisher.PublishAsync(Arg.Any<string>(), Arg.Any<TestPayload>(), Arg.Any<string>(), Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(callInfo =>
@@ -479,8 +533,7 @@ public class NatsDlqRemediationServiceTests
         string? capturedSubject = null;
 
         _dlqStore.GetAsync(entryId, Arg.Any<CancellationToken>()).Returns(entry);
-        _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<CancellationToken>())
-            .Returns(true);
+        SetupSuccessfulStatusUpdates();
 
         _publisher.PublishAsync(Arg.Any<string>(), Arg.Any<TestPayload>(), Arg.Any<string>(), Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(callInfo =>
@@ -507,8 +560,7 @@ public class NatsDlqRemediationServiceTests
         var modifiedPayload = new TestPayload { Data = "typed" };
 
         _dlqStore.GetAsync(entryId, Arg.Any<CancellationToken>()).Returns(entry);
-        _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<CancellationToken>())
-            .Returns(true);
+        SetupSuccessfulStatusUpdates();
 
         // Act
         await _sut.ReplayWithModificationAsync(entryId, modifiedPayload);
@@ -518,6 +570,187 @@ public class NatsDlqRemediationServiceTests
             Arg.Any<string>(),
             Arg.Is<TestPayload>(p => p != null),
             Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Test]
+    public async Task ReplayAsync_DeserializesAndPublishesTypedPayload_WhenOriginalTypeKnown()
+    {
+        // Arrange
+        var entryId = "stream.consumer.msg-typed-replay";
+        var entry = CreateTestEntry(
+            entryId,
+            payload: Encoding.UTF8.GetBytes("serialized"),
+            originalMessageType: nameof(TestPayload));
+        var deserialized = new TestPayload { Data = "typed", Value = 99 };
+
+        _dlqStore.GetAsync(entryId, Arg.Any<CancellationToken>()).Returns(entry);
+        SetupSuccessfulStatusUpdates();
+        _serializer.Deserialize<TestPayload>(Arg.Any<ReadOnlyMemory<byte>>()).Returns(deserialized);
+
+        // Act
+        var result = await _sut.ReplayAsync(entryId);
+
+        // Assert
+        result.Success.ShouldBeTrue();
+        await _publisher.Received(1).PublishAsync(
+            entry.OriginalSubject,
+            Arg.Is<TestPayload>(p => p.Data == "typed" && p.Value == 99),
+            "replay-stream.consumer.msg-typed-replay",
+            Arg.Any<MessageHeaders?>(),
+            Arg.Any<CancellationToken>());
+        await _publisher.DidNotReceive().PublishAsync(
+            entry.OriginalSubject,
+            Arg.Is<byte[]>(p => p.SequenceEqual(entry.Payload!)),
+            Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Test]
+    public async Task ReplayAsync_PrefersRawPublisher_WhenAvailable_EvenIfTypeAliasIsKnown()
+    {
+        // Arrange
+        var rawPublisher = Substitute.For<IJetStreamPublisher, IRawJetStreamPublisher>();
+        var sut = new NatsDlqRemediationService(
+            _dlqStore,
+            rawPublisher,
+            _serializer,
+            _typeAliasRegistry,
+            _logger,
+            (IRawJetStreamPublisher)rawPublisher,
+            _objectStore,
+            null);
+
+        var entryId = "stream.consumer.msg-raw-priority";
+        var payload = Encoding.UTF8.GetBytes("raw-payload");
+        var entry = CreateTestEntry(
+            entryId,
+            payload: payload,
+            originalMessageType: nameof(TestPayload));
+
+        _dlqStore.GetAsync(entryId, Arg.Any<CancellationToken>()).Returns(entry);
+        SetupSuccessfulStatusUpdates();
+
+        // Act
+        var result = await sut.ReplayAsync(entryId);
+
+        // Assert
+        result.Success.ShouldBeTrue();
+        await ((IRawJetStreamPublisher)rawPublisher).Received(1).PublishRawAsync(
+            entry.OriginalSubject,
+            Arg.Is<ReadOnlyMemory<byte>>(m => m.ToArray().SequenceEqual(payload)),
+            $"replay-{entryId}",
+            Arg.Any<MessageHeaders?>(),
+            Arg.Any<CancellationToken>());
+
+        await rawPublisher.DidNotReceive().PublishAsync(
+            entry.OriginalSubject,
+            Arg.Any<TestPayload>(),
+            Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Test]
+    public async Task ReplayAsync_FallsBackToRawBytes_WhenTypeAliasCannotBeResolved()
+    {
+        // Arrange
+        var entryId = "stream.consumer.msg-unknown-alias";
+        var payload = Encoding.UTF8.GetBytes("opaque-payload");
+        var entry = CreateTestEntry(
+            entryId,
+            payload: payload,
+            originalMessageType: "UnknownAlias");
+
+        _dlqStore.GetAsync(entryId, Arg.Any<CancellationToken>()).Returns(entry);
+        SetupSuccessfulStatusUpdates();
+
+        // Act
+        var result = await _sut.ReplayAsync(entryId);
+
+        // Assert
+        result.Success.ShouldBeTrue();
+        await _publisher.Received(1).PublishAsync(
+            entry.OriginalSubject,
+            Arg.Is<byte[]>(bytes => bytes.SequenceEqual(payload)),
+            $"replay-{entryId}",
+            Arg.Any<MessageHeaders?>(),
+            Arg.Any<CancellationToken>());
+
+        await _publisher.DidNotReceive().PublishAsync(
+            entry.OriginalSubject,
+            Arg.Any<TestPayload>(),
+            Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Test]
+    public async Task ReplayAsync_WhenTwoCallersRace_OnlyOnePublishes()
+    {
+        // Arrange
+        var entryId = "stream.consumer.msg-concurrent-replay";
+        var entry = CreateTestEntry(entryId, payload: Encoding.UTF8.GetBytes("test"));
+
+        _dlqStore.GetAsync(entryId, Arg.Any<CancellationToken>()).Returns(entry);
+
+        var firstProcessingAttempt = true;
+        _dlqStore.UpdateStatusAsync(
+                entryId,
+                DlqMessageStatus.Processing,
+                entry.StoreRevision,
+                Arg.Any<CancellationToken>())
+            .Returns(_ =>
+            {
+                if (firstProcessingAttempt)
+                {
+                    firstProcessingAttempt = false;
+                    return new DlqEntryUpdateResult(DlqEntryUpdateOutcome.Updated, 8);
+                }
+
+                return new DlqEntryUpdateResult(DlqEntryUpdateOutcome.Conflict);
+            });
+
+        _dlqStore.UpdateStatusAsync(
+                entryId,
+                DlqMessageStatus.Resolved,
+                8,
+                Arg.Any<CancellationToken>())
+            .Returns(new DlqEntryUpdateResult(DlqEntryUpdateOutcome.Updated, 9));
+
+        var releasePublish = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var publishStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        _publisher.PublishAsync(
+                entry.OriginalSubject,
+                Arg.Any<byte[]>(),
+                Arg.Any<string>(),
+                Arg.Any<MessageHeaders?>(),
+                Arg.Any<CancellationToken>())
+            .Returns(async _ =>
+            {
+                publishStarted.TrySetResult();
+                await releasePublish.Task;
+            });
+
+        // Act
+        var firstReplay = _sut.ReplayAsync(entryId);
+        await publishStarted.Task;
+        var secondReplay = _sut.ReplayAsync(entryId);
+        releasePublish.TrySetResult();
+
+        await Task.WhenAll(firstReplay, secondReplay);
+
+        // Assert
+        var results = new[] { await firstReplay, await secondReplay };
+        results.Count(r => r.Success).ShouldBe(1);
+        results.Count(r => !r.Success && r.ErrorMessage!.Contains("modified concurrently")).ShouldBe(1);
+        await _publisher.Received(1).PublishAsync(
+            entry.OriginalSubject,
+            Arg.Any<byte[]>(),
+            $"replay-{entryId}",
             Arg.Any<MessageHeaders?>(),
             Arg.Any<CancellationToken>());
     }
@@ -614,8 +847,8 @@ public class NatsDlqRemediationServiceTests
         var entryId = "stream.consumer.msg-archive";
         var entry = CreateTestEntry(entryId);
         _dlqStore.GetAsync(entryId, Arg.Any<CancellationToken>()).Returns(entry);
-        _dlqStore.UpdateStatusAsync(entryId, DlqMessageStatus.Archived, Arg.Any<CancellationToken>())
-            .Returns(true);
+        _dlqStore.UpdateStatusAsync(entryId, DlqMessageStatus.Archived, entry.StoreRevision, Arg.Any<CancellationToken>())
+            .Returns(new DlqEntryUpdateResult(DlqEntryUpdateOutcome.Updated, 8));
 
         // Act
         var result = await _sut.ArchiveAsync(entryId, "Obsolete message");
@@ -626,6 +859,7 @@ public class NatsDlqRemediationServiceTests
         await _dlqStore.Received(1).UpdateStatusAsync(
             entryId, 
             DlqMessageStatus.Archived, 
+            entry.StoreRevision,
             Arg.Any<CancellationToken>());
     }
 
@@ -638,7 +872,8 @@ public class NatsDlqRemediationServiceTests
         byte[]? payload = null,
         string? payloadEncoding = null,
         Dictionary<string, string>? headers = null,
-        string originalSubject = "test.subject")
+        string originalSubject = "test.subject",
+        string? originalMessageType = null)
     {
         // Extract the message ID from the hierarchical key
         var parts = key.Split('.');
@@ -658,8 +893,18 @@ public class NatsDlqRemediationServiceTests
             ErrorReason = "Max delivery attempts exceeded",
             Payload = payload,
             PayloadEncoding = payloadEncoding,
-            OriginalHeaders = headers
+            OriginalHeaders = headers,
+            OriginalMessageType = originalMessageType,
+            StoreRevision = 7
         };
+    }
+
+    private void SetupSuccessfulStatusUpdates(ulong processingRevision = 8, ulong resolvedRevision = 9)
+    {
+        _dlqStore.UpdateStatusAsync(Arg.Any<string>(), Arg.Any<DlqMessageStatus>(), Arg.Any<ulong?>(), Arg.Any<CancellationToken>())
+            .Returns(
+                new DlqEntryUpdateResult(DlqEntryUpdateOutcome.Updated, processingRevision),
+                new DlqEntryUpdateResult(DlqEntryUpdateOutcome.Updated, resolvedRevision));
     }
 
     private record TestPayload
