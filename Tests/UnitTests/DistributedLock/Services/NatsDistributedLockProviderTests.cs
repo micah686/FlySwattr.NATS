@@ -15,11 +15,11 @@ namespace UnitTests.DistributedLock.Services;
 [Property("nTag", "DistributedLock")]
 public class NatsDistributedLockProviderTests
 {
+    private static readonly string BucketName = NatsDistributedLockProvider.GetBucketNameForTtl(TimeSpan.FromMinutes(5));
     private readonly INatsKVContext _kvContext;
     private readonly INatsKVStore _kvStore;
     private readonly ILogger<NatsDistributedLockProvider> _logger;
     private readonly NatsDistributedLockProvider _sut;
-    private const string BucketName = "topology_locks";
     private const string LockKey = "test-lock";
 
     public NatsDistributedLockProviderTests()
@@ -144,9 +144,13 @@ public class NatsDistributedLockProviderTests
         // Arrange
         // Use a short TTL to trigger heartbeat quickly
         var shortTtl = TimeSpan.FromMilliseconds(200);
+        var shortTtlBucket = NatsDistributedLockProvider.GetBucketNameForTtl(shortTtl);
         var sut = new NatsDistributedLockProvider(_kvContext, _logger, shortTtl);
         var lockObj = sut.CreateLock(LockKey);
         ulong initialRevision = 1;
+
+        _kvContext.GetStoreAsync(shortTtlBucket, Arg.Any<CancellationToken>())
+            .Returns(new ValueTask<INatsKVStore>(_kvStore));
 
         _kvStore.CreateAsync(LockKey, Arg.Any<byte[]>(), cancellationToken: Arg.Any<CancellationToken>())
             .Returns(new ValueTask<ulong>(initialRevision));
@@ -158,17 +162,50 @@ public class NatsDistributedLockProviderTests
         // Act
         await using var handle = await lockObj.TryAcquireAsync();
         
-        // Wait for heartbeat interval (TTL / 2 = 100ms)
+        // Wait for heartbeat interval (TTL / 3 ~= 66ms)
         await Task.Delay(600);
 
         // Assert
-        // Should have called UpdateAsync at least once for heartbeat (with non-empty value)
-        await _kvStore.Received().UpdateAsync(
-            LockKey, 
-            Arg.Is<byte[]>(b => b.Length > 0), 
-            initialRevision, 
-            serializer: null, 
+        // Should have called UpdateAsync at least once for heartbeat (with non-empty value).
+        // The tracked revision advances after each successful heartbeat, so assert behavior
+        // rather than pinning the first revision number.
+        var heartbeatCalls = _kvStore.ReceivedCalls()
+            .Where(call => call.GetMethodInfo().Name == nameof(INatsKVStore.UpdateAsync))
+            .Select(call => call.GetArguments())
+            .Where(args =>
+                args.Length >= 2 &&
+                args[0] is string key && key == LockKey &&
+                args[1] is byte[] bytes && bytes.Length > 0)
+            .ToList();
+
+        heartbeatCalls.ShouldNotBeEmpty();
+    }
+
+    [Test]
+    public async Task TryAcquireAsync_ShouldUseBucketDerivedFromTtl()
+    {
+        // Arrange
+        var customTtl = TimeSpan.FromSeconds(5);
+        var customBucket = NatsDistributedLockProvider.GetBucketNameForTtl(customTtl);
+        var sut = new NatsDistributedLockProvider(_kvContext, _logger, customTtl);
+        var lockObj = sut.CreateLock(LockKey);
+
+        _kvContext.GetStoreAsync(customBucket, Arg.Any<CancellationToken>())
+            .Returns(new ValueTask<INatsKVStore>(_kvStore));
+        _kvContext.CreateStoreAsync(Arg.Any<NatsKVConfig>(), Arg.Any<CancellationToken>())
+            .Returns(new ValueTask<INatsKVStore>(_kvStore));
+        _kvStore.CreateAsync(LockKey, Arg.Any<byte[]>(), cancellationToken: Arg.Any<CancellationToken>())
+            .Returns(new ValueTask<ulong>(1));
+
+        // Act
+        await using var handle = await lockObj.TryAcquireAsync();
+
+        // Assert
+        handle.ShouldNotBeNull();
+        await _kvContext.Received(1).CreateStoreAsync(
+            Arg.Is<NatsKVConfig>(cfg => cfg.Bucket == customBucket && cfg.MaxAge == customTtl),
             Arg.Any<CancellationToken>());
+        await _kvContext.Received(1).GetStoreAsync(customBucket, Arg.Any<CancellationToken>());
     }
 
     private NatsKVEntry<T> CreateEntry<T>(string bucket, string key, T value, ulong revision)

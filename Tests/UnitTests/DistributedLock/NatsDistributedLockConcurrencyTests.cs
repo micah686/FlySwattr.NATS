@@ -12,11 +12,11 @@ namespace UnitTests.DistributedLock;
 [Property("nTag", "DistributedLock")]
 public class NatsDistributedLockConcurrencyTests
 {
+    private static readonly string BucketName = NatsDistributedLockProvider.GetBucketNameForTtl(TimeSpan.FromMilliseconds(500));
     private readonly INatsKVContext _kvContext;
     private readonly INatsKVStore _kvStore;
     private readonly ILogger<NatsDistributedLockProvider> _logger;
     private readonly NatsDistributedLockProvider _sut;
-    private const string BucketName = "topology_locks";
     private const string LockKey = "concurrency-lock";
 
     public NatsDistributedLockConcurrencyTests()
@@ -56,7 +56,7 @@ public class NatsDistributedLockConcurrencyTests
         var handle = await lockObj.TryAcquireAsync();
         await Assert.That(handle).IsNotNull();
 
-        // Wait for heartbeat interval (TTL / 2 = 250ms) plus some buffer
+        // Wait for heartbeat interval (TTL / 3 ~= 166ms) plus some buffer
         await Task.Delay(1000);
 
         // Assert

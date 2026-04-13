@@ -18,6 +18,7 @@ internal class NatsDistributedLockProvider : IDistributedLockProvider
     private readonly TimeSpan _ttl;
     private const string BucketName = "topology_locks";
     private static readonly TimeSpan DefaultTtl = TimeSpan.FromMinutes(5);
+    private readonly string _bucketName;
 
     public NatsDistributedLockProvider(INatsKVContext kvContext, ILogger<NatsDistributedLockProvider> logger)
         : this(kvContext, logger, DefaultTtl)
@@ -29,13 +30,17 @@ internal class NatsDistributedLockProvider : IDistributedLockProvider
         _kvContext = kvContext;
         _logger = logger;
         _ttl = ttl;
+        _bucketName = GetBucketNameForTtl(ttl);
     }
 
     public IDistributedLock CreateLock(string name)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
-        return new NatsDistributedLock(_kvContext, name, _logger, BucketName, _ttl);
+        return new NatsDistributedLock(_kvContext, name, _logger, _bucketName, _ttl);
     }
+
+    internal static string GetBucketNameForTtl(TimeSpan ttl)
+        => $"{BucketName}_{Math.Max(1L, (long)Math.Ceiling(ttl.TotalMilliseconds))}ms";
 
     private sealed class NatsDistributedLock : IDistributedLock
     {
@@ -371,8 +376,8 @@ internal class NatsDistributedLockProvider : IDistributedLockProvider
             _logger = logger;
             _currentRevision = initialRevision;
             
-            // Start heartbeat at half the TTL interval
-            _heartbeatTask = HeartbeatLoopAsync(ttl / 2, _heartbeatCts.Token);
+            // Start heartbeat at one third of the TTL interval to give more recovery margin.
+            _heartbeatTask = HeartbeatLoopAsync(TimeSpan.FromTicks(Math.Max(1, ttl.Ticks / 3)), _heartbeatCts.Token);
         }
 
         private async Task HeartbeatLoopAsync(TimeSpan interval, CancellationToken ct)
@@ -436,6 +441,7 @@ internal class NatsDistributedLockProvider : IDistributedLockProvider
             }
         }
 
+        [Obsolete("Synchronous dispose is best-effort only. Prefer DisposeAsync for deterministic release.", error: false)]
         public void Dispose()
         {
             // Fire-and-forget with best-effort error handling

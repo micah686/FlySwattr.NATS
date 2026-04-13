@@ -316,7 +316,7 @@ public class DefaultDlqPoisonHandlerTests
         capturedDlqMessage.ShouldNotBeNull();
         capturedDlqMessage.ErrorReason.ShouldBe("InvalidOperationException: bad secret value");
     }
-
+    
     #endregion
 
     #region Additional Coverage
