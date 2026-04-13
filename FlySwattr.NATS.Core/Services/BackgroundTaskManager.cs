@@ -9,10 +9,13 @@ namespace FlySwattr.NATS.Core.Services;
 /// </summary>
 internal sealed class BackgroundTaskManager : IAsyncDisposable
 {
+    private sealed record ConsumerRegistration(
+        IDisposable Service,
+        CancellationTokenSource LinkedTokenSource,
+        Task? BackgroundTask);
+
     private readonly ILogger<BackgroundTaskManager> _logger;
-    private readonly ConcurrentDictionary<Guid, Task> _backgroundTasks = new();
-    private readonly ConcurrentDictionary<Guid, IDisposable> _backgroundServices = new();
-    private readonly ConcurrentDictionary<Guid, CancellationTokenSource> _linkedTokenSources = new();
+    private readonly ConcurrentDictionary<Guid, ConsumerRegistration> _registrations = new();
     private readonly CancellationTokenSource _shutdownTokenSource = new();
     private readonly Timer _cleanupTimer;
     private int _disposed;
@@ -31,20 +34,15 @@ internal sealed class BackgroundTaskManager : IAsyncDisposable
         var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _shutdownTokenSource.Token);
         var taskId = Guid.NewGuid();
 
-        _linkedTokenSources.TryAdd(taskId, linkedCts);
-
         await service.StartAsync(linkedCts.Token);
-        _backgroundServices.TryAdd(taskId, service);
 
         if (service.ExecuteTask is Task task && !task.IsCompleted)
         {
-            var wrappedTask = WrapTaskWithCleanupAsync(task, taskId, linkedCts);
-            _backgroundTasks.TryAdd(taskId, wrappedTask);
+            var wrappedTask = WrapTaskWithCleanupAsync(task, taskId);
+            _registrations[taskId] = new ConsumerRegistration(service, linkedCts, wrappedTask);
             return;
         }
 
-        _linkedTokenSources.TryRemove(taskId, out _);
-        _backgroundServices.TryRemove(taskId, out _);
         await StopAndDisposeServiceAsync(service);
         linkedCts.Dispose();
     }
@@ -60,7 +58,15 @@ internal sealed class BackgroundTaskManager : IAsyncDisposable
 
         try
         {
-            await Task.WhenAll(_backgroundTasks.Values);
+            var backgroundTasks = _registrations.Values
+                .Select(static registration => registration.BackgroundTask)
+                .OfType<Task>()
+                .ToArray();
+
+            if (backgroundTasks.Length > 0)
+            {
+                await Task.WhenAll(backgroundTasks);
+            }
         }
         catch (OperationCanceledException)
         {
@@ -76,30 +82,15 @@ internal sealed class BackgroundTaskManager : IAsyncDisposable
         }
 
         var stopTasks = new List<Task>();
-        foreach (var kvp in _backgroundServices)
+        foreach (var kvp in _registrations)
         {
-            if (_backgroundServices.TryRemove(kvp.Key, out var service))
+            if (_registrations.TryRemove(kvp.Key, out var registration))
             {
-                stopTasks.Add(StopAndDisposeServiceAsync(service));
+                stopTasks.Add(StopAndDisposeRegistrationAsync(registration));
             }
         }
 
         await Task.WhenAll(stopTasks);
-
-        foreach (var kvp in _linkedTokenSources)
-        {
-            if (_linkedTokenSources.TryRemove(kvp.Key, out var cts))
-            {
-                try
-                {
-                    cts.Dispose();
-                }
-                catch (ObjectDisposedException)
-                {
-                    // Already disposed.
-                }
-            }
-        }
 
         await _cleanupTimer.DisposeAsync();
         _shutdownTokenSource.Dispose();
@@ -107,16 +98,17 @@ internal sealed class BackgroundTaskManager : IAsyncDisposable
 
     private void CleanupCompletedTasks(object? _)
     {
-        foreach (var kvp in _backgroundTasks)
+        foreach (var kvp in _registrations)
         {
-            if (kvp.Value.IsCompleted)
+            if (kvp.Value.BackgroundTask is { IsCompleted: true } &&
+                _registrations.TryRemove(kvp.Key, out var registration))
             {
-                _backgroundTasks.TryRemove(kvp.Key, out Task? _);
+                _ = StopAndDisposeRegistrationAsync(registration);
             }
         }
     }
 
-    private async Task WrapTaskWithCleanupAsync(Task task, Guid taskId, CancellationTokenSource linkedCts)
+    private async Task WrapTaskWithCleanupAsync(Task task, Guid taskId)
     {
         try
         {
@@ -132,22 +124,24 @@ internal sealed class BackgroundTaskManager : IAsyncDisposable
         }
         finally
         {
-            _backgroundTasks.TryRemove(taskId, out _);
-            _linkedTokenSources.TryRemove(taskId, out _);
+            if (_registrations.TryRemove(taskId, out var registration))
+            {
+                await StopAndDisposeRegistrationAsync(registration);
+            }
+        }
+    }
 
-            if (_backgroundServices.TryRemove(taskId, out var service))
-            {
-                await StopAndDisposeServiceAsync(service);
-            }
+    private async Task StopAndDisposeRegistrationAsync(ConsumerRegistration registration)
+    {
+        await StopAndDisposeServiceAsync(registration.Service);
 
-            try
-            {
-                linkedCts.Dispose();
-            }
-            catch (ObjectDisposedException)
-            {
-                // Already disposed.
-            }
+        try
+        {
+            registration.LinkedTokenSource.Dispose();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Already disposed.
         }
     }
 

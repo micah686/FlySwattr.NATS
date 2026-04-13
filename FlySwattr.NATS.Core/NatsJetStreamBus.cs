@@ -3,12 +3,14 @@ using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Abstractions.Exceptions;
+using FlySwattr.NATS.Core.Configuration;
 using FlySwattr.NATS.Core.Services;
 using FlySwattr.NATS.Core.Serializers;
 using FlySwattr.NATS.Core.Telemetry;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using NATS.Client.Core;
 using NATS.Client.JetStream;
 using NATS.Client.JetStream.Models;
@@ -40,36 +42,27 @@ internal interface IRawJetStreamConsumer
 
 public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJetStreamPublisher, IRawJetStreamConsumer, IAsyncDisposable
 {
-    private static readonly string[] ReservedPublishHeaders =
-    [
-        "Content-Type",
-        "Nats-Msg-Id",
-        "traceparent",
-        "tracestate"
-    ];
-
-    private static readonly string[] ReservedRawPublishHeaders =
-    [
-        "Nats-Msg-Id",
-        "traceparent",
-        "tracestate"
-    ];
+    private readonly string[] _reservedPublishHeaders;
+    private readonly string[] _reservedRawPublishHeaders;
 
     private readonly INatsJSContext _jsContext;
     private readonly ILogger<NatsJetStreamBus> _logger;
     private readonly IMessageSerializer _serializer;
     private readonly BackgroundTaskManager _backgroundTaskManager;
+    private readonly WireCompatibilityOptions _wireOptions;
     private int _disposed;
 
     public NatsJetStreamBus(
         INatsJSContext jsContext,
         ILogger<NatsJetStreamBus> logger,
-        IMessageSerializer serializer)
+        IMessageSerializer serializer,
+        IOptions<WireCompatibilityOptions>? wireOptions = null)
         : this(
             jsContext,
             logger,
             serializer,
-            new BackgroundTaskManager(NullLogger<BackgroundTaskManager>.Instance))
+            new BackgroundTaskManager(NullLogger<BackgroundTaskManager>.Instance),
+            wireOptions)
     {
     }
 
@@ -77,12 +70,31 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
         INatsJSContext jsContext,
         ILogger<NatsJetStreamBus> logger,
         IMessageSerializer serializer,
-        BackgroundTaskManager backgroundTaskManager)
+        BackgroundTaskManager backgroundTaskManager,
+        IOptions<WireCompatibilityOptions>? wireOptions = null)
     {
         _jsContext = jsContext;
         _logger = logger;
         _serializer = serializer;
         _backgroundTaskManager = backgroundTaskManager;
+        _wireOptions = wireOptions?.Value ?? new WireCompatibilityOptions();
+
+        // Build reserved header lists including the version header
+        _reservedPublishHeaders =
+        [
+            "Content-Type",
+            "Nats-Msg-Id",
+            "traceparent",
+            "tracestate",
+            _wireOptions.VersionHeaderName
+        ];
+        _reservedRawPublishHeaders =
+        [
+            "Nats-Msg-Id",
+            "traceparent",
+            "tracestate",
+            _wireOptions.VersionHeaderName
+        ];
     }
 
     public Task PublishAsync<T>(string subject, T message, CancellationToken cancellationToken = default)
@@ -97,7 +109,7 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
     {
         var stopwatch = Stopwatch.StartNew();
         MessageSecurity.ValidatePublishSubject(subject);
-        MessageSecurity.RejectReservedHeaders(headers, ReservedPublishHeaders);
+        MessageSecurity.RejectReservedHeaders(headers, _reservedPublishHeaders);
         
         // Require a caller-provided message ID for true application-level idempotency.
         // Auto-generating GUIDs would defeat JetStream's deduplication on retries.
@@ -121,7 +133,8 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
         var natsHeaders = new NatsHeaders
         {
             ["Content-Type"] = _serializer.GetContentType<T>(),
-            ["Nats-Msg-Id"] = messageId
+            ["Nats-Msg-Id"] = messageId,
+            [_wireOptions.VersionHeaderName] = _wireOptions.ProtocolVersion.ToString()
         };
 
         // Merge custom headers if provided
@@ -168,7 +181,7 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
         {
             var msg = messages[i];
             MessageSecurity.ValidatePublishSubject(msg.Subject);
-            MessageSecurity.RejectReservedHeaders(msg.Headers, ReservedPublishHeaders);
+            MessageSecurity.RejectReservedHeaders(msg.Headers, _reservedPublishHeaders);
 
             if (string.IsNullOrWhiteSpace(msg.MessageId))
             {
@@ -212,7 +225,7 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
     public async Task PublishRawAsync(string subject, ReadOnlyMemory<byte> payload, string? messageId, MessageHeaders? headers = null, CancellationToken cancellationToken = default)
     {
         MessageSecurity.ValidatePublishSubject(subject);
-        MessageSecurity.RejectReservedHeaders(headers, ReservedRawPublishHeaders);
+        MessageSecurity.RejectReservedHeaders(headers, _reservedRawPublishHeaders);
 
         if (string.IsNullOrWhiteSpace(messageId))
         {
@@ -224,7 +237,8 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
 
         var natsHeaders = new NatsHeaders
         {
-            ["Nats-Msg-Id"] = messageId
+            ["Nats-Msg-Id"] = messageId,
+            [_wireOptions.VersionHeaderName] = _wireOptions.ProtocolVersion.ToString()
         };
 
         if (headers != null)

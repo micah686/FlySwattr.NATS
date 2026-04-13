@@ -2,7 +2,9 @@ using System.Buffers;
 using System.Diagnostics;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core;
+using FlySwattr.NATS.Core.Configuration;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using NATS.Client.Core;
 using NATS.Client.JetStream;
 using NATS.Client.JetStream.Models;
@@ -105,6 +107,42 @@ public class NatsJetStreamBusTests : IAsyncDisposable
     {
         await Assert.ThrowsAsync<Exception>(async () =>
             await _bus.PublishAsync("test..subject", new TestMessage("test"), "msg-1"));
+    }
+
+    [Test]
+    public async Task PublishAsync_ShouldStampConfiguredWireVersionHeader()
+    {
+        // Arrange
+        var bus = new NatsJetStreamBus(
+            _jsContext,
+            _logger,
+            _serializer,
+            Options.Create(new WireCompatibilityOptions
+            {
+                ProtocolVersion = 7,
+                VersionHeaderName = "X-Test-Wire-Version"
+            }));
+
+        NatsHeaders? publishedHeaders = null;
+        _jsContext.PublishAsync(
+                Arg.Any<string>(),
+                Arg.Any<TestMessage>(),
+                Arg.Any<INatsSerialize<TestMessage>>(),
+                Arg.Any<NatsJSPubOpts>(),
+                Arg.Any<NatsHeaders>(),
+                Arg.Any<CancellationToken>())
+            .Returns(callInfo =>
+            {
+                publishedHeaders = callInfo.ArgAt<NatsHeaders>(4);
+                return new PubAckResponse { Stream = "TEST" };
+            });
+
+        // Act
+        await bus.PublishAsync("test.subject", new TestMessage("test"), "msg-1");
+
+        // Assert
+        await Assert.That(publishedHeaders).IsNotNull();
+        await Assert.That(publishedHeaders!["X-Test-Wire-Version"]).IsEqualTo("7");
     }
 
     private record TestMessage(string Data);

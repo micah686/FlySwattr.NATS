@@ -25,6 +25,8 @@ public static class ServiceCollectionExtensions
         // 1. Configuration
         services.AddOptions<NatsConfiguration>().Configure(configure);
         services.AddOptions<MessageTypeAliasOptions>();
+        services.AddOptions<WireCompatibilityOptions>();
+        services.AddOptions<DlqStoreFailureOptions>();
         services.AddSingleton(sp => sp.GetRequiredService<IOptions<NatsConfiguration>>().Value);
         services.TryAddSingleton<NatsCoreServicesMarker>();
 
@@ -75,7 +77,8 @@ public static class ServiceCollectionExtensions
                 sp.GetRequiredService<INatsJSContext>(),
                 sp.GetRequiredService<ILogger<NatsJetStreamBus>>(),
                 sp.GetRequiredService<IMessageSerializer>(),
-                sp.GetRequiredService<BackgroundTaskManager>());
+                sp.GetRequiredService<BackgroundTaskManager>(),
+                sp.GetService<IOptions<WireCompatibilityOptions>>());
         });
         
         // 4. Stores (Factories returning Core implementations)
@@ -182,7 +185,8 @@ public static class ServiceCollectionExtensions
             var options = sp.GetRequiredService<IOptions<PayloadOffloadingOptions>>();
             var logger = sp.GetRequiredService<ILogger<Decorators.OffloadingJetStreamPublisher>>();
 
-            return new Decorators.OffloadingJetStreamPublisher(coreBus, coreBus, objectStore, serializer, typeAliasRegistry, options, logger);
+            return new Decorators.OffloadingJetStreamPublisher(coreBus, coreBus, objectStore, serializer, typeAliasRegistry, options, logger,
+                sp.GetService<IOptions<WireCompatibilityOptions>>());
         }));
 
         // 4. Replace IJetStreamConsumer with Offloading decorator

@@ -10,6 +10,7 @@
     <Project Path="Samples/Service2/Service2.csproj" />
   </Folder>
   <Folder Name="/Tests/">
+    <Project Path="Tests/Benchmarks/Benchmarks.csproj" />
     <Project Path="Tests/IntegrationTests/IntegrationTests.csproj" />
     <Project Path="Tests/UnitTests/UnitTests.csproj" />
   </Folder>

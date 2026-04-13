@@ -1,5 +1,6 @@
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core;
+using FlySwattr.NATS.Core.Configuration;
 using FlySwattr.NATS.Hosting.Extensions;
 using FlySwattr.NATS.Hosting.Health;
 using Microsoft.Extensions.DependencyInjection;
@@ -196,6 +197,13 @@ internal class TopologyConsumerHostedService<TSource> : IHostedService
         var listType = typeof(List<>).MakeGenericType(middlewareInterfaceType);
         var middlewares = Activator.CreateInstance(listType)!;
         var addMethod = listType.GetMethod("Add")!;
+
+        if (ServiceCollectionExtensions.ShouldEnableWireCompatibilityMiddleware(sp))
+        {
+            var wireCompatibilityMiddlewareType = typeof(Middleware.WireVersionCheckMiddleware<>).MakeGenericType(messageType);
+            var wireCompatibilityMiddleware = ActivatorUtilities.CreateInstance(sp, wireCompatibilityMiddlewareType);
+            addMethod.Invoke(middlewares, [wireCompatibilityMiddleware]);
+        }
 
         if (options.EnableLoggingMiddleware)
         {

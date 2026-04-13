@@ -1,6 +1,8 @@
 using System.Text.Json;
 using FlySwattr.NATS.Abstractions;
+using FlySwattr.NATS.Core.Configuration;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using NATS.Client.JetStream.Models;
 using NATS.Client.KeyValueStore;
 
@@ -17,17 +19,21 @@ internal class NatsDlqStore : IDlqStore
     
     private readonly INatsKVContext _kvContext;
     private readonly ILogger<NatsDlqStore> _logger;
+    private readonly DlqStoreFailureOptions _failureOptions;
     
     private readonly SemaphoreSlim _initLock = new(1, 1);
     private bool _isInitialized;
+    private bool _fallbackMode;
     private INatsKVStore? _store;
 
     public NatsDlqStore(
         INatsKVContext kvContext,
-        ILogger<NatsDlqStore> logger)
+        ILogger<NatsDlqStore> logger,
+        IOptions<DlqStoreFailureOptions>? failureOptions = null)
     {
         _kvContext = kvContext;
         _logger = logger;
+        _failureOptions = failureOptions?.Value ?? new DlqStoreFailureOptions();
     }
 
     private async ValueTask EnsureInitializedAsync(CancellationToken cancellationToken)
@@ -63,8 +69,26 @@ internal class NatsDlqStore : IDlqStore
             }
             catch (Exception ex)
             {
-                // Log and continue - if we still can't create it or get it, we'll let actual operations fail
-                _logger.LogWarning(ex, "Attempt to ensure DLQ bucket {BucketName} failed. Proceeding hoping it exists or is accessible.", BucketName);
+                switch (_failureOptions.InitializationFailurePolicy)
+                {
+                    case DlqStoreFailurePolicy.Propagate:
+                        _logger.LogError(ex, "DLQ bucket {BucketName} initialization failed. Policy: Propagate — re-throwing.", BucketName);
+                        throw;
+
+                    case DlqStoreFailurePolicy.FallbackToLogOnly:
+                        _logger.LogWarning(ex,
+                            "DLQ bucket {BucketName} initialization failed. Policy: FallbackToLogOnly — " +
+                            "DLQ entries will be written to logs instead of KV store.", BucketName);
+                        _fallbackMode = true;
+                        break;
+
+                    case DlqStoreFailurePolicy.LogAndContinue:
+                    default:
+                        _logger.LogWarning(ex,
+                            "Attempt to ensure DLQ bucket {BucketName} failed. Policy: LogAndContinue — " +
+                            "proceeding; individual operations may fail.", BucketName);
+                        break;
+                }
             }
 
             _isInitialized = true;
@@ -77,6 +101,45 @@ internal class NatsDlqStore : IDlqStore
 
     private INatsKVStore Store
         => _store ?? throw new InvalidOperationException("DLQ KV bucket is not initialized.");
+
+    /// <summary>
+    /// Checks if the store is in fallback mode or has no store reference,
+    /// and applies the configured operation failure policy.
+    /// Returns true if the caller should short-circuit (fallback handled).
+    /// </summary>
+    private bool TryHandleUnavailable(string operation, string id)
+    {
+        if (!_fallbackMode && _store != null)
+            return false;
+
+        if (_fallbackMode)
+        {
+            _logger.LogError(
+                "DLQ store is in fallback-to-log mode. Operation {Operation} for entry {Id} " +
+                "will not be persisted to KV store.", operation, id);
+            return true;
+        }
+
+        // _store is null — initialization failed but policy allowed continue
+        switch (_failureOptions.OperationFailurePolicy)
+        {
+            case DlqStoreFailurePolicy.Propagate:
+                throw new InvalidOperationException(
+                    $"DLQ KV bucket is not initialized. Cannot perform {operation} for entry {id}.");
+
+            case DlqStoreFailurePolicy.FallbackToLogOnly:
+                _logger.LogError(
+                    "DLQ store unavailable. Operation {Operation} for entry {Id} " +
+                    "will be logged only.", operation, id);
+                return true;
+
+            case DlqStoreFailurePolicy.LogAndContinue:
+            default:
+                _logger.LogWarning(
+                    "DLQ store unavailable. Operation {Operation} for entry {Id} skipped.", operation, id);
+                return true;
+        }
+    }
 
     /// <summary>
     /// Builds a hierarchical KV key from stream, consumer, and entry ID.
@@ -113,6 +176,17 @@ internal class NatsDlqStore : IDlqStore
 
         await EnsureInitializedAsync(cancellationToken);
 
+        if (TryHandleUnavailable("Store", entry.Id))
+        {
+            // Log the full entry for manual recovery
+            _logger.LogError(
+                "DLQ entry logged (not persisted): Id={Id}, Stream={Stream}, Consumer={Consumer}, " +
+                "Subject={Subject}, Sequence={Sequence}, Error={Error}",
+                entry.Id, entry.OriginalStream, entry.OriginalConsumer,
+                entry.OriginalSubject, entry.OriginalSequence, entry.ErrorReason);
+            return;
+        }
+
         try
         {
             var key = BuildKey(entry.OriginalStream, entry.OriginalConsumer, entry.Id);
@@ -135,6 +209,9 @@ internal class NatsDlqStore : IDlqStore
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
 
         await EnsureInitializedAsync(cancellationToken);
+
+        if (TryHandleUnavailable("Get", id))
+            return null;
 
         try
         {
@@ -167,6 +244,9 @@ internal class NatsDlqStore : IDlqStore
         CancellationToken cancellationToken = default)
     {
         await EnsureInitializedAsync(cancellationToken);
+
+        if (TryHandleUnavailable("List", "(all)"))
+            return Array.Empty<DlqMessageEntry>();
 
         try
         {
@@ -208,6 +288,9 @@ internal class NatsDlqStore : IDlqStore
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
 
         await EnsureInitializedAsync(cancellationToken);
+
+        if (TryHandleUnavailable("UpdateStatus", id))
+            return new DlqEntryUpdateResult(DlqEntryUpdateOutcome.NotFound);
 
         try
         {
@@ -259,6 +342,9 @@ internal class NatsDlqStore : IDlqStore
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
 
         await EnsureInitializedAsync(cancellationToken);
+
+        if (TryHandleUnavailable("Delete", id))
+            return false;
 
         try
         {

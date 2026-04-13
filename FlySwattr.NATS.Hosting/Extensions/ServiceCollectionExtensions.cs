@@ -1,5 +1,6 @@
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core;
+using FlySwattr.NATS.Core.Configuration;
 using FlySwattr.NATS.Hosting.Configuration;
 using FlySwattr.NATS.Hosting.Health;
 using FlySwattr.NATS.Hosting.Middleware;
@@ -8,6 +9,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using NATS.Client.JetStream;
 using Polly;
 
@@ -74,6 +76,11 @@ public static class ServiceCollectionExtensions
     {
         var middlewares = new List<IConsumerMiddleware<TMessage>>();
 
+        if (ShouldEnableWireCompatibilityMiddleware(sp))
+        {
+            middlewares.Add(ActivatorUtilities.CreateInstance<WireVersionCheckMiddleware<TMessage>>(sp));
+        }
+
         // Add built-in middleware if enabled
         if (options.EnableLoggingMiddleware)
         {
@@ -95,6 +102,13 @@ public static class ServiceCollectionExtensions
         }
 
         return middlewares;
+    }
+
+    internal static bool ShouldEnableWireCompatibilityMiddleware(IServiceProvider sp)
+    {
+        var options = sp.GetService<IOptions<WireCompatibilityOptions>>()?.Value;
+        return options is not null &&
+               (options.MinAcceptedVersion.HasValue || options.MaxAcceptedVersion.HasValue);
     }
 
     /// <summary>

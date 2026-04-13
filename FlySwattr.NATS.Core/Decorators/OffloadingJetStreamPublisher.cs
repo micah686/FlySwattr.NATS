@@ -21,6 +21,7 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
     private readonly IMessageSerializer _serializer;
     private readonly IMessageTypeAliasRegistry _typeAliasRegistry;
     private readonly PayloadOffloadingOptions _options;
+    private readonly WireCompatibilityOptions _wireOptions;
     private readonly ILogger<OffloadingJetStreamPublisher> _logger;
 
     public OffloadingJetStreamPublisher(
@@ -29,8 +30,9 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
         IMessageSerializer serializer,
         IMessageTypeAliasRegistry typeAliasRegistry,
         IOptions<PayloadOffloadingOptions> options,
-        ILogger<OffloadingJetStreamPublisher> logger)
-        : this(inner, (IRawJetStreamPublisher)inner, objectStore, serializer, typeAliasRegistry, options, logger)
+        ILogger<OffloadingJetStreamPublisher> logger,
+        IOptions<WireCompatibilityOptions>? wireOptions = null)
+        : this(inner, (IRawJetStreamPublisher)inner, objectStore, serializer, typeAliasRegistry, options, logger, wireOptions)
     {
     }
 
@@ -41,7 +43,8 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
         IMessageSerializer serializer,
         IMessageTypeAliasRegistry typeAliasRegistry,
         IOptions<PayloadOffloadingOptions> options,
-        ILogger<OffloadingJetStreamPublisher> logger)
+        ILogger<OffloadingJetStreamPublisher> logger,
+        IOptions<WireCompatibilityOptions>? wireOptions = null)
     {
         _inner = inner;
         _rawPublisher = rawPublisher;
@@ -49,6 +52,7 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
         _serializer = serializer;
         _typeAliasRegistry = typeAliasRegistry;
         _options = options.Value;
+        _wireOptions = wireOptions?.Value ?? new WireCompatibilityOptions();
         _logger = logger;
     }
 
@@ -62,7 +66,8 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
                 "Content-Type",
                 "Nats-Msg-Id",
                 "traceparent",
-                "tracestate"
+                "tracestate",
+                _wireOptions.VersionHeaderName
             ]);
 
         // Enforce messageId requirement at decorator level for consistency
@@ -114,7 +119,8 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
                         "Content-Type",
                         "Nats-Msg-Id",
                         "traceparent",
-                        "tracestate"
+                        "tracestate",
+                        _wireOptions.VersionHeaderName
                     ]);
 
                 if (string.IsNullOrWhiteSpace(msg.MessageId))

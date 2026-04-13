@@ -3,12 +3,16 @@ using FlySwattr.NATS.Caching.Extensions;
 using FlySwattr.NATS.Caching.Stores;
 using FlySwattr.NATS.Configuration;
 using FlySwattr.NATS.Core.Stores;
+using FlySwattr.NATS.Core.Configuration;
 using FlySwattr.NATS.Extensions;
+using FlySwattr.NATS.Hosting.Extensions;
+using FlySwattr.NATS.Hosting.Middleware;
 using FlySwattr.NATS.Resilience.Extensions;
 using FlySwattr.NATS.Hosting.Health;
 using Medallion.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
 using TUnit.Core;
 
 namespace UnitTests.DI;
@@ -185,6 +189,39 @@ public class ServiceCollectionExtensionsTests
 
         await Assert.That(decoratedStore.GetType()).IsEqualTo(typeof(CachingKeyValueStore));
         await Assert.That(innerStore.GetType()).IsEqualTo(typeof(NatsKeyValueStore));
+    }
+
+    [Test]
+    public async Task ResolveMiddlewares_ShouldIncludeWireVersionCheck_WhenVersionBoundsConfigured()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddOptions<WireCompatibilityOptions>().Configure(options =>
+        {
+            options.MinAcceptedVersion = 1;
+        });
+
+        var provider = services.BuildServiceProvider();
+        var middlewares = FlySwattr.NATS.Hosting.Extensions.ServiceCollectionExtensions
+            .ResolveMiddlewares<object>(provider, new NatsConsumerOptions())
+            .ToList();
+
+        await Assert.That(middlewares.Any(m => m is WireVersionCheckMiddleware<object>)).IsTrue();
+    }
+
+    [Test]
+    public async Task ResolveMiddlewares_ShouldSkipWireVersionCheck_WhenVersionBoundsNotConfigured()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddOptions<WireCompatibilityOptions>();
+
+        var provider = services.BuildServiceProvider();
+        var middlewares = FlySwattr.NATS.Hosting.Extensions.ServiceCollectionExtensions
+            .ResolveMiddlewares<object>(provider, new NatsConsumerOptions())
+            .ToList();
+
+        await Assert.That(middlewares.Any(m => m is WireVersionCheckMiddleware<object>)).IsFalse();
     }
     
     private object? GetInnerService(object service)
