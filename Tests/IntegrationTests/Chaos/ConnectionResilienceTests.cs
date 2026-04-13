@@ -63,7 +63,13 @@ public class ConnectionResilienceTests
         await WaitForNatsAsync(fixture.ConnectionString);
 
         // Act 5: Publish after recovery with a fresh connection
-        await using var conn2 = new NatsConnection(opts);
+        // Testcontainers can assign a new mapped host port after a stop/start in CI,
+        // so build fresh connection options from the current endpoint.
+        await using var conn2 = new NatsConnection(new NatsOpts
+        {
+            Url = fixture.ConnectionString,
+            SerializerRegistry = HybridSerializerRegistry.Default
+        });
         await conn2.ConnectAsync();
         var js2 = new NatsJSContext(conn2);
         await using var bus2 = new NatsJetStreamBus(js2, NullLogger<NatsJetStreamBus>.Instance, serializer);
@@ -150,7 +156,13 @@ public class ConnectionResilienceTests
         await WaitForNatsAsync(fixture.ConnectionString);
 
         // Reconnect and verify consumer can resume
-        await using var conn2 = new NatsConnection(opts);
+        // Testcontainers can assign a new mapped host port after a stop/start in CI,
+        // so build fresh connection options from the current endpoint.
+        await using var conn2 = new NatsConnection(new NatsOpts
+        {
+            Url = fixture.ConnectionString,
+            SerializerRegistry = HybridSerializerRegistry.Default
+        });
         await conn2.ConnectAsync();
         var js2 = new NatsJSContext(conn2);
 
@@ -201,4 +213,3 @@ public class ConnectionResilienceTests
         throw new TimeoutException($"NATS did not become available at {url} within the timeout.");
     }
 }
-
