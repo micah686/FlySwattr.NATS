@@ -9,6 +9,7 @@ internal sealed class MessageTypeAliasRegistry : IMessageTypeAliasRegistry
 {
     private readonly ConcurrentDictionary<string, Type> _aliasToType = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<Type, string> _typeToAlias = new();
+    private readonly bool _requireExplicitAliases;
 
     public MessageTypeAliasRegistry(IOptions<MessageTypeAliasOptions>? options = null)
     {
@@ -16,6 +17,8 @@ internal sealed class MessageTypeAliasRegistry : IMessageTypeAliasRegistry
         {
             return;
         }
+
+        _requireExplicitAliases = value.RequireExplicitAliases;
 
         foreach (var mapping in value.AliasMappings)
         {
@@ -27,6 +30,21 @@ internal sealed class MessageTypeAliasRegistry : IMessageTypeAliasRegistry
     public string GetAlias(Type messageType)
     {
         ArgumentNullException.ThrowIfNull(messageType);
+
+        if (_typeToAlias.TryGetValue(messageType, out var existing))
+        {
+            return existing;
+        }
+
+        if (_requireExplicitAliases)
+        {
+            throw new InvalidOperationException(
+                $"No alias is registered for type '{messageType.FullName}'. " +
+                "Register it via MessageTypeAliasOptions.AliasMappings or " +
+                "IMessageTypeAliasRegistry.Register<T>() before publishing or consuming " +
+                "messages of this type. Alternatively, set RequireExplicitAliases = false " +
+                "to allow implicit type.Name aliases (not recommended for production).");
+        }
 
         return _typeToAlias.GetOrAdd(messageType, type =>
         {
