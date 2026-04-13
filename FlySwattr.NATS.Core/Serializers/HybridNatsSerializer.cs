@@ -2,6 +2,8 @@ using System.Buffers;
 using System.Text.Json;
 using FlySwattr.NATS.Abstractions;
 using MemoryPack;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace FlySwattr.NATS.Core.Serializers;
 
@@ -15,14 +17,16 @@ public class HybridNatsSerializer : IMessageSerializer
     private readonly MemoryPackSerializerOptions? _memoryPackOptions;
     private readonly JsonSerializerOptions _jsonOptions;
     private readonly int _maxPayloadSize;
-    
-    public const string ContentTypeMemoryPack = "application/x-memorypack";
+
+    public const string ContentTypeMemoryPack = "application/x-memorypack; v=1";
     public const string ContentTypeJson = "application/json";
 
     public HybridNatsSerializer(
         MemoryPackSerializerOptions? memoryPackOptions = null,
         JsonSerializerOptions? jsonOptions = null,
-        int maxPayloadSize = 10 * 1024 * 1024) // 10MB default
+        int maxPayloadSize = 10 * 1024 * 1024, // 10MB default
+        bool enforceSchemaFingerprint = true,
+        ILogger<HybridNatsSerializer>? logger = null)
     {
         _memoryPackOptions = memoryPackOptions;
         _jsonOptions = jsonOptions ?? new JsonSerializerOptions
@@ -35,6 +39,10 @@ public class HybridNatsSerializer : IMessageSerializer
             throw new ArgumentOutOfRangeException(nameof(maxPayloadSize), "Max payload size must be greater than zero.");
         }
         _maxPayloadSize = maxPayloadSize;
+
+        // Configure the static envelope serializer with fingerprint enforcement setting
+        MemoryPackSchemaEnvelopeSerializer.EnforceSchemaFingerprint = enforceSchemaFingerprint;
+        MemoryPackSchemaEnvelopeSerializer.Logger = logger ?? (ILogger)NullLogger.Instance;
     }
 
     public void Serialize<T>(IBufferWriter<byte> writer, T message)
@@ -80,5 +88,29 @@ public class HybridNatsSerializer : IMessageSerializer
     public string GetContentType<T>()
     {
         return MemoryPackSchemaMetadata.IsMemoryPackable<T>() ? ContentTypeMemoryPack : ContentTypeJson;
+    }
+
+    /// <summary>
+    /// Attempts to parse the wire format version from a content type header value.
+    /// Returns true if a version parameter was found.
+    /// </summary>
+    public static bool TryParseContentTypeVersion(string? contentType, out int version)
+    {
+        version = 0;
+        if (string.IsNullOrEmpty(contentType))
+            return false;
+
+        const string versionPrefix = "v=";
+        var idx = contentType.IndexOf(versionPrefix, StringComparison.OrdinalIgnoreCase);
+        if (idx < 0)
+            return false;
+
+        var versionSpan = contentType.AsSpan(idx + versionPrefix.Length).Trim();
+        // Find the end of the version number (next ';' or end of string)
+        var endIdx = versionSpan.IndexOf(';');
+        if (endIdx >= 0)
+            versionSpan = versionSpan[..endIdx].Trim();
+
+        return int.TryParse(versionSpan, out version);
     }
 }

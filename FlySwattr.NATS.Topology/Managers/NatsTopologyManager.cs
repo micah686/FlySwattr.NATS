@@ -367,6 +367,7 @@ internal class NatsTopologyManager : ITopologyManager
              {
                  Storage = spec.StorageType == StorageType.Memory ? NatsObjStorageType.Memory : NatsObjStorageType.File,
                  MaxBytes = spec.MaxBytes,
+                 MaxAge = spec.MaxAge > TimeSpan.Zero ? spec.MaxAge : TimeSpan.Zero,
                  Description = spec.Description
              };
 

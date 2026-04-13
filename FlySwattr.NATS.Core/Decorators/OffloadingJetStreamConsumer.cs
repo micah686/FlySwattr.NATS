@@ -85,7 +85,7 @@ internal class OffloadingJetStreamConsumer : IJetStreamConsumer
         _logger.LogDebug("Resolving claim check from header: {ObjectKey}", objectKey);
         var payload = await DownloadPayloadAsync(objectKey, cancellationToken);
         var message = _serializer.Deserialize<T>(payload);
-        return new OffloadingMessageContext<T>(context, message);
+        return new OffloadingMessageContext<T>(context, message, objectKey);
     }
 
     private async Task<ReadOnlyMemory<byte>> DownloadPayloadAsync(string objectKey, CancellationToken cancellationToken)
@@ -110,11 +110,18 @@ internal class OffloadingMessageContext<T> : IJsMessageContext<T>
     private readonly IMessageContext<byte[]> _inner;
     private readonly T _resolvedMessage;
 
-    public OffloadingMessageContext(IMessageContext<byte[]> inner, T resolvedMessage)
+    public OffloadingMessageContext(IMessageContext<byte[]> inner, T resolvedMessage, string? claimCheckObjectKey = null)
     {
         _inner = inner;
         _resolvedMessage = resolvedMessage;
+        ClaimCheckObjectKey = claimCheckObjectKey;
     }
+
+    /// <summary>
+    /// The object key used to resolve this message from the Object Store, if any.
+    /// Null when the message was not offloaded via claim check.
+    /// </summary>
+    public string? ClaimCheckObjectKey { get; }
 
     public T Message => _resolvedMessage;
     public string Subject => _inner.Subject;

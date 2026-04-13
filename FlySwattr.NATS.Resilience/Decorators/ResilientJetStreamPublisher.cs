@@ -81,6 +81,19 @@ internal class ResilientJetStreamPublisher : IJetStreamPublisher
         }, cancellationToken);
     }
 
+    public async Task PublishBatchAsync<T>(
+        IReadOnlyList<BatchMessage<T>> messages,
+        CancellationToken cancellationToken = default)
+    {
+        // Wrap the entire batch in a single resilience execution.
+        // Partial retry of individual messages within a batch is complex and
+        // risks duplicate publishes; the caller should retry the full batch.
+        await _compositePipeline.ExecuteAsync(async ct =>
+        {
+            await _inner.PublishBatchAsync(messages, ct);
+        }, cancellationToken);
+    }
+
     private static bool IsOperationCanceled(Exception ex) => ex is OperationCanceledException;
 
     private static bool IsTransient(Exception ex) =>

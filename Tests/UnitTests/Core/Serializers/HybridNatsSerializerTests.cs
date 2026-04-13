@@ -57,7 +57,7 @@ public class HybridNatsSerializerTests
     public void GetContentType_ShouldReturnMemoryPack_WhenAttributeIsPresent()
     {
         var contentType = _serializer.GetContentType<MemoryPackableMessage>();
-        contentType.ShouldBe("application/x-memorypack");
+        contentType.ShouldBe("application/x-memorypack; v=1");
     }
 
     [Test]
@@ -389,7 +389,7 @@ public class HybridNatsSerializerTests
         var firstByte = writer.WrittenSpan[0];
         firstByte.ShouldNotBe((byte)'[', "MemoryPackable list wrapper should NOT produce JSON format");
         
-        _serializer.GetContentType<MemoryPackableList>().ShouldBe("application/x-memorypack");
+        _serializer.GetContentType<MemoryPackableList>().ShouldBe("application/x-memorypack; v=1");
     }
 
     /// <summary>

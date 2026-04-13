@@ -11,6 +11,7 @@ namespace FlySwattr.NATS.Core.Serializers;
 internal sealed record MemoryPackSchemaDescriptor(
     string SchemaId,
     int SchemaVersion,
+    int MinSupportedVersion,
     string SchemaFingerprint);
 
 internal static class MemoryPackSchemaMetadata
@@ -43,9 +44,11 @@ internal static class MemoryPackSchemaMetadata
         return DescriptorCache.GetOrAdd(type, static candidate =>
         {
             var schemaId = candidate.FullName ?? candidate.Name;
-            var schemaVersion = candidate.GetCustomAttribute<MessageSchemaAttribute>()?.Version ?? 1;
+            var attr = candidate.GetCustomAttribute<MessageSchemaAttribute>();
+            var schemaVersion = attr?.Version ?? 1;
+            var minSupportedVersion = attr?.MinSupportedVersion ?? 1;
             var schemaFingerprint = ComputeFingerprint(candidate);
-            return new MemoryPackSchemaDescriptor(schemaId, schemaVersion, schemaFingerprint);
+            return new MemoryPackSchemaDescriptor(schemaId, schemaVersion, minSupportedVersion, schemaFingerprint);
         });
     }
 

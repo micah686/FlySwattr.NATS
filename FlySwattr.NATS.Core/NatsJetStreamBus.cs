@@ -156,6 +156,59 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
         _logger.LogDebug("Published JetStream message to {Subject} with MsgId {MsgId}", subject, messageId);
     }
 
+    public async Task PublishBatchAsync<T>(
+        IReadOnlyList<BatchMessage<T>> messages,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(messages);
+        if (messages.Count == 0) return;
+
+        // Validate all messages upfront
+        for (var i = 0; i < messages.Count; i++)
+        {
+            var msg = messages[i];
+            MessageSecurity.ValidatePublishSubject(msg.Subject);
+            MessageSecurity.RejectReservedHeaders(msg.Headers, ReservedPublishHeaders);
+
+            if (string.IsNullOrWhiteSpace(msg.MessageId))
+            {
+                throw new ArgumentException(
+                    $"Batch message at index {i} has a null or empty messageId. " +
+                    "A messageId must be provided for JetStream publishing to ensure application-level idempotency.",
+                    nameof(messages));
+            }
+        }
+
+        // Publish all concurrently
+        var tasks = new Task[messages.Count];
+        for (var i = 0; i < messages.Count; i++)
+        {
+            var msg = messages[i];
+            tasks[i] = PublishAsync(msg.Subject, msg.Message, msg.MessageId, msg.Headers, cancellationToken);
+        }
+
+        // Collect failures
+        var exceptions = new List<Exception>();
+        for (var i = 0; i < tasks.Length; i++)
+        {
+            try
+            {
+                await tasks[i];
+            }
+            catch (Exception ex)
+            {
+                exceptions.Add(new InvalidOperationException(
+                    $"Batch message at index {i} (MessageId: '{messages[i].MessageId}') failed: {ex.Message}", ex));
+            }
+        }
+
+        if (exceptions.Count > 0)
+        {
+            throw new AggregateException(
+                $"{exceptions.Count} of {messages.Count} batch message(s) failed to publish.", exceptions);
+        }
+    }
+
     public async Task PublishRawAsync(string subject, ReadOnlyMemory<byte> payload, string? messageId, MessageHeaders? headers = null, CancellationToken cancellationToken = default)
     {
         MessageSecurity.ValidatePublishSubject(subject);

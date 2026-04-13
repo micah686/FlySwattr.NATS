@@ -91,6 +91,110 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
         }
     }
 
+    public async Task PublishBatchAsync<T>(
+        IReadOnlyList<BatchMessage<T>> messages,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(messages);
+        if (messages.Count == 0) return;
+
+        // Process each message: offload if needed, then collect for batch publish
+        var processedMessages = new List<BatchMessage<T>>(messages.Count);
+        var uploadedKeys = new List<string>();
+
+        try
+        {
+            foreach (var msg in messages)
+            {
+                MessageSecurity.RejectReservedHeaders(
+                    msg.Headers,
+                    [
+                        _options.ClaimCheckHeaderName,
+                        _options.ClaimCheckTypeHeaderName,
+                        "Content-Type",
+                        "Nats-Msg-Id",
+                        "traceparent",
+                        "tracestate"
+                    ]);
+
+                if (string.IsNullOrWhiteSpace(msg.MessageId))
+                {
+                    throw new ArgumentException(
+                        "A messageId must be provided for JetStream publishing to ensure application-level idempotency.",
+                        nameof(messages));
+                }
+
+                // Serialize to check size
+                var bufferWriter = new ArrayBufferWriter<byte>();
+                _serializer.Serialize(bufferWriter, msg.Message);
+                var payload = bufferWriter.WrittenMemory;
+                var payloadSize = MemoryPackSchemaEnvelopeSerializer.GetLogicalPayloadSize(payload.Span);
+
+                if (payloadSize > _options.ThresholdBytes)
+                {
+                    // Upload to object store
+                    var objectKey = MessageSecurity.ValidateObjectStoreKey(
+                        $"{_options.ObjectKeyPrefix}/{msg.Subject}/{Guid.NewGuid():N}");
+                    var claimCheckRef = $"objstore://{objectKey}";
+
+                    using var payloadStream = new MemoryStream(payload.ToArray());
+                    await _objectStore.PutAsync(objectKey, payloadStream, cancellationToken);
+                    uploadedKeys.Add(objectKey);
+
+                    var claimCheckHeaders = new Dictionary<string, string>
+                    {
+                        [_options.ClaimCheckHeaderName] = claimCheckRef,
+                        [_options.ClaimCheckTypeHeaderName] = _typeAliasRegistry.GetAlias(typeof(T)),
+                        ["Content-Type"] = _serializer.GetContentType<T>()
+                    };
+
+                    if (msg.Headers != null)
+                    {
+                        foreach (var header in msg.Headers.Headers)
+                        {
+                            claimCheckHeaders[header.Key] = header.Value;
+                        }
+                    }
+
+                    // Will be published as raw empty payload with claim-check headers
+                    // Since inner.PublishBatchAsync expects typed messages, delegate to individual raw publishes
+                    await _rawPublisher.PublishRawAsync(
+                        msg.Subject,
+                        ReadOnlyMemory<byte>.Empty,
+                        msg.MessageId,
+                        new MessageHeaders(claimCheckHeaders),
+                        cancellationToken);
+                }
+                else
+                {
+                    processedMessages.Add(msg);
+                }
+            }
+
+            // Batch-publish the non-offloaded messages through the inner publisher
+            if (processedMessages.Count > 0)
+            {
+                await _inner.PublishBatchAsync(processedMessages, cancellationToken);
+            }
+        }
+        catch
+        {
+            // Compensating action: clean up any uploaded objects on failure
+            foreach (var key in uploadedKeys)
+            {
+                try
+                {
+                    await _objectStore.DeleteAsync(key, cancellationToken);
+                }
+                catch (Exception cleanupEx)
+                {
+                    _logger.LogError(cleanupEx, "Failed to clean up orphaned object {ObjectKey}", key);
+                }
+            }
+            throw;
+        }
+    }
+
     private async Task PublishWithOffloadingAsync<T>(
         string subject,
         T message,

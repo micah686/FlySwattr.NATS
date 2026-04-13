@@ -33,7 +33,10 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IMessageSerializer>(sp =>
         {
             var config = sp.GetRequiredService<NatsConfiguration>();
-            return new HybridNatsSerializer(maxPayloadSize: config.MaxPayloadSize);
+            return new HybridNatsSerializer(
+                maxPayloadSize: config.MaxPayloadSize,
+                enforceSchemaFingerprint: config.EnforceSchemaFingerprint,
+                logger: sp.GetRequiredService<ILogger<HybridNatsSerializer>>());
         });
         
         

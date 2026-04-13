@@ -72,4 +72,12 @@ public class TopologyStartupOptions
     /// Set to null to disable auto-creation.
     /// </summary>
     public string? PayloadOffloadingBucketName { get; set; }
+
+    /// <summary>
+    /// MaxAge TTL for the claim-check object store bucket.
+    /// Applied when auto-creating the payload offloading bucket as a safety net
+    /// to clean up orphaned objects.
+    /// Default: 24 hours
+    /// </summary>
+    public TimeSpan ClaimCheckTtl { get; set; } = TimeSpan.FromHours(24);
 }

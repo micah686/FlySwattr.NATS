@@ -135,6 +135,47 @@ public class EnterpriseNatsOptions
     /// Default: true (when topology provisioning is enabled)
     /// </summary>
     public bool EnableDlqAdvisoryListener { get; set; } = true;
+
+    /// <summary>
+    /// Eagerly connect to NATS on startup to avoid first-publish latency.
+    /// When enabled, a warmup service calls ConnectAsync() during host startup.
+    /// Non-fatal: if NATS is temporarily unavailable, the app starts normally and connects lazily.
+    /// Default: true
+    /// </summary>
+    public bool EagerConnect { get; set; } = true;
+
+    /// <summary>
+    /// Timeout for the eager connection warmup attempt.
+    /// Default: 30 seconds
+    /// </summary>
+    public TimeSpan ConnectionWarmupTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// TTL for claim-check objects in the Object Store.
+    /// Objects older than this are eligible for cleanup by the background sweep service.
+    /// Default: 24 hours
+    /// </summary>
+    public TimeSpan ClaimCheckTtl { get; set; } = TimeSpan.FromHours(24);
+
+    /// <summary>
+    /// Enable the optional background sweep service that periodically cleans up
+    /// expired claim-check objects from the Object Store.
+    /// Default: false (Layer 2 TTL via Object Store MaxAge is the primary safety net)
+    /// </summary>
+    public bool EnableClaimCheckCleanup { get; set; }
+
+    /// <summary>
+    /// Interval between claim-check cleanup sweeps.
+    /// Default: 1 hour
+    /// </summary>
+    public TimeSpan ClaimCheckSweepInterval { get; set; } = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// Enforce strict schema fingerprint matching during MemoryPack deserialization.
+    /// When enabled (default), fingerprint mismatches throw an exception.
+    /// When disabled, fingerprint mismatches emit a warning log instead.
+    /// </summary>
+    public bool EnforceSchemaFingerprint { get; set; } = true;
 }
 
 /// <summary>

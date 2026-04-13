@@ -184,7 +184,7 @@ public class MemoryPackMessageSerializer : IMessageSerializer
         return MemoryPackSerializer.Deserialize<T>(data.Span)!;
     }
 
-    public string GetContentType<T>() => "application/x-memorypack";
+    public string GetContentType<T>() => "application/x-memorypack; v=1";
 }
 
 [MemoryPackable]

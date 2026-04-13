@@ -191,13 +191,17 @@ internal class TopologyProvisioningService : IHostedService
         // Auto-create payload offloading object store when configured
         if (_options.AutoCreatePayloadOffloadingBucket && !string.IsNullOrEmpty(_options.PayloadOffloadingBucketName))
         {
-            _logger.LogInformation("Auto-creating payload offloading bucket '{BucketName}'...",
-                _options.PayloadOffloadingBucketName);
+            _logger.LogInformation("Auto-creating payload offloading bucket '{BucketName}' with TTL {Ttl}...",
+                _options.PayloadOffloadingBucketName, _options.ClaimCheckTtl);
             try
             {
                 await _topologyManager.EnsureObjectStoreAsync(
-                    BucketName.From(_options.PayloadOffloadingBucketName),
-                    StorageType.File,
+                    new ObjectStoreSpec
+                    {
+                        Name = BucketName.From(_options.PayloadOffloadingBucketName),
+                        StorageType = StorageType.File,
+                        MaxAge = _options.ClaimCheckTtl
+                    },
                     cancellationToken);
             }
             catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
