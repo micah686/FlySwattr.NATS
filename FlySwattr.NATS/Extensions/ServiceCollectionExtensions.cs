@@ -1,5 +1,6 @@
 using FlySwattr.NATS.Caching.Extensions;
 using FlySwattr.NATS.Configuration;
+using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core.Extensions;
 using FlySwattr.NATS.DistributedLock.Extensions;
 using FlySwattr.NATS.Hosting.Extensions;
@@ -200,6 +201,26 @@ public static class ServiceCollectionExtensions
             services.AddNatsDlqAdvisoryListener();
         }
 
+        ValidateDecoratorOrdering(services);
         return services;
     }
+
+    private static void ValidateDecoratorOrdering(IServiceCollection services)
+    {
+        var offloadingIndex = FindLastRegistrationIndex<NatsPayloadOffloadingMarker>(services);
+        var resilienceIndex = FindLastRegistrationIndex<NatsResilienceMarker>(services);
+
+        if (offloadingIndex >= 0 && resilienceIndex >= 0 && offloadingIndex > resilienceIndex)
+        {
+            throw new InvalidOperationException("Payload offloading must be registered before resilience so the decorator chain remains Core -> Offloading -> Resilience.");
+        }
+    }
+
+    private static int FindLastRegistrationIndex<TMarker>(IServiceCollection services)
+        => services
+            .Select((descriptor, index) => (descriptor, index))
+            .Where(x => x.descriptor.ServiceType == typeof(TMarker))
+            .Select(x => x.index)
+            .DefaultIfEmpty(-1)
+            .Max();
 }

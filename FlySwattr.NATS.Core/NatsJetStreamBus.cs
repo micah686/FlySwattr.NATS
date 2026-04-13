@@ -1,13 +1,14 @@
-using System.Collections.Concurrent;
 using System.Buffers;
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Abstractions.Exceptions;
+using FlySwattr.NATS.Core.Services;
 using FlySwattr.NATS.Core.Serializers;
 using FlySwattr.NATS.Core.Telemetry;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using NATS.Client.Core;
 using NATS.Client.JetStream;
 using NATS.Client.JetStream.Models;
@@ -42,34 +43,31 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
     private readonly INatsJSContext _jsContext;
     private readonly ILogger<NatsJetStreamBus> _logger;
     private readonly IMessageSerializer _serializer;
-
-    private readonly ConcurrentDictionary<Guid, Task> _backgroundTasks = new();
-    private readonly ConcurrentDictionary<Guid, IDisposable> _backgroundServices = new();
-    private readonly ConcurrentDictionary<Guid, CancellationTokenSource> _linkedTokenSources = new();
-    private readonly CancellationTokenSource _cts = new();
-    private readonly Timer _cleanupTimer;
+    private readonly BackgroundTaskManager _backgroundTaskManager;
     private int _disposed;
 
     public NatsJetStreamBus(
         INatsJSContext jsContext,
         ILogger<NatsJetStreamBus> logger,
         IMessageSerializer serializer)
+        : this(
+            jsContext,
+            logger,
+            serializer,
+            new BackgroundTaskManager(NullLogger<BackgroundTaskManager>.Instance))
+    {
+    }
+
+    internal NatsJetStreamBus(
+        INatsJSContext jsContext,
+        ILogger<NatsJetStreamBus> logger,
+        IMessageSerializer serializer,
+        BackgroundTaskManager backgroundTaskManager)
     {
         _jsContext = jsContext;
         _logger = logger;
         _serializer = serializer;
-        _cleanupTimer = new Timer(CleanupCompletedTasks, null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
-    }
-
-    private void CleanupCompletedTasks(object? state)
-    {
-        foreach (var kvp in _backgroundTasks)
-        {
-            if (kvp.Value.IsCompleted)
-            {
-                _backgroundTasks.TryRemove(kvp.Key, out _);
-            }
-        }
+        _backgroundTaskManager = backgroundTaskManager;
     }
 
     public Task PublishAsync<T>(string subject, T message, CancellationToken cancellationToken = default)
@@ -313,144 +311,14 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
         }
     }
 
-    private async Task StartBackgroundConsumerAsync<T>(BasicNatsConsumerService<T> service, CancellationToken cancellationToken)
-    {
-        var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
-        var taskId = Guid.NewGuid();
-
-        _linkedTokenSources.TryAdd(taskId, linkedCts);
-
-        await service.StartAsync(linkedCts.Token);
-        _backgroundServices.TryAdd(taskId, service);
-
-        if (service.ExecuteTask is Task task && !task.IsCompleted)
-        {
-            var wrappedTask = WrapTaskWithCleanupAsync(task, taskId, linkedCts);
-            _backgroundTasks.TryAdd(taskId, wrappedTask);
-        }
-        else
-        {
-            _linkedTokenSources.TryRemove(taskId, out _);
-            _backgroundServices.TryRemove(taskId, out _);
-            await StopAndDisposeServiceAsync(service);
-            linkedCts.Dispose();
-        }
-    }
-
-    private async Task WrapTaskWithCleanupAsync(Task task, Guid taskId, CancellationTokenSource linkedCts)
-    {
-        try
-        {
-            await task;
-        }
-        catch (OperationCanceledException)
-        {
-            // Expected during shutdown - don't log as error
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Background consumer faulted");
-        }
-        finally
-        {
-            // Clean up resources
-            _backgroundTasks.TryRemove(taskId, out _);
-            _linkedTokenSources.TryRemove(taskId, out _);
-
-            if (_backgroundServices.TryRemove(taskId, out var svc) && svc is IDisposable disposable)
-            {
-                await StopAndDisposeServiceAsync(disposable);
-            }
-
-            try
-            {
-                linkedCts.Dispose();
-            }
-            catch (ObjectDisposedException)
-            {
-                // Already disposed - ignore
-            }
-        }
-    }
-
-    private async Task StopAndDisposeServiceAsync(IDisposable svc)
-    {
-        if (svc is BackgroundService bgSvc)
-        {
-            try
-            {
-                await bgSvc.StopAsync(CancellationToken.None);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Error stopping background service");
-            }
-        }
-
-        try
-        {
-            svc.Dispose();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Error disposing background service");
-        }
-    }
+    private Task StartBackgroundConsumerAsync<T>(BasicNatsConsumerService<T> service, CancellationToken cancellationToken)
+        => _backgroundTaskManager.StartAsync(service, cancellationToken);
 
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
 
-        _cts.Cancel();
-        try
-        {
-            await Task.WhenAll(_backgroundTasks.Values);
-        }
-        catch (OperationCanceledException)
-        {
-            // Expected during shutdown
-        }
-        catch (AggregateException ae) when (ae.InnerExceptions.All(e => e is OperationCanceledException))
-        {
-            // All inner exceptions are cancellation - expected
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Error during JetStream bus shutdown");
-        }
-
-        // Use TryRemove so WrapTaskWithCleanupAsync cannot race to double-stop/dispose
-        // the same service after we've already claimed it here.
-        var stopTasks = new List<Task>();
-        foreach (var kvp in _backgroundServices)
-        {
-            if (_backgroundServices.TryRemove(kvp.Key, out var svc))
-            {
-                stopTasks.Add(StopAndDisposeServiceAsync(svc));
-            }
-        }
-
-        await Task.WhenAll(stopTasks);
-
-        // Use TryRemove so WrapTaskWithCleanupAsync cannot race to double-dispose
-        // the same CancellationTokenSource after we've already claimed it here.
-        foreach (var kvp in _linkedTokenSources)
-        {
-            if (_linkedTokenSources.TryRemove(kvp.Key, out var cts))
-            {
-                try
-                {
-                    cts.Dispose();
-                }
-                catch (ObjectDisposedException)
-                {
-                    // Already disposed - ignore
-                }
-            }
-        }
-
-        await _cleanupTimer.DisposeAsync();
-        _cts.Dispose();
+        await _backgroundTaskManager.DisposeAsync();
     }
 }
 

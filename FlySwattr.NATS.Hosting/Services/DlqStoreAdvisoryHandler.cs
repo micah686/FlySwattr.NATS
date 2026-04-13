@@ -31,7 +31,7 @@ internal partial class DlqStoreAdvisoryHandler : IDlqAdvisoryHandler
                 Id = $"{advisory.Stream}.{advisory.Consumer}.{advisory.StreamSeq}",
                 OriginalStream = advisory.Stream,
                 OriginalConsumer = advisory.Consumer,
-                OriginalSubject = $"{advisory.Stream}.{advisory.Consumer}", // Approximate - advisory doesn't include original subject
+                OriginalSubject = advisory.Subject ?? string.Empty,
                 OriginalSequence = advisory.StreamSeq,
                 DeliveryCount = advisory.Deliveries,
                 StoredAt = advisory.Timestamp,

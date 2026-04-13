@@ -2,6 +2,7 @@ using System.Text.Json;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core.Configuration;
 using FlySwattr.NATS.Core.Serializers;
+using FlySwattr.NATS.Core.Services;
 using FlySwattr.NATS.Core.Stores;
 using MemoryPack;
 using Microsoft.Extensions.DependencyInjection;
@@ -24,6 +25,7 @@ public static class ServiceCollectionExtensions
         // 1. Configuration
         services.AddOptions<NatsConfiguration>().Configure(configure);
         services.AddSingleton(sp => sp.GetRequiredService<IOptions<NatsConfiguration>>().Value);
+        services.TryAddSingleton<NatsCoreServicesMarker>();
 
         // 2. Serializers
         services.AddSingleton<INatsSerializerRegistry, HybridSerializerRegistry>();
@@ -59,15 +61,16 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<INatsObjContext>(sp => new NatsObjContext(sp.GetRequiredService<INatsJSContext>()));
 
         services.AddSingleton<IMessageBus, NatsMessageBus>();
+        services.AddSingleton<BackgroundTaskManager>();
         
         // Register NatsJetStreamBus as the implementation
         services.AddSingleton<NatsJetStreamBus>(sp =>
         {
-            
             return new NatsJetStreamBus(
                 sp.GetRequiredService<INatsJSContext>(),
                 sp.GetRequiredService<ILogger<NatsJetStreamBus>>(),
-                sp.GetRequiredService<IMessageSerializer>());
+                sp.GetRequiredService<IMessageSerializer>(),
+                sp.GetRequiredService<BackgroundTaskManager>());
         });
         
         // 4. Stores (Factories returning Core implementations)
@@ -126,8 +129,19 @@ public static class ServiceCollectionExtensions
         Action<PayloadOffloadingOptions>? configure = null,
         string objectStoreBucket = "claim-checks")
     {
+        if (!services.Any(d => d.ServiceType == typeof(NatsCoreServicesMarker)))
+        {
+            throw new InvalidOperationException("AddPayloadOffloading requires AddFlySwattrNatsCore to be registered first.");
+        }
+
+        if (services.Any(d => d.ServiceType == typeof(NatsResilienceMarker)))
+        {
+            throw new InvalidOperationException("AddPayloadOffloading must be registered before AddFlySwattrNatsResilience so resilience wraps the offloading decorators.");
+        }
+
         // 1. Register Configuration
         services.AddOptions<PayloadOffloadingOptions>().Configure(configure ?? (_ => { }));
+        services.TryAddSingleton<NatsPayloadOffloadingMarker>();
 
         // 2. Register a keyed IObjectStore for claim checks if not already registered
         services.AddKeyedSingleton<IObjectStore>(objectStoreBucket, (sp, _) =>
