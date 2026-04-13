@@ -23,6 +23,70 @@ public class NatsMessageBusTests : IAsyncDisposable
         _bus = new NatsMessageBus(_connection, _logger);
     }
 
+    [Test]
+    public async Task SubscribeAsync_ShouldApplyNegativeJitterToRetryDelay()
+    {
+        // Arrange
+        var bus = new NatsMessageBus(_connection, _logger, () => 0.0);
+        var subject = "test.subject.jitter.low";
+
+        _connection.SubscribeCoreAsync<object>(subject, queueGroup: null, cancellationToken: Arg.Any<CancellationToken>())
+            .Returns(_ => ValueTask.FromException<INatsSub<object>>(new NatsException("Connection failed")));
+
+        using var cts = new CancellationTokenSource(900);
+
+        // Act
+        try
+        {
+            await bus.SubscribeAsync<object>(subject, _ => Task.CompletedTask, cancellationToken: cts.Token);
+        }
+        catch (OperationCanceledException) { }
+        finally
+        {
+            await bus.DisposeAsync();
+        }
+
+        // Assert
+        _logger.Received().Log(
+            LogLevel.Error,
+            Arg.Any<EventId>(),
+            Arg.Is<object>(o => o.ToString()!.Contains("Reconnecting in 750ms")),
+            Arg.Any<Exception>(),
+            Arg.Any<Func<object, Exception?, string>>());
+    }
+
+    [Test]
+    public async Task SubscribeAsync_ShouldApplyPositiveJitterToRetryDelay()
+    {
+        // Arrange
+        var bus = new NatsMessageBus(_connection, _logger, () => 1.0);
+        var subject = "test.subject.jitter.high";
+
+        _connection.SubscribeCoreAsync<object>(subject, queueGroup: null, cancellationToken: Arg.Any<CancellationToken>())
+            .Returns(_ => ValueTask.FromException<INatsSub<object>>(new NatsException("Connection failed")));
+
+        using var cts = new CancellationTokenSource(1400);
+
+        // Act
+        try
+        {
+            await bus.SubscribeAsync<object>(subject, _ => Task.CompletedTask, cancellationToken: cts.Token);
+        }
+        catch (OperationCanceledException) { }
+        finally
+        {
+            await bus.DisposeAsync();
+        }
+
+        // Assert
+        _logger.Received().Log(
+            LogLevel.Error,
+            Arg.Any<EventId>(),
+            Arg.Is<object>(o => o.ToString()!.Contains("Reconnecting in 1250ms")),
+            Arg.Any<Exception>(),
+            Arg.Any<Func<object, Exception?, string>>());
+    }
+
     public async ValueTask DisposeAsync()
     {
         await _bus.DisposeAsync();
@@ -123,12 +187,11 @@ public class NatsMessageBusTests : IAsyncDisposable
         catch (OperationCanceledException) { }
 
         // Assert
-        // Verify log calls
-        // Reconnecting in 1s...
+        // Verify log calls include jittered backoff in milliseconds.
         _logger.Received().Log(
             LogLevel.Error,
             Arg.Any<EventId>(),
-            Arg.Is<object>(o => o.ToString()!.Contains("Reconnecting in 1s")),
+            Arg.Is<object>(o => o.ToString()!.Contains("Reconnecting in")),
             Arg.Any<Exception>(),
             Arg.Any<Func<object, Exception?, string>>());
     }

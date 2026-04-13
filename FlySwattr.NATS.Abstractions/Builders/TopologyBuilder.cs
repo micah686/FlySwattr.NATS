@@ -152,6 +152,12 @@ public class TopologyConsumerOptions
     public object? ResiliencePipelineKey { get; set; }
 
     /// <summary>
+    /// Maximum time to wait for an ACK operation to complete after successful handler execution.
+    /// Default: 5 seconds.
+    /// </summary>
+    public TimeSpan AckTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
     /// Custom middleware types to include in the pipeline.
     /// </summary>
     public List<Type> MiddlewareTypes { get; } = new();

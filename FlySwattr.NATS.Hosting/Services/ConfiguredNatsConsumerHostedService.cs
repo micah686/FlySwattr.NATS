@@ -93,6 +93,7 @@ internal sealed class ConfiguredNatsConsumerHostedService<TMessage> : IHostedSer
             objectStore,
             offloadingOptions,
             _options.MaxConcurrency,
+            _options.AckTimeout,
             resiliencePipeline,
             healthMetrics,
             topologyReadySignal,

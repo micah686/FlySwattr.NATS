@@ -20,6 +20,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
 
     private readonly INatsConnection _connection;
     private readonly ILogger<NatsMessageBus> _logger;
+    private readonly Func<double> _randomNextDouble;
     private readonly ConcurrentDictionary<Guid, Task> _backgroundTasks = new();
     private readonly ConcurrentDictionary<Guid, IAsyncDisposable> _subscriptions = new();
     private readonly CancellationTokenSource _cts = new();
@@ -30,9 +31,15 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
     private static readonly TimeSpan DefaultRequestTimeout = TimeSpan.FromSeconds(30);
 
     public NatsMessageBus(INatsConnection connection, ILogger<NatsMessageBus> logger)
+        : this(connection, logger, () => Random.Shared.NextDouble())
+    {
+    }
+
+    internal NatsMessageBus(INatsConnection connection, ILogger<NatsMessageBus> logger, Func<double> randomNextDouble)
     {
         _connection = connection;
         _logger = logger;
+        _randomNextDouble = randomNextDouble;
 
         // Use events for connection state monitoring to avoid polling overhead.
         _connection.ConnectionOpened += OnConnectionEvent;
@@ -231,11 +238,12 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError(ex, "Subscription loop failed for {Subject}. Reconnecting in {Backoff}s...", subject, backoff.TotalSeconds);
+                    var jitteredBackoff = ApplyJitter(backoff);
+                    _logger.LogError(ex, "Subscription loop failed for {Subject}. Reconnecting in {BackoffMs}ms...", subject, jitteredBackoff.TotalMilliseconds);
 
                     try
                     {
-                        await Task.Delay(backoff, token);
+                        await Task.Delay(jitteredBackoff, token);
                     }
                     catch (OperationCanceledException) { break; }
 
@@ -310,6 +318,13 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
                 _logger.LogWarning("Timed out waiting for subscription {SubscriptionId} to stop", subscriptionId);
             }
         }
+    }
+
+    private TimeSpan ApplyJitter(TimeSpan baseDelay)
+    {
+        var jitterFactor = 1.0 + (_randomNextDouble() - 0.5) * 0.5;
+        var jitteredMs = Math.Max(1, baseDelay.TotalMilliseconds * jitterFactor);
+        return TimeSpan.FromMilliseconds(jitteredMs);
     }
 
     public async Task<TResponse?> RequestAsync<TRequest, TResponse>(string subject, TRequest request, TimeSpan timeout, CancellationToken cancellationToken = default)

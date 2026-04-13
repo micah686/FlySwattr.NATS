@@ -86,6 +86,5 @@ internal class ResilientJetStreamPublisher : IJetStreamPublisher
     private static bool IsTransient(Exception ex) =>
         ex is TimeoutException or
         System.IO.IOException or
-        OperationCanceledException ||
-        ex is BrokenCircuitException;
+        OperationCanceledException;
 }

@@ -272,6 +272,12 @@ public class NatsConsumerOptions
     public bool EnableValidationMiddleware { get; set; } = true;
 
     /// <summary>
+    /// Maximum time to wait for an ACK operation to complete after successful handler execution.
+    /// Default: 5 seconds.
+    /// </summary>
+    public TimeSpan AckTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
     /// Custom middleware types to include in the pipeline.
     /// Middleware types must implement IConsumerMiddleware&lt;TMessage&gt;.
     /// Middleware executes in the order they are added.

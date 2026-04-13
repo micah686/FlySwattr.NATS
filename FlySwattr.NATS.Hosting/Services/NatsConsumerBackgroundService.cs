@@ -25,6 +25,8 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
 {
     private const int MaxDlqPayloadSize = 1024 * 1024; // 1MB - NATS default max payload
     private const int InitialBufferSize = 4 * 1024; // Start small to avoid over-allocation
+    private static readonly TimeSpan DefaultAckTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan ShutdownNackDelay = TimeSpan.FromSeconds(1);
 
     private readonly INatsJSConsumer _consumer;
     private readonly Func<IJsMessageContext<T>, Task> _handler;
@@ -50,6 +52,7 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
 
     // Middleware pipeline for cross-cutting concerns
     private readonly IReadOnlyList<IConsumerMiddleware<T>> _middlewares;
+    private readonly TimeSpan _ackTimeout;
 
     internal NatsConsumerBackgroundService(
         INatsJSConsumer consumer,
@@ -60,6 +63,7 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
         ILogger logger,
         IPoisonMessageHandler<T> poisonHandler,
         int? maxDegreeOfParallelism = null,
+        TimeSpan? ackTimeout = null,
         ResiliencePipeline? resiliencePipeline = null,
         IConsumerHealthMetrics? healthMetrics = null,
         ITopologyReadySignal? topologyReadySignal = null,
@@ -76,6 +80,7 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
             objectStore: null,
             offloadingOptions: null,
             maxDegreeOfParallelism: maxDegreeOfParallelism,
+            ackTimeout: ackTimeout,
             resiliencePipeline: resiliencePipeline,
             healthMetrics: healthMetrics,
             topologyReadySignal: topologyReadySignal,
@@ -95,6 +100,7 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
         IObjectStore? objectStore,
         PayloadOffloadingOptions? offloadingOptions,
         int? maxDegreeOfParallelism = null,
+        TimeSpan? ackTimeout = null,
         ResiliencePipeline? resiliencePipeline = null,
         IConsumerHealthMetrics? healthMetrics = null,
         ITopologyReadySignal? topologyReadySignal = null,
@@ -116,6 +122,9 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
         _healthMetrics = healthMetrics;
         _topologyReadySignal = topologyReadySignal;
         _middlewares = middlewares?.ToList().AsReadOnly() ?? (IReadOnlyList<IConsumerMiddleware<T>>)Array.Empty<IConsumerMiddleware<T>>();
+        _ackTimeout = ackTimeout.HasValue && ackTimeout.Value > TimeSpan.Zero
+            ? ackTimeout.Value
+            : DefaultAckTimeout;
     }
 
 
@@ -219,7 +228,12 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
                 }
             }
 
-            channel.Writer.Complete();
+            channel.Writer.TryComplete();
+
+            if (stoppingToken.IsCancellationRequested)
+            {
+                await DrainPendingMessagesAsync(channel.Reader);
+            }
 
             // Graceful shutdown with bounded timeout
             using var shutdownCts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -359,7 +373,7 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
                 try
                 {
                     using var ackCts = CancellationTokenSource.CreateLinkedTokenSource(token);
-                    ackCts.CancelAfter(TimeSpan.FromSeconds(5));
+                    ackCts.CancelAfter(_ackTimeout);
                     await context.AckAsync(ackCts.Token);
 
                     // Record heartbeat after successful message processing
@@ -372,8 +386,8 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
                 }
                 catch (OperationCanceledException)
                 {
-                    // Ack timeout (5 seconds exceeded) - not a shutdown
-                    LogAckTimeout(_streamName, _consumerName);
+                    // Ack timeout exceeded - not a shutdown
+                    LogAckTimeout(_streamName, _consumerName, _ackTimeout.TotalMilliseconds);
                 }
                 catch (Exception ex)
                 {
@@ -385,6 +399,29 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
         catch (Exception ex)
         {
             LogWorkerCrashed(_streamName, _consumerName, ex);
+        }
+    }
+
+    private async Task DrainPendingMessagesAsync(ChannelReader<IJsMessageContext<T>> reader)
+    {
+        var drainedCount = 0;
+
+        while (reader.TryRead(out var pendingContext))
+        {
+            try
+            {
+                await pendingContext.NackAsync(ShutdownNackDelay, CancellationToken.None);
+                drainedCount++;
+            }
+            catch (Exception ex)
+            {
+                LogShutdownNackFailed(_streamName, _consumerName, pendingContext.Subject, ex);
+            }
+        }
+
+        if (drainedCount > 0)
+        {
+            LogShutdownDrain(_streamName, _consumerName, drainedCount);
         }
     }
 
@@ -425,8 +462,8 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
     [LoggerMessage(Level = LogLevel.Warning, Message = "Ack abandoned during shutdown for {StreamName}/{ConsumerName}")]
     private partial void LogAckAbandonedDuringShutdown(string streamName, string consumerName);
 
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Ack timed out after 5 seconds for {StreamName}/{ConsumerName}")]
-    private partial void LogAckTimeout(string streamName, string consumerName);
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Ack timed out after {AckTimeoutMs}ms for {StreamName}/{ConsumerName}")]
+    private partial void LogAckTimeout(string streamName, string consumerName, double ackTimeoutMs);
 
     [LoggerMessage(Level = LogLevel.Debug, Message = "Ack failed for processed message {StreamName}/{ConsumerName}: {ErrorMessage}")]
     private partial void LogAckFailed(string streamName, string consumerName, string errorMessage);
@@ -439,6 +476,12 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Workers did not complete within shutdown timeout for {StreamName}/{ConsumerName}")]
     private partial void LogShutdownTimeout(string streamName, string consumerName);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Drained and NAKed {Count} queued message(s) during shutdown for {StreamName}/{ConsumerName}")]
+    private partial void LogShutdownDrain(string streamName, string consumerName, int count);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to NAK queued shutdown message {Subject} for {StreamName}/{ConsumerName}")]
+    private partial void LogShutdownNackFailed(string streamName, string consumerName, string subject, Exception exception);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Consumer {StreamName}/{ConsumerName} waiting for topology ready signal...")]
     private partial void LogWaitingForTopology(string streamName, string consumerName);
