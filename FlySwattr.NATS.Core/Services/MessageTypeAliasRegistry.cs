@@ -69,6 +69,8 @@ internal sealed class MessageTypeAliasRegistry : IMessageTypeAliasRegistry
         type = Type.GetType(alias, throwOnError: false);
         if (type != null)
         {
+            // Legacy wire values may carry AssemblyQualifiedName; cache the resolution
+            // so future lookups avoid repeated reflection.
             _aliasToType.TryAdd(alias, type);
             _typeToAlias.TryAdd(type, alias);
         }
