@@ -3,7 +3,6 @@ using System.Text.Json;
 using FlySwattr.NATS.Abstractions;
 using MemoryPack;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Logging.Abstractions;
 
 namespace FlySwattr.NATS.Core.Serializers;
 
@@ -17,6 +16,7 @@ public class HybridNatsSerializer : IMessageSerializer
     private readonly MemoryPackSerializerOptions? _memoryPackOptions;
     private readonly JsonSerializerOptions _jsonOptions;
     private readonly int _maxPayloadSize;
+    private readonly MemoryPackSchemaEnvelopeSerializer _envelopeSerializer;
 
     public const string ContentTypeMemoryPack = "application/x-memorypack; v=1";
     public const string ContentTypeJson = "application/json";
@@ -40,9 +40,12 @@ public class HybridNatsSerializer : IMessageSerializer
         }
         _maxPayloadSize = maxPayloadSize;
 
-        // Configure the static envelope serializer with fingerprint enforcement setting
-        MemoryPackSchemaEnvelopeSerializer.EnforceSchemaFingerprint = enforceSchemaFingerprint;
-        MemoryPackSchemaEnvelopeSerializer.Logger = logger ?? (ILogger)NullLogger.Instance;
+        // Create an instance-scoped serializer with the configured settings.
+        // This avoids mutating global static state, allowing different consumers
+        // to use different fingerprint enforcement policies concurrently.
+        _envelopeSerializer = new MemoryPackSchemaEnvelopeSerializer(
+            enforceSchemaFingerprint,
+            logger);
     }
 
     public void Serialize<T>(IBufferWriter<byte> writer, T message)
@@ -68,8 +71,8 @@ public class HybridNatsSerializer : IMessageSerializer
         {
             try
             {
-                // Fast path: MemoryPack
-                return MemoryPackSchemaEnvelopeSerializer.Deserialize<T>(data.Span, _memoryPackOptions)
+                // Fast path: MemoryPack using instance serializer with configured enforcement
+                return _envelopeSerializer.Deserialize<T>(data.Span, _memoryPackOptions)
                        ?? throw new MemoryPackSerializationException($"MemoryPack deserialization returned null for type {typeof(T).Name}");
             }
             catch (Exception ex) when (ex is not MemoryPackSerializationException)

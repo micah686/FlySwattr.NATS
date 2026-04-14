@@ -162,11 +162,18 @@ public static class ServiceCollectionExtensions
             throw new InvalidOperationException("AddPayloadOffloading must be registered before AddFlySwattrNatsResilience so resilience wraps the offloading decorators.");
         }
 
-        // 1. Register Configuration
-        services.AddOptions<PayloadOffloadingOptions>().Configure(configure ?? (_ => { }));
+        // 1. Register Configuration — set ObjectStoreServiceKey so all paths use the same resolution model.
+        // The bucket name IS the keyed service key; callers that need a different bucket override the parameter.
+        services.AddOptions<PayloadOffloadingOptions>().Configure(options =>
+        {
+            configure?.Invoke(options);
+            // Sync the service key so publisher, consumer, and Hosting consumer all
+            // resolve the same IObjectStore instance without duplicating the bucket name.
+            options.ObjectStoreServiceKey ??= objectStoreBucket;
+        });
         services.TryAddSingleton<NatsPayloadOffloadingMarker>();
 
-        // 2. Register a keyed IObjectStore for claim checks if not already registered
+        // 2. Register a keyed IObjectStore for claim checks
         services.AddKeyedSingleton<IObjectStore>(objectStoreBucket, (sp, _) =>
             new NatsObjectStore(
                 sp.GetRequiredService<INatsObjContext>(),
@@ -179,10 +186,11 @@ public static class ServiceCollectionExtensions
         services.Replace(ServiceDescriptor.Singleton<IJetStreamPublisher>(sp =>
         {
             var coreBus = sp.GetRequiredService<NatsJetStreamBus>();
-            var objectStore = sp.GetRequiredKeyedService<IObjectStore>(objectStoreBucket);
+            var options = sp.GetRequiredService<IOptions<PayloadOffloadingOptions>>();
+            var serviceKey = options.Value.ObjectStoreServiceKey ?? objectStoreBucket;
+            var objectStore = sp.GetRequiredKeyedService<IObjectStore>(serviceKey);
             var serializer = sp.GetRequiredService<IMessageSerializer>();
             var typeAliasRegistry = sp.GetRequiredService<IMessageTypeAliasRegistry>();
-            var options = sp.GetRequiredService<IOptions<PayloadOffloadingOptions>>();
             var logger = sp.GetRequiredService<ILogger<Decorators.OffloadingJetStreamPublisher>>();
 
             return new Decorators.OffloadingJetStreamPublisher(coreBus, coreBus, objectStore, serializer, typeAliasRegistry, options, logger,
@@ -193,9 +201,10 @@ public static class ServiceCollectionExtensions
         services.Replace(ServiceDescriptor.Singleton<IJetStreamConsumer>(sp =>
         {
             var coreBus = sp.GetRequiredService<NatsJetStreamBus>();
-            var objectStore = sp.GetRequiredKeyedService<IObjectStore>(objectStoreBucket);
-            var serializer = sp.GetRequiredService<IMessageSerializer>();
             var options = sp.GetRequiredService<IOptions<PayloadOffloadingOptions>>();
+            var serviceKey = options.Value.ObjectStoreServiceKey ?? objectStoreBucket;
+            var objectStore = sp.GetRequiredKeyedService<IObjectStore>(serviceKey);
+            var serializer = sp.GetRequiredService<IMessageSerializer>();
             var logger = sp.GetRequiredService<ILogger<Decorators.OffloadingJetStreamConsumer>>();
 
             return new Decorators.OffloadingJetStreamConsumer(coreBus, objectStore, serializer, options, logger);

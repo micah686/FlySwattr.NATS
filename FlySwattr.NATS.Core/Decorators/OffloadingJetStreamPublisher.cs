@@ -105,7 +105,11 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
 
         // Process each message: offload if needed, then collect for batch publish
         var processedMessages = new List<BatchMessage<T>>(messages.Count);
-        var uploadedKeys = new List<string>();
+
+        // Tracks object keys that have been uploaded but whose raw publish has NOT yet
+        // been confirmed. Only these are safe to delete on failure — keys removed from
+        // this set have already been referenced by a successfully published message.
+        var pendingCleanup = new List<string>();
 
         try
         {
@@ -145,7 +149,9 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
 
                     using var payloadStream = new MemoryStream(payload.ToArray());
                     await _objectStore.PutAsync(objectKey, payloadStream, cancellationToken);
-                    uploadedKeys.Add(objectKey);
+
+                    // Track as pending cleanup until the raw publish confirms delivery
+                    pendingCleanup.Add(objectKey);
 
                     var claimCheckHeaders = new Dictionary<string, string>
                     {
@@ -170,6 +176,9 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
                         msg.MessageId,
                         new MessageHeaders(claimCheckHeaders),
                         cancellationToken);
+
+                    // Raw publish confirmed: the payload is now live and must NOT be deleted
+                    pendingCleanup.Remove(objectKey);
                 }
                 else
                 {
@@ -185,8 +194,10 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
         }
         catch
         {
-            // Compensating action: clean up any uploaded objects on failure
-            foreach (var key in uploadedKeys)
+            // Compensating action: clean up only objects that were uploaded but whose
+            // corresponding raw publish was never confirmed. Live payloads (already
+            // published) are intentionally excluded to avoid corrupting delivered messages.
+            foreach (var key in pendingCleanup)
             {
                 try
                 {

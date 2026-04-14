@@ -105,10 +105,11 @@ internal class OffloadingJetStreamConsumer : IJetStreamConsumer
     }
 }
 
-internal class OffloadingMessageContext<T> : IJsMessageContext<T>
+internal class OffloadingMessageContext<T> : IJsMessageContext<T>, IPostAckLifecycle
 {
     private readonly IMessageContext<byte[]> _inner;
     private readonly T _resolvedMessage;
+    private List<Func<CancellationToken, Task>>? _afterAckCallbacks;
 
     public OffloadingMessageContext(IMessageContext<byte[]> inner, T resolvedMessage, string? claimCheckObjectKey = null)
     {
@@ -131,8 +132,11 @@ internal class OffloadingMessageContext<T> : IJsMessageContext<T>
     public Task RespondAsync<TResponse>(TResponse response, CancellationToken cancellationToken = default)
         => _inner.RespondAsync(response, cancellationToken);
 
-    public Task AckAsync(CancellationToken cancellationToken = default)
-        => ((IJsMessageContext<byte[]>)_inner).AckAsync(cancellationToken);
+    public async Task AckAsync(CancellationToken cancellationToken = default)
+    {
+        await ((IJsMessageContext<byte[]>)_inner).AckAsync(cancellationToken);
+        await RunAfterAckCallbacksAsync(cancellationToken);
+    }
 
     public Task NackAsync(TimeSpan? delay = null, CancellationToken cancellationToken = default)
         => ((IJsMessageContext<byte[]>)_inner).NackAsync(delay, cancellationToken);
@@ -147,4 +151,20 @@ internal class OffloadingMessageContext<T> : IJsMessageContext<T>
     public DateTimeOffset Timestamp => ((IJsMessageContext<byte[]>)_inner).Timestamp;
     public bool Redelivered => ((IJsMessageContext<byte[]>)_inner).Redelivered;
     public uint NumDelivered => ((IJsMessageContext<byte[]>)_inner).NumDelivered;
+
+    public void RegisterAfterAckCallback(Func<CancellationToken, Task> callback)
+    {
+        _afterAckCallbacks ??= new List<Func<CancellationToken, Task>>();
+        _afterAckCallbacks.Add(callback);
+    }
+
+    private async Task RunAfterAckCallbacksAsync(CancellationToken cancellationToken)
+    {
+        if (_afterAckCallbacks is null) return;
+        foreach (var cb in _afterAckCallbacks)
+        {
+            try { await cb(cancellationToken); }
+            catch { /* callbacks are best-effort; they log internally */ }
+        }
+    }
 }

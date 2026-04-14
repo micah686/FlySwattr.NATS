@@ -6,6 +6,7 @@ using CommunityToolkit.HighPerformance.Buffers;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core.Configuration;
 using FlySwattr.NATS.Abstractions.Exceptions;
+using FlySwattr.NATS.Core.Decorators;
 using FlySwattr.NATS.Core.Services;
 using FlySwattr.NATS.Core.Telemetry;
 using FlySwattr.NATS.Hosting.Health;
@@ -287,20 +288,27 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
     {
         if (rawContext.Headers.Headers.TryGetValue(_offloadingOptions!.ClaimCheckHeaderName, out var claimCheckRef))
         {
-            var payload = await DownloadPayloadAsync(claimCheckRef, cancellationToken);
-            return new HydratedMessageContext<T>(rawContext, _serializer!.Deserialize<T>(payload));
+            // Extract and validate the object key once so it can be stored in the context
+            // for post-ack cleanup via IPostAckLifecycle (e.g. ClaimCheckCleanupMiddleware).
+            var objectKey = ExtractAndValidateObjectKey(claimCheckRef);
+            var payload = await DownloadPayloadAsync(objectKey, cancellationToken);
+            return new HydratedMessageContext<T>(rawContext, _serializer!.Deserialize<T>(payload), objectKey);
         }
 
         return new HydratedMessageContext<T>(rawContext, _serializer!.Deserialize<T>(rawContext.Message));
     }
 
-    private async Task<ReadOnlyMemory<byte>> DownloadPayloadAsync(string claimCheckRef, CancellationToken cancellationToken)
+    private static string ExtractAndValidateObjectKey(string claimCheckRef)
     {
-        var objectKey = claimCheckRef.StartsWith("objstore://", StringComparison.OrdinalIgnoreCase)
-            ? claimCheckRef["objstore://".Length..]
+        const string prefix = "objstore://";
+        var objectKey = claimCheckRef.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+            ? claimCheckRef[prefix.Length..]
             : claimCheckRef;
-        objectKey = MessageSecurity.ValidateObjectStoreKey(objectKey, nameof(claimCheckRef));
+        return MessageSecurity.ValidateObjectStoreKey(objectKey, nameof(claimCheckRef));
+    }
 
+    private async Task<ReadOnlyMemory<byte>> DownloadPayloadAsync(string objectKey, CancellationToken cancellationToken)
+    {
         using var memoryStream = new MemoryStream();
         await _objectStore!.GetAsync(objectKey, memoryStream, cancellationToken);
         return memoryStream.ToArray();
@@ -499,9 +507,10 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
 /// <summary>
 /// Internal wrapper for INatsJSMsg to implement IJsMessageContext.
 /// </summary>
-internal class JsMessageContextWrapper<T> : IJsMessageContext<T>
+internal class JsMessageContextWrapper<T> : IJsMessageContext<T>, IPostAckLifecycle
 {
     private readonly INatsJSMsg<T> _msg;
+    private List<Func<CancellationToken, Task>>? _afterAckCallbacks;
 
     public JsMessageContextWrapper(INatsJSMsg<T> msg)
     {
@@ -520,8 +529,11 @@ internal class JsMessageContextWrapper<T> : IJsMessageContext<T>
     public bool Redelivered => (_msg.Metadata?.NumDelivered ?? 1) > 1;
     public uint NumDelivered => (uint)(_msg.Metadata?.NumDelivered ?? 1);
 
-    public async Task AckAsync(CancellationToken cancellationToken = default) =>
+    public async Task AckAsync(CancellationToken cancellationToken = default)
+    {
         await _msg.AckAsync(cancellationToken: cancellationToken);
+        await RunAfterAckCallbacksAsync(cancellationToken);
+    }
 
     public async Task NackAsync(TimeSpan? delay = null, CancellationToken cancellationToken = default) =>
         await _msg.NakAsync(delay: delay ?? TimeSpan.FromSeconds(5), cancellationToken: cancellationToken);
@@ -542,18 +554,42 @@ internal class JsMessageContextWrapper<T> : IJsMessageContext<T>
         else
             throw new NotSupportedException("This message type does not support replies.");
     }
+
+    public void RegisterAfterAckCallback(Func<CancellationToken, Task> callback)
+    {
+        _afterAckCallbacks ??= new List<Func<CancellationToken, Task>>();
+        _afterAckCallbacks.Add(callback);
+    }
+
+    private async Task RunAfterAckCallbacksAsync(CancellationToken cancellationToken)
+    {
+        if (_afterAckCallbacks is null) return;
+        foreach (var cb in _afterAckCallbacks)
+        {
+            try { await cb(cancellationToken); }
+            catch { /* callbacks are best-effort; they log internally */ }
+        }
+    }
 }
 
-internal class HydratedMessageContext<T> : IJsMessageContext<T>
+internal class HydratedMessageContext<T> : IJsMessageContext<T>, IPostAckLifecycle
 {
     private readonly IJsMessageContext<byte[]> _inner;
     private readonly T _message;
+    private List<Func<CancellationToken, Task>>? _afterAckCallbacks;
 
-    public HydratedMessageContext(IJsMessageContext<byte[]> inner, T message)
+    public HydratedMessageContext(IJsMessageContext<byte[]> inner, T message, string? claimCheckObjectKey = null)
     {
         _inner = inner;
         _message = message;
+        ClaimCheckObjectKey = claimCheckObjectKey;
     }
+
+    /// <summary>
+    /// The object store key used to resolve this message's payload, or null if the message
+    /// was not offloaded. Set when the claim-check header is present during hydration.
+    /// </summary>
+    public string? ClaimCheckObjectKey { get; }
 
     public T Message => _message;
     public string Subject => _inner.Subject;
@@ -564,11 +600,32 @@ internal class HydratedMessageContext<T> : IJsMessageContext<T>
     public bool Redelivered => _inner.Redelivered;
     public uint NumDelivered => _inner.NumDelivered;
 
-    public Task AckAsync(CancellationToken cancellationToken = default) => _inner.AckAsync(cancellationToken);
+    public async Task AckAsync(CancellationToken cancellationToken = default)
+    {
+        await _inner.AckAsync(cancellationToken);
+        await RunAfterAckCallbacksAsync(cancellationToken);
+    }
+
     public Task NackAsync(TimeSpan? delay = null, CancellationToken cancellationToken = default) => _inner.NackAsync(delay, cancellationToken);
     public Task TermAsync(CancellationToken cancellationToken = default) => _inner.TermAsync(cancellationToken);
     public Task InProgressAsync(CancellationToken cancellationToken = default) => _inner.InProgressAsync(cancellationToken);
     public Task RespondAsync<TResponse>(TResponse response, CancellationToken cancellationToken = default) => _inner.RespondAsync(response, cancellationToken);
+
+    public void RegisterAfterAckCallback(Func<CancellationToken, Task> callback)
+    {
+        _afterAckCallbacks ??= new List<Func<CancellationToken, Task>>();
+        _afterAckCallbacks.Add(callback);
+    }
+
+    private async Task RunAfterAckCallbacksAsync(CancellationToken cancellationToken)
+    {
+        if (_afterAckCallbacks is null) return;
+        foreach (var cb in _afterAckCallbacks)
+        {
+            try { await cb(cancellationToken); }
+            catch { /* callbacks are best-effort; they log internally */ }
+        }
+    }
 }
 
 internal sealed class PassthroughByteArrayDeserializer : INatsDeserialize<byte[]>

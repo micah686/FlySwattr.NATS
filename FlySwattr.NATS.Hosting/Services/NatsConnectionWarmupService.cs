@@ -31,7 +31,7 @@ public sealed partial class NatsConnectionWarmupService : IHostedService
         cts.CancelAfter(_connectTimeout);
         try
         {
-            await _connection.ConnectAsync();
+            await _connection.ConnectAsync().AsTask().WaitAsync(cts.Token);
             LogWarmupComplete(_connection.ConnectionState.ToString());
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

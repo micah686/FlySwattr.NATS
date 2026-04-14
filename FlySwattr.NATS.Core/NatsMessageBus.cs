@@ -23,6 +23,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
     private readonly Func<double> _randomNextDouble;
     private readonly ConcurrentDictionary<Guid, Task> _backgroundTasks = new();
     private readonly ConcurrentDictionary<Guid, IAsyncDisposable> _subscriptions = new();
+    private readonly ConcurrentDictionary<Guid, CancellationTokenSource> _subscriptionCts = new();
     private readonly CancellationTokenSource _cts = new();
     private int _disposed;
 
@@ -164,6 +165,9 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
 
         _logger.LogInformation("Starting subscription for {Subject}", subject);
 
+        // Store so StopSubscriptionAsync can cancel this specific subscription's loop
+        _subscriptionCts[taskId] = linkedCts;
+
         var task = Task.Run(async () =>
         {
             var backoff = TimeSpan.FromSeconds(1);
@@ -269,6 +273,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
             _logger.LogInformation("Background task finishing for {Subject}", subject);
             _subscriptions.TryRemove(taskId, out _);
             _backgroundTasks.TryRemove(taskId, out _);
+            _subscriptionCts.TryRemove(taskId, out _);
             linkedCts.Dispose();
 
         }, token);
@@ -296,6 +301,14 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
 
     private async Task StopSubscriptionAsync(Guid subscriptionId, CancellationToken cancellationToken)
     {
+        // Cancel the per-subscription CTS to stop the reconnect loop from resubscribing.
+        // The background task owns disposal of the CTS; we only cancel here.
+        if (_subscriptionCts.TryRemove(subscriptionId, out var subCts))
+        {
+            await subCts.CancelAsync();
+        }
+
+        // Dispose the underlying NATS subscription to unblock ReadAllAsync immediately.
         if (_subscriptions.TryRemove(subscriptionId, out var subscription))
         {
             await subscription.DisposeAsync();
