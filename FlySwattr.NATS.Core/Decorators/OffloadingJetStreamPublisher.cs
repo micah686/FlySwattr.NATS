@@ -17,6 +17,7 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
 {
     private readonly IJetStreamPublisher _inner;
     private readonly IRawJetStreamPublisher _rawPublisher;
+    private readonly IPreserializedJetStreamPublisher? _preserialized;
     private readonly IObjectStore _objectStore;
     private readonly IMessageSerializer _serializer;
     private readonly IMessageTypeAliasRegistry _typeAliasRegistry;
@@ -48,6 +49,7 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
     {
         _inner = inner;
         _rawPublisher = rawPublisher;
+        _preserialized = inner as IPreserializedJetStreamPublisher;
         _objectStore = objectStore;
         _serializer = serializer;
         _typeAliasRegistry = typeAliasRegistry;
@@ -89,9 +91,16 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
         {
             await PublishWithOffloadingAsync(subject, message, payload, messageId, headers, cancellationToken);
         }
+        else if (_preserialized != null)
+        {
+            // Reuse the bytes already serialized above — avoids a second serialization pass.
+            // IPreserializedJetStreamPublisher adds the same headers as the typed path
+            // (Content-Type, version, schema metadata, trace context).
+            await _preserialized.PublishBytesAsync<T>(subject, payload, messageId, headers, cancellationToken);
+        }
         else
         {
-            // Under threshold - pass through to inner publisher
+            // Fallback: inner publisher does not support pre-serialized bytes; re-serialize.
             await _inner.PublishAsync(subject, message, messageId, headers, cancellationToken);
         }
     }

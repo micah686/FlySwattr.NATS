@@ -23,6 +23,22 @@ internal interface IRawJetStreamPublisher
     Task PublishRawAsync(string subject, ReadOnlyMemory<byte> payload, string? messageId, MessageHeaders? headers = null, CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// Allows a decorator to publish bytes that were already serialized during a size-check pass,
+/// while still having all typed-publish headers (Content-Type, version, schema metadata, telemetry)
+/// attached by <see cref="NatsJetStreamBus"/>. This avoids a second serialization in the
+/// below-threshold path of <see cref="FlySwattr.NATS.Core.Decorators.OffloadingJetStreamPublisher"/>.
+/// </summary>
+internal interface IPreserializedJetStreamPublisher
+{
+    Task PublishBytesAsync<T>(
+        string subject,
+        ReadOnlyMemory<byte> serializedPayload,
+        string? messageId,
+        MessageHeaders? headers = null,
+        CancellationToken cancellationToken = default);
+}
+
 internal interface IRawJetStreamConsumer
 {
     Task ConsumeRawAsync(
@@ -40,7 +56,7 @@ internal interface IRawJetStreamConsumer
         CancellationToken cancellationToken = default);
 }
 
-public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJetStreamPublisher, IRawJetStreamConsumer, IAsyncDisposable
+public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJetStreamPublisher, IRawJetStreamConsumer, IPreserializedJetStreamPublisher, IAsyncDisposable
 {
     private readonly string[] _reservedPublishHeaders;
     private readonly string[] _reservedRawPublishHeaders;
@@ -239,6 +255,67 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
             cancellationToken: cancellationToken);
 
         ack.EnsureSuccess();
+    }
+
+    /// <summary>
+    /// Publishes bytes that were already serialized by the caller (e.g. during a size-check pass)
+    /// and adds the same headers as <see cref="PublishAsync{T}"/>: Content-Type, message-ID, wire
+    /// version, MemoryPack schema metadata, and distributed trace context.  This avoids a second
+    /// serialization when the payload is already known to be below the offloading threshold.
+    /// </summary>
+    public async Task PublishBytesAsync<T>(
+        string subject,
+        ReadOnlyMemory<byte> serializedPayload,
+        string? messageId,
+        MessageHeaders? headers = null,
+        CancellationToken cancellationToken = default)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        MessageSecurity.ValidatePublishSubject(subject);
+
+        if (string.IsNullOrWhiteSpace(messageId))
+        {
+            throw new ArgumentException(
+                "A messageId must be provided for JetStream publishing to ensure application-level idempotency.",
+                nameof(messageId));
+        }
+
+        using var activity = NatsTelemetry.ActivitySource.StartActivity($"{subject} publish", ActivityKind.Producer);
+        NatsTelemetry.ApplyMessagingTags(activity, subject);
+        activity?.SetTag(NatsTelemetry.MessagingMessageId, messageId);
+
+        var natsHeaders = new NatsHeaders
+        {
+            ["Content-Type"] = _serializer.GetContentType<T>(),
+            ["Nats-Msg-Id"] = messageId,
+            [_wireOptions.VersionHeaderName] = _wireOptions.ProtocolVersion.ToString()
+        };
+
+        var validatedHeaders = MessageSecurity.BuildValidatedHeaders(headers, _reservedPublishHeaders, paramName: nameof(headers));
+        foreach (var header in validatedHeaders)
+        {
+            natsHeaders[header.Key] = header.Value;
+        }
+
+        NatsTelemetry.InjectTraceContext(activity, natsHeaders);
+        MemoryPackSchemaMetadata.AddHeadersIfNeeded<T>(natsHeaders);
+
+        var ack = await _jsContext.PublishAsync(
+            subject,
+            serializedPayload.ToArray(),
+            serializer: RawByteArraySerializer.Instance,
+            headers: natsHeaders,
+            opts: new NatsJSPubOpts { MsgId = messageId },
+            cancellationToken: cancellationToken);
+
+        ack.EnsureSuccess();
+
+        stopwatch.Stop();
+        var tags = NatsTelemetry.CreateMessagingTags(subject);
+        NatsTelemetry.MessagesPublished.Add(1, tags);
+        NatsTelemetry.PublishDuration.Record(stopwatch.Elapsed.TotalMilliseconds, tags);
+
+        _logger.LogDebug("Published pre-serialized JetStream message to {Subject} with MsgId {MsgId}", subject, messageId);
     }
 
     public Task ConsumeAsync<T>(

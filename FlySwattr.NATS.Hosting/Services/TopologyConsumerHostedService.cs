@@ -129,13 +129,8 @@ internal class TopologyConsumerHostedService<TSource> : IHostedService
         var poisonHandlerType = typeof(IPoisonMessageHandler<>).MakeGenericType(registration.MessageType);
         var defaultPoisonHandlerType = typeof(DefaultDlqPoisonHandler<>).MakeGenericType(registration.MessageType);
 
-        var dlqPublisher = _serviceProvider.GetService<IJetStreamPublisher>();
-        var serializer = _serviceProvider.GetService<IMessageSerializer>();
-        var objectStore = _serviceProvider.GetService<IObjectStore>();
-        var notificationService = _serviceProvider.GetService<IDlqNotificationService>();
         var offloadingOptions = _serviceProvider.GetService<Microsoft.Extensions.Options.IOptions<FlySwattr.NATS.Core.Configuration.PayloadOffloadingOptions>>()?.Value;
         var dlqRegistry = _serviceProvider.GetRequiredService<IDlqPolicyRegistry>();
-        var typeAliasRegistry = _serviceProvider.GetRequiredService<IMessageTypeAliasRegistry>();
 
         // Register policy if provided
         if (spec.DeadLetterPolicy != null)
@@ -143,20 +138,14 @@ internal class TopologyConsumerHostedService<TSource> : IHostedService
             dlqRegistry.Register(spec.StreamName.Value, spec.DurableName.Value, spec.DeadLetterPolicy);
         }
 
-        var poisonHandlerLoggerType = typeof(ILogger<>).MakeGenericType(defaultPoisonHandlerType);
-        var poisonHandlerLogger = _serviceProvider.GetRequiredService(poisonHandlerLoggerType);
+        // Use ActivatorUtilities so all DI-registered constructor params are resolved
+        // automatically (IJetStreamPublisher, IMessageSerializer, IObjectStore, loggers, etc.)
+        // without enumerating them positionally here.
+        var poisonHandler = ActivatorUtilities.CreateInstance(_serviceProvider, defaultPoisonHandlerType);
 
-        var poisonHandler = Activator.CreateInstance(
-            defaultPoisonHandlerType,
-            dlqPublisher,
-            serializer,
-            typeAliasRegistry,
-            objectStore,
-            notificationService,
-            dlqRegistry,
-            poisonHandlerLogger,
-            null,
-            _serviceProvider.GetService<IOptions<NatsConfiguration>>());
+        // Resolve services still needed for the worker (claim-check hydration support)
+        var serializer = _serviceProvider.GetService<IMessageSerializer>();
+        var objectStore = _serviceProvider.GetService<IObjectStore>();
 
         // Resolve optional services
         var healthMetrics = _serviceProvider.GetService<IConsumerHealthMetrics>();
@@ -169,6 +158,9 @@ internal class TopologyConsumerHostedService<TSource> : IHostedService
 
         var workerLogger = _serviceProvider.GetRequiredService(loggerType);
 
+        // Note: NatsConsumerBackgroundService<T> is generic and constructed per message type at
+        // runtime. Activator.CreateInstance is used here because the type is only known at runtime.
+        // The constructor is positional; if the signature changes, update this call site to match.
         var worker = Activator.CreateInstance(
             workerType,
             consumer,
@@ -196,41 +188,56 @@ internal class TopologyConsumerHostedService<TSource> : IHostedService
         }
     }
 
+    /// <summary>
+    /// Resolves and instantiates all configured middlewares for a given message type.
+    /// Returns a typed array (<c>IConsumerMiddleware&lt;T&gt;[]</c>) so the caller does not
+    /// need an additional reflection-based <c>Add</c> loop.  The instances themselves are
+    /// created with <see cref="ActivatorUtilities.CreateInstance"/> rather than
+    /// <see cref="Activator.CreateInstance"/> so their own DI dependencies are resolved
+    /// automatically.
+    /// </summary>
     private static object ResolveMiddlewares(Type messageType, IServiceProvider sp, NatsConsumerOptions options)
     {
         var middlewareInterfaceType = typeof(IConsumerMiddleware<>).MakeGenericType(messageType);
-        var listType = typeof(List<>).MakeGenericType(middlewareInterfaceType);
-        var middlewares = Activator.CreateInstance(listType)!;
-        var addMethod = listType.GetMethod("Add")!;
+
+        // Accumulate into a plain List<object> so we avoid a reflected generic List<T> with a
+        // reflected Add() call.  We convert to a typed array at the end — arrays are covariant
+        // over IEnumerable<T>, so the consumer constructor's IEnumerable<IConsumerMiddleware<T>>?
+        // parameter accepts the result without further reflection.
+        var instances = new List<object>();
 
         if (ServiceCollectionExtensions.ShouldEnableWireCompatibilityMiddleware(sp))
         {
             var wireCompatibilityMiddlewareType = typeof(Middleware.WireVersionCheckMiddleware<>).MakeGenericType(messageType);
-            var wireCompatibilityMiddleware = ActivatorUtilities.CreateInstance(sp, wireCompatibilityMiddlewareType);
-            addMethod.Invoke(middlewares, [wireCompatibilityMiddleware]);
+            instances.Add(ActivatorUtilities.CreateInstance(sp, wireCompatibilityMiddlewareType));
         }
 
         if (options.EnableLoggingMiddleware)
         {
             var loggingMiddlewareType = typeof(Middleware.LoggingMiddleware<>).MakeGenericType(messageType);
-            var loggingMiddleware = ActivatorUtilities.CreateInstance(sp, loggingMiddlewareType);
-            addMethod.Invoke(middlewares, new[] { loggingMiddleware });
+            instances.Add(ActivatorUtilities.CreateInstance(sp, loggingMiddlewareType));
         }
 
         if (options.EnableValidationMiddleware)
         {
             var validationMiddlewareType = typeof(Middleware.ValidationMiddleware<>).MakeGenericType(messageType);
-            var validationMiddleware = ActivatorUtilities.CreateInstance(sp, validationMiddlewareType);
-            addMethod.Invoke(middlewares, new[] { validationMiddleware });
+            instances.Add(ActivatorUtilities.CreateInstance(sp, validationMiddlewareType));
         }
 
         foreach (var middlewareType in options.MiddlewareTypes)
         {
-            var middleware = ActivatorUtilities.CreateInstance(sp, middlewareType);
-            addMethod.Invoke(middlewares, new[] { middleware });
+            instances.Add(ActivatorUtilities.CreateInstance(sp, middlewareType));
         }
 
-        return middlewares;
+        // Build a typed IConsumerMiddleware<T>[] so the consumer background service receives a
+        // correctly typed IEnumerable without requiring additional reflection at the call site.
+        var typedArray = Array.CreateInstance(middlewareInterfaceType, instances.Count);
+        for (var i = 0; i < instances.Count; i++)
+        {
+            typedArray.SetValue(instances[i], i);
+        }
+
+        return typedArray;
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)

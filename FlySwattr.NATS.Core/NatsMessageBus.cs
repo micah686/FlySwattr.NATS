@@ -10,6 +10,18 @@ using NATS.Client.Core;
 
 namespace FlySwattr.NATS.Core;
 
+/// <summary>
+/// Core NATS publish/subscribe message bus.
+/// </summary>
+/// <remarks>
+/// <para><b>Basic / non-production path:</b> Core NATS has no acknowledgement semantics — messages
+/// are fire-and-forget at the broker level.  When a subscriber's handler throws, the exception is
+/// logged and telemetry is recorded, but there is no Nack, no DLQ, and no retry.  The message is
+/// silently lost from the processing perspective.</para>
+/// <para>If you need at-least-once delivery, DLQ support, or reliable retry, use
+/// <see cref="NatsJetStreamBus"/> (JetStream) with <c>NatsConsumerBackgroundService&lt;T&gt;</c>
+/// from the Hosting package instead.</para>
+/// </remarks>
 public class NatsMessageBus : IMessageBus, IAsyncDisposable
 {
     private static readonly string[] ReservedHeaders =
@@ -182,8 +194,13 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
                         {
                             activity?.SetStatus(ActivityStatusCode.Error, NatsTelemetry.SanitizeExceptionForTelemetry(ex));
                             _logger.LogError(ex, "Error handling message {Subject}", subject);
-                            
-                            // Record failure metrics
+
+                            // Core NATS has no acknowledgement or Nack semantics: there is nothing
+                            // to negative-acknowledge, no broker-side retry, and no DLQ routing.
+                            // The handler exception is logged and counted in telemetry, but the
+                            // message is effectively lost.  This is expected behaviour for the basic
+                            // pub/sub path.  Use JetStream consumers for production workloads that
+                            // require at-least-once delivery or DLQ support.
                             var errorTags = NatsTelemetry.CreateMessagingTags(subject);
                             errorTags.Add("error.type", ex.GetType().Name);
                             NatsTelemetry.MessagesFailed.Add(1, errorTags);

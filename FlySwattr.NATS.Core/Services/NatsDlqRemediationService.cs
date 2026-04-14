@@ -19,6 +19,7 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
     private readonly IObjectStore? _objectStore;
     private readonly IDlqNotificationService? _notificationService;
     private readonly IRawJetStreamPublisher? _rawPublisher;
+    private readonly IDlqAuditService? _auditService;
     private readonly ILogger<NatsDlqRemediationService> _logger;
 
     public NatsDlqRemediationService(
@@ -28,7 +29,8 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
         IMessageTypeAliasRegistry typeAliasRegistry,
         ILogger<NatsDlqRemediationService> logger,
         IObjectStore? objectStore = null,
-        IDlqNotificationService? notificationService = null)
+        IDlqNotificationService? notificationService = null,
+        IDlqAuditService? auditService = null)
     {
         _dlqStore = dlqStore ?? throw new ArgumentNullException(nameof(dlqStore));
         _publisher = publisher ?? throw new ArgumentNullException(nameof(publisher));
@@ -37,6 +39,7 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _objectStore = objectStore;
         _notificationService = notificationService;
+        _auditService = auditService;
     }
 
     internal NatsDlqRemediationService(
@@ -47,7 +50,8 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
         ILogger<NatsDlqRemediationService> logger,
         IRawJetStreamPublisher rawPublisher,
         IObjectStore? objectStore,
-        IDlqNotificationService? notificationService)
+        IDlqNotificationService? notificationService,
+        IDlqAuditService? auditService = null)
     {
         _dlqStore = dlqStore ?? throw new ArgumentNullException(nameof(dlqStore));
         _publisher = publisher ?? throw new ArgumentNullException(nameof(publisher));
@@ -57,6 +61,7 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
         _rawPublisher = rawPublisher;
         _objectStore = objectStore;
         _notificationService = notificationService;
+        _auditService = auditService;
     }
 
     /// <inheritdoc />
@@ -94,7 +99,20 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
-        
+
+        if (_auditService != null)
+            await _auditService.BeforeReplayAsync(id, replayMode, cancellationToken);
+
+        var result = await ExecuteReplayAsync(id, replayMode, cancellationToken);
+
+        if (_auditService != null)
+            await _auditService.AfterReplayAsync(id, result, cancellationToken);
+
+        return result;
+    }
+
+    private async Task<DlqRemediationResult> ExecuteReplayAsync(string id, DlqReplayMode replayMode, CancellationToken cancellationToken)
+    {
         try
         {
             var entry = await _dlqStore.GetAsync(id, cancellationToken);
@@ -170,13 +188,19 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
         ArgumentNullException.ThrowIfNull(modifiedPayload);
 
+        if (_auditService != null)
+            await _auditService.BeforeReplayWithModificationAsync(id, typeof(T), replayMode, cancellationToken);
+
+        DlqRemediationResult result;
         try
         {
             var entry = await _dlqStore.GetAsync(id, cancellationToken);
             if (entry == null)
             {
                 LogNotFound(id);
-                return new DlqRemediationResult(false, id, DlqRemediationAction.NotFound, "DLQ entry not found");
+                result = new DlqRemediationResult(false, id, DlqRemediationAction.NotFound, "DLQ entry not found");
+                if (_auditService != null) await _auditService.AfterReplayWithModificationAsync(id, typeof(T), result, cancellationToken);
+                return result;
             }
 
             var processingResult = await _dlqStore.UpdateStatusAsync(
@@ -187,7 +211,9 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
 
             if (!processingResult.Succeeded)
             {
-                return CreateStatusUpdateFailureResult(id, processingResult, "mark entry as processing");
+                result = CreateStatusUpdateFailureResult(id, processingResult, "mark entry as processing");
+                if (_auditService != null) await _auditService.AfterReplayWithModificationAsync(id, typeof(T), result, cancellationToken);
+                return result;
             }
 
             LogProcessingModified(id, entry.OriginalSubject, typeof(T).Name);
@@ -210,25 +236,32 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
 
                 if (!resolvedResult.Succeeded)
                 {
-                    return CreateStatusUpdateFailureResult(id, resolvedResult, "mark entry as resolved after replay");
+                    result = CreateStatusUpdateFailureResult(id, resolvedResult, "mark entry as resolved after replay");
+                    if (_auditService != null) await _auditService.AfterReplayWithModificationAsync(id, typeof(T), result, cancellationToken);
+                    return result;
                 }
 
                 LogReplayedModified(id, entry.OriginalSubject);
 
-                return new DlqRemediationResult(true, id, DlqRemediationAction.Replayed, CompletedAt: DateTimeOffset.UtcNow);
+                result = new DlqRemediationResult(true, id, DlqRemediationAction.Replayed, CompletedAt: DateTimeOffset.UtcNow);
             }
             catch (Exception ex)
             {
                 await TryRevertToPendingAsync(id, processingResult.Revision, cancellationToken);
                 LogReplayException(id, ex);
-                return new DlqRemediationResult(false, id, DlqRemediationAction.Failed, ex.Message);
+                result = new DlqRemediationResult(false, id, DlqRemediationAction.Failed, ex.Message);
             }
         }
         catch (Exception ex)
         {
             LogReplayException(id, ex);
-            return new DlqRemediationResult(false, id, DlqRemediationAction.Failed, ex.Message);
+            result = new DlqRemediationResult(false, id, DlqRemediationAction.Failed, ex.Message);
         }
+
+        if (_auditService != null)
+            await _auditService.AfterReplayWithModificationAsync(id, typeof(T), result, cancellationToken);
+
+        return result;
     }
 
     /// <inheritdoc />
@@ -236,13 +269,19 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
 
+        if (_auditService != null)
+            await _auditService.BeforeArchiveAsync(id, reason, cancellationToken);
+
+        DlqRemediationResult result;
         try
         {
             var entry = await _dlqStore.GetAsync(id, cancellationToken);
             if (entry == null)
             {
                 LogNotFound(id);
-                return new DlqRemediationResult(false, id, DlqRemediationAction.NotFound, "DLQ entry not found");
+                result = new DlqRemediationResult(false, id, DlqRemediationAction.NotFound, "DLQ entry not found");
+                if (_auditService != null) await _auditService.AfterArchiveAsync(id, reason, result, cancellationToken);
+                return result;
             }
 
             var updateResult = await _dlqStore.UpdateStatusAsync(
@@ -253,18 +292,25 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
 
             if (!updateResult.Succeeded)
             {
-                return CreateStatusUpdateFailureResult(id, updateResult, "archive entry");
+                result = CreateStatusUpdateFailureResult(id, updateResult, "archive entry");
+                if (_auditService != null) await _auditService.AfterArchiveAsync(id, reason, result, cancellationToken);
+                return result;
             }
 
             LogArchived(id, reason);
 
-            return new DlqRemediationResult(true, id, DlqRemediationAction.Archived, CompletedAt: DateTimeOffset.UtcNow);
+            result = new DlqRemediationResult(true, id, DlqRemediationAction.Archived, CompletedAt: DateTimeOffset.UtcNow);
         }
         catch (Exception ex)
         {
             LogArchiveException(id, ex);
-            return new DlqRemediationResult(false, id, DlqRemediationAction.Failed, ex.Message);
+            result = new DlqRemediationResult(false, id, DlqRemediationAction.Failed, ex.Message);
         }
+
+        if (_auditService != null)
+            await _auditService.AfterArchiveAsync(id, reason, result, cancellationToken);
+
+        return result;
     }
 
     /// <inheritdoc />
@@ -272,23 +318,34 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
 
+        if (_auditService != null)
+            await _auditService.BeforeDeleteAsync(id, cancellationToken);
+
+        DlqRemediationResult result;
         try
         {
             var deleted = await _dlqStore.DeleteAsync(id, cancellationToken);
             if (!deleted)
             {
                 LogNotFound(id);
-                return new DlqRemediationResult(false, id, DlqRemediationAction.NotFound, "DLQ entry not found");
+                result = new DlqRemediationResult(false, id, DlqRemediationAction.NotFound, "DLQ entry not found");
+                if (_auditService != null) await _auditService.AfterDeleteAsync(id, result, cancellationToken);
+                return result;
             }
 
             LogDeleted(id);
-            return new DlqRemediationResult(true, id, DlqRemediationAction.Deleted, CompletedAt: DateTimeOffset.UtcNow);
+            result = new DlqRemediationResult(true, id, DlqRemediationAction.Deleted, CompletedAt: DateTimeOffset.UtcNow);
         }
         catch (Exception ex)
         {
             LogDeleteException(id, ex);
-            return new DlqRemediationResult(false, id, DlqRemediationAction.Failed, ex.Message);
+            result = new DlqRemediationResult(false, id, DlqRemediationAction.Failed, ex.Message);
         }
+
+        if (_auditService != null)
+            await _auditService.AfterDeleteAsync(id, result, cancellationToken);
+
+        return result;
     }
 
     private async Task<byte[]?> GetPayloadAsync(DlqMessageEntry entry, CancellationToken cancellationToken)

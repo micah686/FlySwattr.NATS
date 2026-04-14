@@ -12,9 +12,37 @@ public static class MessageSecurity
 
     internal static readonly StringComparer HeaderComparer = StringComparer.OrdinalIgnoreCase;
 
+    /// <summary>
+    /// Validates a subject for publishing. Publish subjects must not contain wildcards
+    /// (<c>*</c> or <c>&gt;</c>), which are only valid in subscription filter subjects.
+    /// </summary>
     public static void ValidatePublishSubject(string subject)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(subject, nameof(subject));
+
+        // Wildcards are only meaningful in subscription filters, not in publish targets.
+        // Reject them explicitly before delegating to SubjectName, so callers get a clear error.
+        if (subject.Contains('*') || subject.Contains('>'))
+        {
+            throw new ArgumentException(
+                $"Publish subject '{subject}' must not contain wildcards ('*' or '>'). " +
+                "Wildcards are only valid in subscription filter subjects.",
+                nameof(subject));
+        }
+
         SubjectName.From(subject);
+    }
+
+    /// <summary>
+    /// Validates a subject for use as a subscription filter. Wildcards (<c>*</c> and <c>&gt;</c>)
+    /// are permitted here; basic non-emptiness is enforced and remaining validation is left
+    /// to the NATS client at the protocol level.
+    /// </summary>
+    public static void ValidateSubscribeSubject(string subject)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(subject, nameof(subject));
+        // Wildcards (* single-token, > multi-token) are valid in subscribe subjects.
+        // The NATS client validates the full syntax at the protocol level.
     }
 
     public static void RejectReservedHeaders(

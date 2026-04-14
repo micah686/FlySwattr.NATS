@@ -51,12 +51,29 @@ internal sealed class MemoryPackSchemaEnvelopeSerializer
         return envelope.Payload.Length;
     }
 
+    /// <remarks>
+    /// Allocation note: serialization requires two passes — one to serialize <typeparamref name="T"/>
+    /// into an intermediate buffer so its byte length is known, and a second to serialize the
+    /// <see cref="MemoryPackSchemaEnvelope"/> wrapper (which embeds the payload as a length-prefixed
+    /// <c>byte[]</c> field).  The <c>ToArray()</c> call on line below materialises a copy of the
+    /// payload bytes into the envelope's <c>Payload</c> array; this is unavoidable given that
+    /// MemoryPack's auto-generated serializer for <see cref="MemoryPackSchemaEnvelope"/> expects a
+    /// concrete <c>byte[]</c>.  Eliminating this copy would require either (a) writing a custom
+    /// MemoryPack formatter that splices the payload bytes inline, or (b) changing the wire format —
+    /// both are breaking changes.  The overhead is proportional to payload size and is the known
+    /// cost of envelope-based schema versioning.
+    /// </remarks>
     public static void Serialize<T>(IBufferWriter<byte> writer, T value, MemoryPackSerializerOptions? options = null)
     {
         var descriptor = MemoryPackSchemaMetadata.GetDescriptor<T>();
+
+        // First pass: serialize the value to measure its byte size for the envelope Payload field.
         var payloadBuffer = new ArrayBufferWriter<byte>();
         MemoryPackSerializer.Serialize(payloadBuffer, value, options);
 
+        // ToArray() copies payloadBuffer's written bytes into the envelope's byte[] Payload field.
+        // This is a known allocation — see the <remarks> above for why it cannot be eliminated
+        // without a wire-format change.
         writer.Write(Magic);
         var envelope = new MemoryPackSchemaEnvelope
         {
@@ -66,6 +83,7 @@ internal sealed class MemoryPackSchemaEnvelopeSerializer
             Payload = payloadBuffer.WrittenSpan.ToArray()
         };
 
+        // Second pass: serialize the envelope (magic + header fields + payload bytes) to the output.
         MemoryPackSerializer.Serialize(writer, envelope, options);
     }
 
