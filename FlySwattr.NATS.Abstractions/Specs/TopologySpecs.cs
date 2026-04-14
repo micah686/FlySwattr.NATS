@@ -18,6 +18,7 @@ public class ConsumerSpec
 {
     public StreamName StreamName { get; set; } = StreamName.From("default");
     public ConsumerName DurableName { get; set; } = ConsumerName.From("default");
+    public QueueGroup? DeliverGroup { get; set; }
     public string? Description { get; set; }
 
     private string? _filterSubject;
@@ -48,6 +49,7 @@ public class ConsumerSpec
     public AckPolicy AckPolicy { get; set; } = AckPolicy.Explicit;
     public TimeSpan AckWait { get; set; } = TimeSpan.FromSeconds(30);
     public int MaxDeliver { get; set; } = -1;
+    public int? MaxAckPending { get; set; }
     public int? DegreeOfParallelism { get; set; }
     public TimeSpan[]? Backoff { get; set; }
     public DeadLetterPolicy? DeadLetterPolicy { get; set; }

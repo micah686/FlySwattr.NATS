@@ -15,6 +15,7 @@ public class NatsTelemetryTests : IDisposable
 
     public NatsTelemetryTests()
     {
+        NatsTelemetry.Configure();
         // Set up an ActivityListener to capture activities from FlySwattr.NATS
         _listener = new ActivityListener
         {
@@ -29,6 +30,7 @@ public class NatsTelemetryTests : IDisposable
     {
         _listener.Dispose();
         _capturedActivities.Clear();
+        NatsTelemetry.Configure();
     }
 
     #region ActivitySource Tests
@@ -44,6 +46,18 @@ public class NatsTelemetryTests : IDisposable
     {
         NatsTelemetry.ActivitySource.ShouldNotBeNull();
         NatsTelemetry.ActivitySource.Name.ShouldBe("FlySwattr.NATS");
+    }
+
+    [Test]
+    public void Meter_ShouldUseDerivedAssemblyVersion()
+    {
+        var expectedVersion = typeof(NatsTelemetry).Assembly.GetName().Version?.ToString();
+        NatsTelemetry.Meter.Version.ShouldNotBeNullOrWhiteSpace();
+        expectedVersion.ShouldNotBeNullOrWhiteSpace();
+        var normalizedVersion = expectedVersion!.EndsWith(".0", StringComparison.Ordinal)
+            ? expectedVersion[..^2]
+            : expectedVersion;
+        NatsTelemetry.Meter.Version.ShouldBe(normalizedVersion);
     }
 
     [Test]
@@ -136,6 +150,27 @@ public class NatsTelemetryTests : IDisposable
     public void NatsSubject_ShouldHaveCorrectAttributeName()
     {
         NatsTelemetry.NatsSubject.ShouldBe("messaging.nats.subject");
+    }
+
+    [Test]
+    public void CreateMessagingTags_ShouldOmitDestination_WhenSuppressed()
+    {
+        NatsTelemetry.Configure(includeDestinationNameInTags: false);
+
+        var tags = NatsTelemetry.CreateMessagingTags("orders.created");
+
+        tags.ShouldNotContain(x => x.Key == NatsTelemetry.MessagingDestinationName);
+    }
+
+    [Test]
+    public void CreateStoreOperationTags_ShouldOmitBucket_WhenSuppressed()
+    {
+        NatsTelemetry.Configure(includeBucketNameInTags: false);
+
+        var tags = NatsTelemetry.CreateStoreOperationTags("put", "bucket-a");
+
+        tags.ShouldContain(x => x.Key == "operation" && x.Value != null && x.Value.ToString() == "put");
+        tags.ShouldNotContain(x => x.Key == "bucket");
     }
 
     #endregion

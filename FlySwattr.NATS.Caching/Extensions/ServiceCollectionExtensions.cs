@@ -1,6 +1,7 @@
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Caching.Configuration;
 using FlySwattr.NATS.Caching.Stores;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
@@ -43,6 +44,13 @@ public static class ServiceCollectionExtensions
             services.TryAddSingleton(Options.Create(new FusionCacheConfiguration()));
         }
         
+        services.AddOptions<MemoryCacheOptions>()
+            .Configure<IOptions<FusionCacheConfiguration>>((memoryOptions, cacheOptions) =>
+            {
+                memoryOptions.SizeLimit = cacheOptions.Value.MemorySizeLimit;
+                memoryOptions.CompactionPercentage = cacheOptions.Value.CompactionPercentage;
+            });
+
         // 2. Register FusionCache with defaults from configuration
         services.AddFusionCache()
             .WithDefaultEntryOptions(opts =>

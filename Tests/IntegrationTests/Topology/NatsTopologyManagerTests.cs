@@ -179,7 +179,7 @@ public class NatsTopologyManagerTests
     }
     
     [Test]
-    public async Task EnsureConsumerAsync_ShouldRecreate_WhenImmutablePropertyChanged()
+    public async Task EnsureConsumerAsync_ShouldFailFast_WhenImmutablePropertyChanged()
     {
         await using var fixture = new NatsContainerFixture();
         await fixture.InitializeAsync();
@@ -219,11 +219,13 @@ public class NatsTopologyManagerTests
     
         // Change immutable property (DeliverPolicy) and re-ensure
         consumerSpec.DeliverPolicy = DeliverPolicy.New;
-        await manager.EnsureConsumerAsync(consumerSpec);
-    
-        // Verify consumer was recreated with new config
+        var ex = await Should.ThrowAsync<InvalidOperationException>(() => manager.EnsureConsumerAsync(consumerSpec));
+
+        ex.Message.ShouldContain("immutable topology drift");
+
+        // Verify the existing consumer was left untouched.
         var consumer = await js.GetConsumerAsync("RECREATE_STREAM", "recreate_consumer");
-        consumer.Info.Config.DeliverPolicy.ShouldBe(ConsumerConfigDeliverPolicy.New);
+        consumer.Info.Config.DeliverPolicy.ShouldBe(ConsumerConfigDeliverPolicy.All);
     }
     
     [Test]

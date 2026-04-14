@@ -22,22 +22,16 @@ internal class NatsConsumerHealthMetrics : IConsumerHealthMetrics
     public void RegisterConsumer(string streamName, string consumerName)
     {
         var key = new ConsumerKey(streamName, consumerName);
-        var now = _timeProvider.GetUtcNow();
+        var now = _timeProvider.GetUtcNow().UtcTicks;
 
         _consumers.AddOrUpdate(
             key,
-            _ => new MutableConsumerState
-            {
-                LastHeartbeat = now,
-                LastLoopIteration = now,
-                StartedAt = now,
-                IsActive = true
-            },
+            _ => new MutableConsumerState(now),
             (_, existing) =>
             {
-                existing.IsActive = true;
-                existing.StartedAt = now;
-                existing.LastLoopIteration = now;
+                existing.SetActive(true);
+                existing.SetStartedAt(now);
+                existing.SetLastLoopIteration(now);
                 return existing;
             });
     }
@@ -47,7 +41,7 @@ internal class NatsConsumerHealthMetrics : IConsumerHealthMetrics
         var key = new ConsumerKey(streamName, consumerName);
         if (_consumers.TryGetValue(key, out var state))
         {
-            state.IsActive = false;
+            state.SetActive(false);
         }
     }
 
@@ -56,9 +50,9 @@ internal class NatsConsumerHealthMetrics : IConsumerHealthMetrics
         var key = new ConsumerKey(streamName, consumerName);
         if (_consumers.TryGetValue(key, out var state))
         {
-            var now = _timeProvider.GetUtcNow();
-            state.LastHeartbeat = now;
-            state.LastLoopIteration = now;
+            var now = _timeProvider.GetUtcNow().UtcTicks;
+            state.SetLastHeartbeat(now);
+            state.SetLastLoopIteration(now);
         }
     }
 
@@ -67,7 +61,7 @@ internal class NatsConsumerHealthMetrics : IConsumerHealthMetrics
         var key = new ConsumerKey(streamName, consumerName);
         if (_consumers.TryGetValue(key, out var state))
         {
-            state.LastLoopIteration = _timeProvider.GetUtcNow();
+            state.SetLastLoopIteration(_timeProvider.GetUtcNow().UtcTicks);
         }
     }
 
@@ -77,21 +71,37 @@ internal class NatsConsumerHealthMetrics : IConsumerHealthMetrics
             kvp => kvp.Key,
             kvp => new ConsumerHealthState
             {
-                LastHeartbeat = kvp.Value.LastHeartbeat,
-                LastLoopIteration = kvp.Value.LastLoopIteration,
-                StartedAt = kvp.Value.StartedAt,
-                IsActive = kvp.Value.IsActive
+                LastHeartbeat = new DateTimeOffset(Interlocked.Read(ref kvp.Value.LastHeartbeatTicks), TimeSpan.Zero),
+                LastLoopIteration = new DateTimeOffset(Interlocked.Read(ref kvp.Value.LastLoopIterationTicks), TimeSpan.Zero),
+                StartedAt = new DateTimeOffset(Interlocked.Read(ref kvp.Value.StartedAtTicks), TimeSpan.Zero),
+                IsActive = Volatile.Read(ref kvp.Value.IsActive) == 1
             });
     }
 
     /// <summary>
     /// Internal mutable state to allow lock-free updates.
     /// </summary>
-    private class MutableConsumerState
+    private sealed class MutableConsumerState
     {
-        public DateTimeOffset LastHeartbeat { get; set; }
-        public DateTimeOffset LastLoopIteration { get; set; }
-        public DateTimeOffset StartedAt { get; set; }
-        public bool IsActive { get; set; }
+        public long LastHeartbeatTicks;
+        public long LastLoopIterationTicks;
+        public long StartedAtTicks;
+        public int IsActive;
+
+        public MutableConsumerState(long nowUtcTicks)
+        {
+            LastHeartbeatTicks = nowUtcTicks;
+            LastLoopIterationTicks = nowUtcTicks;
+            StartedAtTicks = nowUtcTicks;
+            IsActive = 1;
+        }
+
+        public void SetLastHeartbeat(long utcTicks) => Interlocked.Exchange(ref LastHeartbeatTicks, utcTicks);
+
+        public void SetLastLoopIteration(long utcTicks) => Interlocked.Exchange(ref LastLoopIterationTicks, utcTicks);
+
+        public void SetStartedAt(long utcTicks) => Interlocked.Exchange(ref StartedAtTicks, utcTicks);
+
+        public void SetActive(bool isActive) => Volatile.Write(ref IsActive, isActive ? 1 : 0);
     }
 }

@@ -158,6 +158,12 @@ public class TopologyConsumerOptions
     public TimeSpan AckTimeout { get; set; } = TimeSpan.FromSeconds(5);
 
     /// <summary>
+    /// Optional interval for sending JetStream InProgress heartbeats while a handler is still running.
+    /// Disabled when null or non-positive.
+    /// </summary>
+    public TimeSpan? InProgressHeartbeatInterval { get; set; }
+
+    /// <summary>
     /// Custom middleware types to include in the pipeline.
     /// </summary>
     public List<Type> MiddlewareTypes { get; } = new();

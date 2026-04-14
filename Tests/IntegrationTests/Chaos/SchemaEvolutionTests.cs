@@ -24,7 +24,7 @@ public partial class SchemaEvolutionTests
         var data = writer.WrittenMemory;
 
         // Act
-        var result = MemoryPackSchemaEnvelopeSerializer.Deserialize<EvolvableMessage>(data.Span);
+        var result = MemoryPackSchemaEnvelopeSerializer.Default.Deserialize<EvolvableMessage>(data.Span);
 
         // Assert
         result.ShouldNotBeNull();
@@ -42,7 +42,7 @@ public partial class SchemaEvolutionTests
 
         // Act & Assert
         var ex = Should.Throw<MemoryPackSerializationException>(
-            () => MemoryPackSchemaEnvelopeSerializer.Deserialize<EvolvableMessage>(data.Span));
+            () => MemoryPackSchemaEnvelopeSerializer.Default.Deserialize<EvolvableMessage>(data.Span));
         ex.Message.ShouldContain("envelope missing");
     }
 
@@ -56,7 +56,7 @@ public partial class SchemaEvolutionTests
 
         // Act & Assert: Different type has different SchemaId (full type name)
         var ex = Should.Throw<MemoryPackSerializationException>(
-            () => MemoryPackSchemaEnvelopeSerializer.Deserialize<DifferentSchemaMessage>(data.Span));
+            () => MemoryPackSchemaEnvelopeSerializer.Default.Deserialize<DifferentSchemaMessage>(data.Span));
         ex.Message.ShouldContain("Schema mismatch");
     }
 
@@ -124,21 +124,23 @@ public partial class SchemaEvolutionTests
     }
 
     [Test]
-    public void EnforceSchemaFingerprint_ShouldBeConfigurable()
+    public void EnforceSchemaFingerprint_ShouldBeConfigurablePerInstance()
     {
-        var original = MemoryPackSchemaEnvelopeSerializer.EnforceSchemaFingerprint;
-        try
-        {
-            MemoryPackSchemaEnvelopeSerializer.EnforceSchemaFingerprint = false;
-            MemoryPackSchemaEnvelopeSerializer.EnforceSchemaFingerprint.ShouldBeFalse();
+        // Enforcement is now per-instance, not global static state.
+        // Each HybridNatsSerializer holds its own MemoryPackSchemaEnvelopeSerializer instance.
+        var strictSerializer = new HybridNatsSerializer(enforceSchemaFingerprint: true);
+        var lenientSerializer = new HybridNatsSerializer(enforceSchemaFingerprint: false);
 
-            MemoryPackSchemaEnvelopeSerializer.EnforceSchemaFingerprint = true;
-            MemoryPackSchemaEnvelopeSerializer.EnforceSchemaFingerprint.ShouldBeTrue();
-        }
-        finally
-        {
-            MemoryPackSchemaEnvelopeSerializer.EnforceSchemaFingerprint = original;
-        }
+        // Serialize with strict default
+        var writer = new ArrayBufferWriter<byte>();
+        MemoryPackSchemaEnvelopeSerializer.Serialize(writer, new EvolvableMessage { Name = "test", Value = 1 });
+        var data = writer.WrittenMemory;
+
+        // Both instances can deserialize the same payload (same fingerprint here)
+        var r1 = strictSerializer.Deserialize<EvolvableMessage>(data);
+        var r2 = lenientSerializer.Deserialize<EvolvableMessage>(data);
+        r1.ShouldNotBeNull();
+        r2.ShouldNotBeNull();
     }
 
     [Test]

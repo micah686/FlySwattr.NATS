@@ -65,7 +65,8 @@ internal class ResilientJetStreamConsumer : IJetStreamConsumer
     {
         var opts = options ?? JetStreamConsumeOptions.Default;
         var poolName = opts.BulkheadPool ?? "default";
-        var consumerKey = $"{stream.Value}/{opts.QueueGroup?.Value ?? subject.Value}";
+        var consumerIdentity = opts.DurableName?.Value ?? opts.LegacyDurableName ?? subject.Value;
+        var consumerKey = $"{stream.Value}/{consumerIdentity}";
 
         _logger.LogDebug(
             "Starting resilient consumer for {ConsumerKey} in pool '{Pool}' with maxConcurrency={MaxConcurrency}",
@@ -178,4 +179,3 @@ internal class ResilientJetStreamConsumer : IJetStreamConsumer
         };
     }
 }
-

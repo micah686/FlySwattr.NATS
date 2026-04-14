@@ -125,6 +125,7 @@ public partial class ClaimCheckFailureTests
         // Run the cleanup middleware
         var middleware = new ClaimCheckCleanupMiddleware<TestPayload>(
             objectStore,
+            Options.Create(offloadOptions),
             NullLogger<ClaimCheckCleanupMiddleware<TestPayload>>.Instance);
 
         var acked = false;

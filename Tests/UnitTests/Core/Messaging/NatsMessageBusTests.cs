@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core;
 using Microsoft.Extensions.Logging;
 using NATS.Client.Core;
@@ -110,6 +111,18 @@ public class NatsMessageBusTests : IAsyncDisposable
             message, 
             headers: Arg.Any<NatsHeaders>(),
             cancellationToken: Arg.Any<CancellationToken>());
+    }
+
+    [Test]
+    public async Task PublishAsync_ShouldRejectUserDefinedNatsHeaders()
+    {
+        var headers = new MessageHeaders(new Dictionary<string, string>
+        {
+            ["Nats-Custom"] = "value"
+        });
+
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await _bus.PublishAsync("test.subject", new { Data = "test" }, headers));
     }
 
     [Test]

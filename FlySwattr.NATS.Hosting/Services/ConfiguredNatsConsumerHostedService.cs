@@ -41,9 +41,25 @@ internal sealed class ConfiguredNatsConsumerHostedService<TMessage> : IHostedSer
         var consumer = await jsContext.GetConsumerAsync(_streamName, _consumerName, cancellationToken);
         var logger = _serviceProvider.GetRequiredService<ILogger<NatsConsumerBackgroundService<TMessage>>>();
         var serializer = _serviceProvider.GetService<IMessageSerializer>();
-        var objectStore = _options.ObjectStoreServiceKey != null
-            ? _serviceProvider.GetKeyedService<IObjectStore>(_options.ObjectStoreServiceKey)
+        var offloadingOptions = _serviceProvider.GetService<IOptions<PayloadOffloadingOptions>>()?.Value;
+
+        // Resolve IObjectStore: prefer the consumer-specific key, then fall back to the
+        // key embedded in PayloadOffloadingOptions (set by AddPayloadOffloading), then default.
+        var objectStoreKey = _options.ObjectStoreServiceKey ?? offloadingOptions?.ObjectStoreServiceKey;
+        var objectStore = objectStoreKey != null
+            ? _serviceProvider.GetKeyedService<IObjectStore>(objectStoreKey)
             : _serviceProvider.GetService<IObjectStore>();
+
+        // Fail fast: if offloading is configured but the object store is not resolvable,
+        // offloaded messages would arrive with empty payloads and be Term()'d as fatal errors.
+        if (offloadingOptions != null && objectStore == null)
+        {
+            throw new InvalidOperationException(
+                $"Payload offloading is configured (PayloadOffloadingOptions is registered) but no IObjectStore " +
+                $"could be resolved for consumer '{_consumerName}' on stream '{_streamName}'. " +
+                $"Ensure AddPayloadOffloading() is called with the correct bucket, or set " +
+                $"NatsConsumerOptions.ObjectStoreServiceKey to the keyed IObjectStore service key.");
+        }
 
         var dlqPublisher = _options.DlqPublisherServiceKey != null
             ? _serviceProvider.GetKeyedService<IJetStreamPublisher>(_options.DlqPublisherServiceKey)
@@ -56,7 +72,6 @@ internal sealed class ConfiguredNatsConsumerHostedService<TMessage> : IHostedSer
         var healthMetrics = _serviceProvider.GetService<IConsumerHealthMetrics>();
         var topologyReadySignal = _serviceProvider.GetService<ITopologyReadySignal>();
         var middlewares = ServiceCollectionExtensions.ResolveMiddlewares<TMessage>(_serviceProvider, _options);
-        var offloadingOptions = _serviceProvider.GetService<IOptions<PayloadOffloadingOptions>>()?.Value;
 
         IPoisonMessageHandler<TMessage> poisonHandler;
         if (_options.PoisonHandlerKey != null)
@@ -78,7 +93,8 @@ internal sealed class ConfiguredNatsConsumerHostedService<TMessage> : IHostedSer
                 objectStore,
                 notificationService,
                 registry,
-                _serviceProvider.GetRequiredService<ILogger<DefaultDlqPoisonHandler<TMessage>>>());
+                _serviceProvider.GetRequiredService<ILogger<DefaultDlqPoisonHandler<TMessage>>>(),
+                natsOptions: _serviceProvider.GetService<IOptions<NatsConfiguration>>());
         }
 
         _worker = new NatsConsumerBackgroundService<TMessage>(
@@ -94,6 +110,7 @@ internal sealed class ConfiguredNatsConsumerHostedService<TMessage> : IHostedSer
             offloadingOptions,
             _options.MaxConcurrency,
             _options.AckTimeout,
+            _options.InProgressHeartbeatInterval,
             resiliencePipeline,
             healthMetrics,
             topologyReadySignal,

@@ -61,20 +61,7 @@ internal sealed class MessageTypeAliasRegistry : IMessageTypeAliasRegistry
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(alias);
 
-        if (_aliasToType.TryGetValue(alias, out var type))
-        {
-            return type;
-        }
-
-        type = Type.GetType(alias, throwOnError: false);
-        if (type != null)
-        {
-            // Legacy wire values may carry AssemblyQualifiedName; cache the resolution
-            // so future lookups avoid repeated reflection.
-            _aliasToType.TryAdd(alias, type);
-            _typeToAlias.TryAdd(type, alias);
-        }
-
+        _aliasToType.TryGetValue(alias, out var type);
         return type;
     }
 

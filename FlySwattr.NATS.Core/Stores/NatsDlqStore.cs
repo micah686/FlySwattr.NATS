@@ -13,6 +13,18 @@ namespace FlySwattr.NATS.Core;
 /// Stores DLQ entries in a dedicated KV bucket for persistence and querying.
 /// Uses hierarchical keys ({stream}.{consumer}.{id}) to enable native NATS KV filtering.
 /// </summary>
+/// <remarks>
+/// <para><b>Serialization format:</b> DLQ <em>entries</em> (metadata records stored in this KV
+/// bucket) are serialized as JSON.  This is intentional: JSON is human-readable, schema-free, and
+/// easily inspected or edited by operators in emergency scenarios without needing a MemoryPack
+/// toolchain.  The operational cost (larger wire size) is acceptable because DLQ writes are on
+/// the slow/failure path, not the hot publish path.</para>
+/// <para>DLQ <em>messages</em> (the original failing payloads re-published to a DLQ JetStream
+/// subject by <see cref="FlySwattr.NATS.Hosting.Services.DefaultDlqPoisonHandler{T}"/>) are
+/// serialized with MemoryPack, consistent with all other JetStream messages on the wire.</para>
+/// <para>The two formats coexist deliberately: KV entries are for human/operator consumption;
+/// stream messages are for machine consumption by replay consumers.</para>
+/// </remarks>
 internal class NatsDlqStore : IDlqStore
 {
     private const string BucketName = "fs-dlq-entries";
@@ -142,17 +154,18 @@ internal class NatsDlqStore : IDlqStore
     }
 
     /// <summary>
-    /// Builds a hierarchical KV key from stream, consumer, and entry ID.
-    /// Format: {stream}.{consumer}.{id}
+    /// The persistent KV key is the DLQ entry ID itself.
+    /// Entry IDs are expected to be stable and hierarchical (for example: stream.consumer.sequence)
+    /// so list filters still map cleanly onto native KV wildcard lookups.
     /// </summary>
-    private static string BuildKey(string stream, string consumer, string id) 
-        => $"{SanitizeToken(stream)}.{SanitizeToken(consumer)}.{id}";
+    private static string BuildKey(string id)
+        => SanitizeToken(id);
     
     /// <summary>
     /// Sanitizes a token for use in NATS KV keys by replacing reserved characters.
     /// </summary>
     private static string SanitizeToken(string token) 
-        => token.Replace(".", "_dot_").Replace("*", "_star_").Replace(">", "_gt_");
+        => token.Replace("*", "_star_").Replace(">", "_gt_");
     
     /// <summary>
     /// Builds the NATS wildcard pattern for filtering keys.
@@ -173,6 +186,7 @@ internal class NatsDlqStore : IDlqStore
     {
         ArgumentNullException.ThrowIfNull(entry);
         ArgumentException.ThrowIfNullOrWhiteSpace(entry.Id);
+        ValidateEntryId(entry);
 
         await EnsureInitializedAsync(cancellationToken);
 
@@ -189,7 +203,7 @@ internal class NatsDlqStore : IDlqStore
 
         try
         {
-            var key = BuildKey(entry.OriginalStream, entry.OriginalConsumer, entry.Id);
+            var key = BuildKey(entry.Id);
             var json = JsonSerializer.Serialize(entry);
             await Store.PutAsync(key, json, cancellationToken: cancellationToken);
             
@@ -215,8 +229,7 @@ internal class NatsDlqStore : IDlqStore
 
         try
         {
-            // The id parameter is the full hierarchical key
-            var kvEntry = await Store.GetEntryAsync<string>(id, cancellationToken: cancellationToken);
+            var kvEntry = await Store.GetEntryAsync<string>(BuildKey(id), cancellationToken: cancellationToken);
             if (string.IsNullOrEmpty(kvEntry.Value))
             {
                 return null;
@@ -236,6 +249,9 @@ internal class NatsDlqStore : IDlqStore
         }
     }
 
+    // Maximum concurrent KV reads issued by ListAsync to keep network pressure bounded.
+    private const int ListMaxParallelism = 16;
+
     /// <inheritdoc />
     public async Task<IReadOnlyList<DlqMessageEntry>> ListAsync(
         string? filterStream = null,
@@ -252,27 +268,49 @@ internal class NatsDlqStore : IDlqStore
         {
             var pattern = BuildFilterPattern(filterStream, filterConsumer);
             _logger.LogDebug("Listing DLQ entries with pattern {Pattern}, limit {Limit}", pattern, limit);
-            
-            var entries = new List<DlqMessageEntry>();
-            
+
+            // Phase 1: collect up to `limit` keys from the streaming key scan.
+            // Key enumeration is inherently sequential; reading entries in bulk happens below.
+            var keys = new List<string>(Math.Min(limit, 64));
             await foreach (var key in Store.GetKeysAsync([pattern], cancellationToken: cancellationToken))
             {
-                if (entries.Count >= limit) 
+                keys.Add(key);
+                if (keys.Count >= limit)
                     break;
-                
-                var entry = await GetAsync(key, cancellationToken);
-                if (entry != null)
-                {
-                    entries.Add(entry);
-                }
             }
-            
+
+            if (keys.Count == 0)
+            {
+                _logger.LogDebug("No DLQ entries found matching filters");
+                return Array.Empty<DlqMessageEntry>();
+            }
+
+            // Phase 2: fetch all entries in parallel with bounded concurrency.
+            // Sequential fetches for large DLQs caused O(N) round-trip latency; parallel
+            // fetches cut wall-clock time to O(N / parallelism).
+            using var semaphore = new SemaphoreSlim(Math.Min(ListMaxParallelism, keys.Count));
+            var fetchTasks = keys.Select(async key =>
+            {
+                await semaphore.WaitAsync(cancellationToken);
+                try
+                {
+                    return await GetAsync(key, cancellationToken);
+                }
+                finally
+                {
+                    semaphore.Release();
+                }
+            }).ToArray();
+
+            var fetched = await Task.WhenAll(fetchTasks);
+            var entries = fetched.OfType<DlqMessageEntry>().ToList();
+
             _logger.LogDebug("Found {Count} DLQ entries matching filters", entries.Count);
             return entries;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to list DLQ entries with filters Stream={Stream}, Consumer={Consumer}", 
+            _logger.LogError(ex, "Failed to list DLQ entries with filters Stream={Stream}, Consumer={Consumer}",
                 filterStream, filterConsumer);
             throw;
         }
@@ -294,7 +332,8 @@ internal class NatsDlqStore : IDlqStore
 
         try
         {
-            var kvEntry = await Store.GetEntryAsync<string>(id, cancellationToken: cancellationToken);
+            var storageKey = BuildKey(id);
+            var kvEntry = await Store.GetEntryAsync<string>(storageKey, cancellationToken: cancellationToken);
             if (string.IsNullOrEmpty(kvEntry.Value))
             {
                 _logger.LogWarning("Cannot update status for DLQ entry {MessageId}: not found", id);
@@ -310,7 +349,7 @@ internal class NatsDlqStore : IDlqStore
             var updatedEntry = entry with { Status = status, StoreRevision = null };
             var json = JsonSerializer.Serialize(updatedEntry);
             var newRevision = await Store.UpdateAsync(
-                id,
+                storageKey,
                 json,
                 expectedRevision ?? kvEntry.Revision,
                 serializer: null,
@@ -349,6 +388,7 @@ internal class NatsDlqStore : IDlqStore
         try
         {
             // Check if entry exists first (id is the full hierarchical key)
+            var storageKey = BuildKey(id);
             var entry = await GetAsync(id, cancellationToken);
             if (entry == null)
             {
@@ -356,7 +396,7 @@ internal class NatsDlqStore : IDlqStore
                 return false;
             }
 
-            await Store.DeleteAsync(id, cancellationToken: cancellationToken);
+            await Store.DeleteAsync(storageKey, cancellationToken: cancellationToken);
             _logger.LogDebug("Deleted DLQ entry {MessageId}", id);
             return true;
         }
@@ -364,6 +404,17 @@ internal class NatsDlqStore : IDlqStore
         {
             _logger.LogError(ex, "Failed to delete DLQ entry {MessageId}", id);
             throw;
+        }
+    }
+
+    private static void ValidateEntryId(DlqMessageEntry entry)
+    {
+        var expectedPrefix = $"{entry.OriginalStream}.{entry.OriginalConsumer}.";
+        if (!entry.Id.StartsWith(expectedPrefix, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                $"DLQ entry id '{entry.Id}' must start with '{expectedPrefix}' to remain consistent across store and remediation operations.",
+                nameof(entry));
         }
     }
 }

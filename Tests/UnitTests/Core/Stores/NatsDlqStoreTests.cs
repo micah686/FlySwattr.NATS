@@ -103,12 +103,12 @@ public class NatsDlqStoreTests
     {
         // Arrange
         var entry = CreateTestEntry("msg-1", "orders.v2.stream", "consumer");
-        var expectedKey = "orders_dot_v2_dot_stream.consumer.msg-1";
+        var expectedKey = "orders.v2.stream.consumer.msg-1";
 
         // Act
         await _sut.StoreAsync(entry);
 
-        // Assert - dots in stream name should be replaced with underscores
+        // Assert - the storage key should match the stable hierarchical entry id contract.
         await _kvStore.Received(1).PutAsync(
             expectedKey, 
             Arg.Any<string>(), 
@@ -156,7 +156,7 @@ public class NatsDlqStoreTests
 
         // Assert
         result.ShouldNotBeNull();
-        result!.Id.ShouldBe("msg-1");
+        result!.Id.ShouldBe(key);
         result.OriginalStream.ShouldBe(entry.OriginalStream);
         result.StoreRevision.ShouldBe((ulong?)5);
     }
@@ -386,9 +386,15 @@ public class NatsDlqStoreTests
 
     private DlqMessageEntry CreateTestEntry(string id, string stream = "test-stream", string consumer = "test-consumer")
     {
+        var effectiveId = string.IsNullOrEmpty(id)
+            ? id
+            : id.Contains('.')
+            ? id
+            : $"{stream}.{consumer}.{id}";
+
         return new DlqMessageEntry
         {
-            Id = id,
+            Id = effectiveId,
             OriginalStream = stream,
             OriginalConsumer = consumer,
             OriginalSubject = "test.subject",

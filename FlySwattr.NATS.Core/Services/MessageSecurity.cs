@@ -1,17 +1,48 @@
 using System.Text;
 using FlySwattr.NATS.Abstractions;
+using FlySwattr.NATS.Abstractions.Exceptions;
+using NATS.Client.Core;
 
 namespace FlySwattr.NATS.Core.Services;
 
 public static class MessageSecurity
 {
     private const int MaxStoredErrorLength = 256;
+    private const string NatsHeaderPrefix = "Nats-";
 
     internal static readonly StringComparer HeaderComparer = StringComparer.OrdinalIgnoreCase;
 
+    /// <summary>
+    /// Validates a subject for publishing. Publish subjects must not contain wildcards
+    /// (<c>*</c> or <c>&gt;</c>), which are only valid in subscription filter subjects.
+    /// </summary>
     public static void ValidatePublishSubject(string subject)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(subject, nameof(subject));
+
+        // Wildcards are only meaningful in subscription filters, not in publish targets.
+        // Reject them explicitly before delegating to SubjectName, so callers get a clear error.
+        if (subject.Contains('*') || subject.Contains('>'))
+        {
+            throw new ArgumentException(
+                $"Publish subject '{subject}' must not contain wildcards ('*' or '>'). " +
+                "Wildcards are only valid in subscription filter subjects.",
+                nameof(subject));
+        }
+
         SubjectName.From(subject);
+    }
+
+    /// <summary>
+    /// Validates a subject for use as a subscription filter. Wildcards (<c>*</c> and <c>&gt;</c>)
+    /// are permitted here; basic non-emptiness is enforced and remaining validation is left
+    /// to the NATS client at the protocol level.
+    /// </summary>
+    public static void ValidateSubscribeSubject(string subject)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(subject, nameof(subject));
+        // Wildcards (* single-token, > multi-token) are valid in subscribe subjects.
+        // The NATS client validates the full syntax at the protocol level.
     }
 
     public static void RejectReservedHeaders(
@@ -34,6 +65,36 @@ public static class MessageSecurity
         throw new ArgumentException(
             $"The following headers are reserved for internal use and cannot be overridden: {string.Join(", ", collisions)}",
             paramName);
+    }
+
+    public static NatsHeaders BuildValidatedHeaders(
+        MessageHeaders? headers,
+        IEnumerable<string>? reservedHeaderNames = null,
+        IEnumerable<string>? allowlistedNatsHeaders = null,
+        string paramName = "headers")
+    {
+        if (reservedHeaderNames != null)
+        {
+            RejectReservedHeaders(headers, reservedHeaderNames, paramName);
+        }
+
+        var natsHeaders = new NatsHeaders();
+        if (headers == null || headers.Headers.Count == 0)
+        {
+            return natsHeaders;
+        }
+
+        var allowlisted = allowlistedNatsHeaders is null
+            ? null
+            : new HashSet<string>(allowlistedNatsHeaders, HeaderComparer);
+
+        foreach (var (key, value) in headers.Headers)
+        {
+            ValidateHeader(key, value, allowlisted, paramName);
+            natsHeaders.Add(key, value);
+        }
+
+        return natsHeaders;
     }
 
     public static string ValidateObjectStoreKey(string objectKey, string paramName = "objectKey")
@@ -61,23 +122,135 @@ public static class MessageSecurity
         return objectKey;
     }
 
-    public static string SanitizeExceptionMessage(Exception exception)
+    public static string SanitizeExceptionMessage(Exception exception, bool enablePrivacySanitization = true)
     {
         ArgumentNullException.ThrowIfNull(exception);
 
-        var builder = new StringBuilder(exception.Message.Length);
-        foreach (var character in exception.Message)
+        if (enablePrivacySanitization)
+        {
+            if (exception is MessageValidationException messageValidationException)
+            {
+                var propertyNames = messageValidationException.Errors
+                    .Select(ExtractValidationPropertyName)
+                    .Where(static x => !string.IsNullOrWhiteSpace(x))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray();
+
+                var details = propertyNames.Length > 0
+                    ? $"Fields={string.Join(", ", propertyNames)}"
+                    : $"{messageValidationException.Errors.Count} error(s)";
+
+                return BuildPayload(exception.GetType().Name,
+                    $"Validation failed for message on subject '{messageValidationException.Subject}'. {details}");
+            }
+
+            if (TryBuildFluentValidationSummary(exception, out var fluentValidationSummary))
+            {
+                return BuildPayload(exception.GetType().Name, fluentValidationSummary);
+            }
+        }
+
+        return BuildPayload(exception.GetType().Name, exception.Message);
+    }
+
+    private static bool TryBuildFluentValidationSummary(Exception exception, out string summary)
+    {
+        summary = string.Empty;
+
+        if (!string.Equals(exception.GetType().FullName, "FluentValidation.ValidationException", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var errorsProperty = exception.GetType().GetProperty("Errors");
+        if (errorsProperty?.GetValue(exception) is not System.Collections.IEnumerable errors)
+        {
+            summary = "Validation failed";
+            return true;
+        }
+
+        var fields = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var error in errors)
+        {
+            var propertyName = error?.GetType().GetProperty("PropertyName")?.GetValue(error) as string;
+            if (!string.IsNullOrWhiteSpace(propertyName))
+            {
+                fields.Add(propertyName);
+            }
+        }
+
+        summary = fields.Count > 0
+            ? $"Validation failed. Fields={string.Join(", ", fields)}"
+            : "Validation failed";
+
+        return true;
+    }
+
+    private static string ExtractValidationPropertyName(string error)
+    {
+        if (string.IsNullOrWhiteSpace(error))
+        {
+            return string.Empty;
+        }
+
+        var colonIndex = error.IndexOf(':');
+        return colonIndex <= 0 ? string.Empty : error[..colonIndex].Trim();
+    }
+
+    private static string BuildPayload(string exceptionTypeName, string message)
+    {
+        var builder = new StringBuilder(message.Length);
+        foreach (var character in message)
         {
             builder.Append(char.IsControl(character) ? ' ' : character);
         }
 
         var normalized = string.Join(" ", builder.ToString().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
         var payload = string.IsNullOrWhiteSpace(normalized)
-            ? exception.GetType().Name
-            : $"{exception.GetType().Name}: {normalized}";
+            ? exceptionTypeName
+            : $"{exceptionTypeName}: {normalized}";
 
         return payload.Length <= MaxStoredErrorLength
             ? payload
             : $"{payload[..(MaxStoredErrorLength - 3)]}...";
+    }
+
+    private static void ValidateHeader(
+        string key,
+        string value,
+        HashSet<string>? allowlistedNatsHeaders,
+        string paramName)
+    {
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            throw new ArgumentException("Header key cannot be null or whitespace", paramName);
+        }
+
+        if (key.Contains(':') || key.Any(char.IsControl))
+        {
+            throw new ArgumentException(
+                $"Invalid header key '{key}'. Keys cannot contain colons or control characters.",
+                paramName);
+        }
+
+        if (value == null)
+        {
+            throw new ArgumentException($"Header value for '{key}' cannot be null", paramName);
+        }
+
+        if (value.Any(char.IsControl))
+        {
+            throw new ArgumentException(
+                $"Invalid header value for '{key}'. Values cannot contain control characters.",
+                paramName);
+        }
+
+        if (key.StartsWith(NatsHeaderPrefix, StringComparison.OrdinalIgnoreCase) &&
+            (allowlistedNatsHeaders == null || !allowlistedNatsHeaders.Contains(key)))
+        {
+            throw new ArgumentException(
+                $"Header '{key}' is reserved for NATS internals and cannot be set by callers.",
+                paramName);
+        }
     }
 }

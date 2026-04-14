@@ -10,6 +10,18 @@ using NATS.Client.Core;
 
 namespace FlySwattr.NATS.Core;
 
+/// <summary>
+/// Core NATS publish/subscribe message bus.
+/// </summary>
+/// <remarks>
+/// <para><b>Basic / non-production path:</b> Core NATS has no acknowledgement semantics — messages
+/// are fire-and-forget at the broker level.  When a subscriber's handler throws, the exception is
+/// logged and telemetry is recorded, but there is no Nack, no DLQ, and no retry.  The message is
+/// silently lost from the processing perspective.</para>
+/// <para>If you need at-least-once delivery, DLQ support, or reliable retry, use
+/// <see cref="NatsJetStreamBus"/> (JetStream) with <c>NatsConsumerBackgroundService&lt;T&gt;</c>
+/// from the Hosting package instead.</para>
+/// </remarks>
 public class NatsMessageBus : IMessageBus, IAsyncDisposable
 {
     private static readonly string[] ReservedHeaders =
@@ -23,6 +35,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
     private readonly Func<double> _randomNextDouble;
     private readonly ConcurrentDictionary<Guid, Task> _backgroundTasks = new();
     private readonly ConcurrentDictionary<Guid, IAsyncDisposable> _subscriptions = new();
+    private readonly ConcurrentDictionary<Guid, CancellationTokenSource> _subscriptionCts = new();
     private readonly CancellationTokenSource _cts = new();
     private int _disposed;
 
@@ -85,12 +98,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
         MessageSecurity.ValidatePublishSubject(subject);
         var stopwatch = Stopwatch.StartNew();
         using var activity = NatsTelemetry.ActivitySource.StartActivity($"{subject} publish", ActivityKind.Producer);
-        if (activity != null)
-        {
-            activity.SetTag(NatsTelemetry.MessagingSystem, NatsTelemetry.MessagingSystemName);
-            activity.SetTag(NatsTelemetry.MessagingDestinationName, subject);
-            activity.SetTag(NatsTelemetry.MessagingOperation, "publish");
-        }
+        NatsTelemetry.ApplyMessagingTags(activity, subject);
 
         var natsHeaders = new NatsHeaders();
         NatsTelemetry.InjectTraceContext(activity, natsHeaders);
@@ -100,7 +108,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
         
         // Record metrics
         stopwatch.Stop();
-        var tags = new TagList { { NatsTelemetry.MessagingDestinationName, subject } };
+        var tags = NatsTelemetry.CreateMessagingTags(subject);
         NatsTelemetry.MessagesPublished.Add(1, tags);
         NatsTelemetry.PublishDuration.Record(stopwatch.Elapsed.TotalMilliseconds, tags);
     }
@@ -108,39 +116,11 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
     public async Task PublishAsync<T>(string subject, T message, MessageHeaders? headers, CancellationToken cancellationToken = default)
     {
         MessageSecurity.ValidatePublishSubject(subject);
-        MessageSecurity.RejectReservedHeaders(headers, ReservedHeaders);
         var stopwatch = Stopwatch.StartNew();
         using var activity = NatsTelemetry.ActivitySource.StartActivity($"{subject} publish", ActivityKind.Producer);
-        if (activity != null)
-        {
-            activity.SetTag(NatsTelemetry.MessagingSystem, NatsTelemetry.MessagingSystemName);
-            activity.SetTag(NatsTelemetry.MessagingDestinationName, subject);
-            activity.SetTag(NatsTelemetry.MessagingOperation, "publish");
-        }
-        
-        var natsHeaders = new NatsHeaders();
-        if (headers?.Headers.Count > 0)
-        {
-            foreach (var kvp in headers.Headers)
-            {
-                if (string.IsNullOrWhiteSpace(kvp.Key))
-                {
-                    throw new ArgumentException("Header key cannot be null or whitespace", nameof(headers));
-                }
-                
-                if (kvp.Key.Contains(':') || kvp.Key.Any(char.IsControl))
-                {
-                    throw new ArgumentException($"Invalid header key '{kvp.Key}'. Keys cannot contain colons or control characters.", nameof(headers));
-                }
-                
-                if (kvp.Value == null)
-                {
-                    throw new ArgumentException($"Header value for '{kvp.Key}' cannot be null", nameof(headers));
-                }
+        NatsTelemetry.ApplyMessagingTags(activity, subject);
 
-                natsHeaders.Add(kvp.Key, kvp.Value);
-            }
-        }
+        var natsHeaders = MessageSecurity.BuildValidatedHeaders(headers, ReservedHeaders, paramName: nameof(headers));
         
         NatsTelemetry.InjectTraceContext(activity, natsHeaders);
         MemoryPackSchemaMetadata.AddHeadersIfNeeded<T>(natsHeaders);
@@ -149,7 +129,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
         
         // Record metrics
         stopwatch.Stop();
-        var tags = new TagList { { NatsTelemetry.MessagingDestinationName, subject } };
+        var tags = NatsTelemetry.CreateMessagingTags(subject);
         NatsTelemetry.MessagesPublished.Add(1, tags);
         NatsTelemetry.PublishDuration.Record(stopwatch.Elapsed.TotalMilliseconds, tags);
     }
@@ -163,6 +143,9 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
         var subscriptionHandle = new NatsSubscriptionHandle(taskId, StopSubscriptionAsync);
 
         _logger.LogInformation("Starting subscription for {Subject}", subject);
+
+        // Store so StopSubscriptionAsync can cancel this specific subscription's loop
+        _subscriptionCts[taskId] = linkedCts;
 
         var task = Task.Run(async () =>
         {
@@ -188,9 +171,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
                         
                         if (activity != null)
                         {
-                            activity.SetTag(NatsTelemetry.MessagingSystem, NatsTelemetry.MessagingSystemName);
-                            activity.SetTag(NatsTelemetry.MessagingDestinationName, subject);
-                            activity.SetTag(NatsTelemetry.MessagingOperation, "receive");
+                            NatsTelemetry.ApplyMessagingTags(activity, subject);
                             activity.SetTag(NatsTelemetry.NatsSubject, msg.Subject);
                             if (msg.ReplyTo != null)
                             {
@@ -199,7 +180,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
                         }
 
                         var handlerStopwatch = Stopwatch.StartNew();
-                        var handlerTags = new TagList { { NatsTelemetry.MessagingDestinationName, subject } };
+                        var handlerTags = NatsTelemetry.CreateMessagingTags(subject);
                         try
                         {
                             _logger.LogDebug("Received message on {Subject}", msg.Subject);
@@ -211,11 +192,17 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
                         }
                         catch (Exception ex)
                         {
-                            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+                            activity?.SetStatus(ActivityStatusCode.Error, NatsTelemetry.SanitizeExceptionForTelemetry(ex));
                             _logger.LogError(ex, "Error handling message {Subject}", subject);
-                            
-                            // Record failure metrics
-                            var errorTags = new TagList { { NatsTelemetry.MessagingDestinationName, subject }, { "error.type", ex.GetType().Name } };
+
+                            // Core NATS has no acknowledgement or Nack semantics: there is nothing
+                            // to negative-acknowledge, no broker-side retry, and no DLQ routing.
+                            // The handler exception is logged and counted in telemetry, but the
+                            // message is effectively lost.  This is expected behaviour for the basic
+                            // pub/sub path.  Use JetStream consumers for production workloads that
+                            // require at-least-once delivery or DLQ support.
+                            var errorTags = NatsTelemetry.CreateMessagingTags(subject);
+                            errorTags.Add("error.type", ex.GetType().Name);
                             NatsTelemetry.MessagesFailed.Add(1, errorTags);
                         }
                         finally
@@ -269,6 +256,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
             _logger.LogInformation("Background task finishing for {Subject}", subject);
             _subscriptions.TryRemove(taskId, out _);
             _backgroundTasks.TryRemove(taskId, out _);
+            _subscriptionCts.TryRemove(taskId, out _);
             linkedCts.Dispose();
 
         }, token);
@@ -296,6 +284,14 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
 
     private async Task StopSubscriptionAsync(Guid subscriptionId, CancellationToken cancellationToken)
     {
+        // Cancel the per-subscription CTS to stop the reconnect loop from resubscribing.
+        // The background task owns disposal of the CTS; we only cancel here.
+        if (_subscriptionCts.TryRemove(subscriptionId, out var subCts))
+        {
+            await subCts.CancelAsync();
+        }
+
+        // Dispose the underlying NATS subscription to unblock ReadAllAsync immediately.
         if (_subscriptions.TryRemove(subscriptionId, out var subscription))
         {
             await subscription.DisposeAsync();

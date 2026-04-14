@@ -26,11 +26,26 @@ public class NatsConsumerBackgroundServiceTests
             IPoisonMessageHandler<T> poisonHandler,
             int? maxDegreeOfParallelism = null,
             TimeSpan? ackTimeout = null,
+            TimeSpan? inProgressHeartbeatInterval = null,
             ResiliencePipeline? resiliencePipeline = null,
             IConsumerHealthMetrics? healthMetrics = null,
             ITopologyReadySignal? topologyReadySignal = null,
             IEnumerable<IConsumerMiddleware<T>>? middlewares = null) 
-            : base(consumer, streamName, consumerName, handler, consumeOpts, logger, poisonHandler, maxDegreeOfParallelism, ackTimeout, resiliencePipeline, healthMetrics, topologyReadySignal, middlewares)
+            : base(
+                consumer,
+                streamName,
+                consumerName,
+                handler,
+                consumeOpts,
+                logger,
+                poisonHandler,
+                maxDegreeOfParallelism: maxDegreeOfParallelism,
+                ackTimeout: ackTimeout,
+                inProgressHeartbeatInterval: inProgressHeartbeatInterval,
+                resiliencePipeline: resiliencePipeline,
+                healthMetrics: healthMetrics,
+                topologyReadySignal: topologyReadySignal,
+                middlewares: middlewares)
         {
         }
 
@@ -125,18 +140,18 @@ public class NatsConsumerBackgroundServiceTests
     /// <summary>
     /// Test 8.2: Backpressure and Channel Saturation
     /// 
-    /// This test validates that when the bounded channel is full, subsequent messages are NAKed
-    /// immediately rather than buffered in memory. This behavior is crucial for:
+    /// This test validates that when the bounded channel is full, the reader blocks instead of
+    /// immediately NAKing messages back to JetStream. This behavior is crucial for:
     /// 1. Preventing memory exhaustion under load
-    /// 2. Allowing the NATS server to redistribute messages to other consumers
-    /// 3. Maintaining QoS by not silently dropping messages
+    /// 2. Allowing MaxAckPending on the server to provide the actual flow-control boundary
+    /// 3. Maintaining QoS without redelivery churn from artificial NAK loops
     /// 
     /// The test simulates a deadlocked handler (MaxConcurrency = 1) and verifies:
     /// - The first message goes into the channel and starts processing (blocks)
-    /// - Subsequent messages get NAKed because TryWrite fails on the full channel
+    /// - Subsequent messages wait for channel capacity instead of being NAKed
     /// </summary>
     [Test]
-    public async Task ExecuteAsync_ShouldNakMessages_WhenChannelFull_Backpressure()
+    public async Task ExecuteAsync_ShouldBlockInsteadOfNak_WhenChannelFull_Backpressure()
     {
         // Arrange
         var consumer = Substitute.For<INatsJSConsumer>();
@@ -144,7 +159,6 @@ public class NatsConsumerBackgroundServiceTests
         var poisonHandler = Substitute.For<IPoisonMessageHandler<string>>();
         var healthMetrics = Substitute.For<IConsumerHealthMetrics>();
         
-        // Track NAKs across all messages
         var nakCount = 0;
         var messagesYielded = new TaskCompletionSource();
         
@@ -192,11 +206,15 @@ public class NatsConsumerBackgroundServiceTests
         // Wait for handler to start processing first message
         await handlerStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
         
-        // Wait for all messages to be yielded (which triggers NAKs for overflow)
-        await messagesYielded.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.Delay(250);
+        messagesYielded.Task.IsCompleted.ShouldBeFalse("The producer should block once the bounded channel is full.");
+        nakCount.ShouldBe(0, "Backpressure should block the producer instead of NAKing messages.");
         
         // Unblock handler FIRST to ensure workers can drain/exit
         handlerBlocked.TrySetResult(); 
+
+        // Once capacity is released the producer should finish yielding the remaining messages.
+        await messagesYielded.Task.WaitAsync(TimeSpan.FromSeconds(5));
         
         // Small buffer to allow worker to process next message if any
         await Task.Delay(100);
@@ -213,8 +231,7 @@ public class NatsConsumerBackgroundServiceTests
         catch (TimeoutException) { /* Ignore stop timeout in test */ }
         
         // Assert
-        nakCount.ShouldBeGreaterThanOrEqualTo(3, 
-            $"Expected at least 3 NAKs when 5 messages overwhelm a capacity-1 channel, got {nakCount}");
+        nakCount.ShouldBe(0);
     }
 
     [Test]

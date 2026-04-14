@@ -17,7 +17,7 @@ public class NatsMetricsTests : IAsyncDisposable
 {
     private readonly MeterListener _meterListener;
     private readonly List<MeasurementRecord> _measurements = [];
-    private readonly object _lock = new();
+    private readonly Lock _lock = new();
 
     public NatsMetricsTests()
     {

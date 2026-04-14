@@ -140,7 +140,7 @@ public class NatsTopologyManagerTests
     }
 
     [Test]
-    public async Task EnsureConsumerAsync_ShouldRecreateConsumer_OnImmutablePropertyError()
+    public async Task EnsureConsumerAsync_ShouldFailFast_OnImmutablePropertyError()
     {
         // Arrange
         var spec = new ConsumerSpec 
@@ -149,21 +149,17 @@ public class NatsTopologyManagerTests
             DurableName = ConsumerName.From("test-consumer") 
         };
 
-        // First call fails with immutable error (10058), second succeeds
+        // Immutable updates should now fail fast instead of deleting and recreating consumers.
         _jsContext.CreateOrUpdateConsumerAsync(spec.StreamName.Value, Arg.Any<ConsumerConfig>(), Arg.Any<CancellationToken>())
-            .Returns(
-                x => throw CreateNatsJSApiException(400, 10058, "consumer name already in use"), // 1st call throws
-                x => Substitute.For<INatsJSConsumer>() // 2nd call (after delete) returns consumer
-            );
+            .Throws(CreateNatsJSApiException(400, 10058, "consumer name already in use"));
 
         // Act
-        await _sut.EnsureConsumerAsync(spec);
+        var ex = await Should.ThrowAsync<InvalidOperationException>(() => _sut.EnsureConsumerAsync(spec));
 
         // Assert
-        // Should have called delete once
-        await _jsContext.Received(1).DeleteConsumerAsync(spec.StreamName.Value, spec.DurableName.Value, Arg.Any<CancellationToken>());
-        // Should have called create twice (initial attempt + recreation)
-        await _jsContext.Received(2).CreateOrUpdateConsumerAsync(spec.StreamName.Value, Arg.Any<ConsumerConfig>(), Arg.Any<CancellationToken>());
+        ex.Message.ShouldContain("immutable topology drift");
+        await _jsContext.DidNotReceive().DeleteConsumerAsync(spec.StreamName.Value, spec.DurableName.Value, Arg.Any<CancellationToken>());
+        await _jsContext.Received(1).CreateOrUpdateConsumerAsync(spec.StreamName.Value, Arg.Any<ConsumerConfig>(), Arg.Any<CancellationToken>());
     }
 
     [Test]

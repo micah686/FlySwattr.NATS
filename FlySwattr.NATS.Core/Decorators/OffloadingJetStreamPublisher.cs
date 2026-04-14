@@ -17,6 +17,7 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
 {
     private readonly IJetStreamPublisher _inner;
     private readonly IRawJetStreamPublisher _rawPublisher;
+    private readonly IPreserializedJetStreamPublisher? _preserialized;
     private readonly IObjectStore _objectStore;
     private readonly IMessageSerializer _serializer;
     private readonly IMessageTypeAliasRegistry _typeAliasRegistry;
@@ -48,6 +49,7 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
     {
         _inner = inner;
         _rawPublisher = rawPublisher;
+        _preserialized = inner as IPreserializedJetStreamPublisher;
         _objectStore = objectStore;
         _serializer = serializer;
         _typeAliasRegistry = typeAliasRegistry;
@@ -89,9 +91,16 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
         {
             await PublishWithOffloadingAsync(subject, message, payload, messageId, headers, cancellationToken);
         }
+        else if (_preserialized != null)
+        {
+            // Reuse the bytes already serialized above — avoids a second serialization pass.
+            // IPreserializedJetStreamPublisher adds the same headers as the typed path
+            // (Content-Type, version, schema metadata, trace context).
+            await _preserialized.PublishBytesAsync<T>(subject, payload, messageId, headers, cancellationToken);
+        }
         else
         {
-            // Under threshold - pass through to inner publisher
+            // Fallback: inner publisher does not support pre-serialized bytes; re-serialize.
             await _inner.PublishAsync(subject, message, messageId, headers, cancellationToken);
         }
     }
@@ -105,7 +114,11 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
 
         // Process each message: offload if needed, then collect for batch publish
         var processedMessages = new List<BatchMessage<T>>(messages.Count);
-        var uploadedKeys = new List<string>();
+
+        // Tracks object keys that have been uploaded but whose raw publish has NOT yet
+        // been confirmed. Only these are safe to delete on failure — keys removed from
+        // this set have already been referenced by a successfully published message.
+        var pendingCleanup = new List<string>();
 
         try
         {
@@ -145,7 +158,9 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
 
                     using var payloadStream = new MemoryStream(payload.ToArray());
                     await _objectStore.PutAsync(objectKey, payloadStream, cancellationToken);
-                    uploadedKeys.Add(objectKey);
+
+                    // Track as pending cleanup until the raw publish confirms delivery
+                    pendingCleanup.Add(objectKey);
 
                     var claimCheckHeaders = new Dictionary<string, string>
                     {
@@ -170,6 +185,9 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
                         msg.MessageId,
                         new MessageHeaders(claimCheckHeaders),
                         cancellationToken);
+
+                    // Raw publish confirmed: the payload is now live and must NOT be deleted
+                    pendingCleanup.Remove(objectKey);
                 }
                 else
                 {
@@ -185,8 +203,10 @@ internal class OffloadingJetStreamPublisher : IJetStreamPublisher
         }
         catch
         {
-            // Compensating action: clean up any uploaded objects on failure
-            foreach (var key in uploadedKeys)
+            // Compensating action: clean up only objects that were uploaded but whose
+            // corresponding raw publish was never confirmed. Live payloads (already
+            // published) are intentionally excluded to avoid corrupting delivered messages.
+            foreach (var key in pendingCleanup)
             {
                 try
                 {

@@ -9,12 +9,26 @@ namespace UnitTests.Core.Services;
 public class MessageTypeAliasRegistryTests
 {
     [Test]
-    public async Task Resolve_ShouldReturnAssemblyQualifiedType_WhenLegacyWireValueIsUsed()
+    public async Task Resolve_ShouldReturnNull_WhenAliasNotRegistered()
+    {
+        // The Type.GetType reflection fallback has been removed to prevent arbitrary
+        // type resolution (security risk in DLQ replay paths). Only explicitly
+        // registered aliases resolve successfully.
+        var registry = new MessageTypeAliasRegistry(Options.Create(new MessageTypeAliasOptions()));
+        var unregisteredAlias = typeof(TestMessage).AssemblyQualifiedName!;
+
+        var resolved = registry.Resolve(unregisteredAlias);
+
+        await Assert.That(resolved).IsNull();
+    }
+
+    [Test]
+    public async Task Resolve_ShouldReturnType_WhenExplicitlyRegistered()
     {
         var registry = new MessageTypeAliasRegistry(Options.Create(new MessageTypeAliasOptions()));
-        var legacyWireValue = typeof(TestMessage).AssemblyQualifiedName!;
+        registry.Register<TestMessage>("TestMessage");
 
-        var resolved = registry.Resolve(legacyWireValue);
+        var resolved = registry.Resolve("TestMessage");
 
         await Assert.That(resolved).IsEqualTo(typeof(TestMessage));
     }

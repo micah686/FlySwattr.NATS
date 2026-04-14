@@ -29,7 +29,7 @@ public interface IKeyValueStore
     IAsyncEnumerable<string> GetKeysAsync(IEnumerable<string> patterns, CancellationToken cancellationToken = default);
 }
 
-public interface IObjectStore
+public interface IObjectStore : IAsyncDisposable
 {
     Task<string> PutAsync(string key, Stream data, CancellationToken cancellationToken = default);
     

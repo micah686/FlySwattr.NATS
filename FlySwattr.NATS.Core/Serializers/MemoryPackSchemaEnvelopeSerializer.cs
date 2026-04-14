@@ -5,21 +5,39 @@ using MemoryPack;
 
 namespace FlySwattr.NATS.Core.Serializers;
 
-internal static class MemoryPackSchemaEnvelopeSerializer
+/// <summary>
+/// Serializer/deserializer that wraps MemoryPack payloads in a schema envelope containing
+/// schema ID, version, and fingerprint for compatibility checking.
+/// </summary>
+/// <remarks>
+/// Use <see cref="Default"/> for the global default instance (strict fingerprint enforcement).
+/// Construct a custom instance when different enforcement settings are needed per consumer.
+/// </remarks>
+internal sealed class MemoryPackSchemaEnvelopeSerializer
 {
     private static readonly byte[] Magic = [0x46, 0x53, 0x4D, 0x50, 0x01, 0x00, 0x00, 0x00];
 
     /// <summary>
-    /// When true (default), fingerprint mismatches throw an exception.
-    /// When false, fingerprint mismatches emit a warning log instead.
+    /// Default instance with strict fingerprint enforcement and no-op logger.
+    /// Used by <see cref="HybridSerializerRegistry"/> for wire-level serialization.
     /// </summary>
-    internal static bool EnforceSchemaFingerprint { get; set; } = true;
+    public static readonly MemoryPackSchemaEnvelopeSerializer Default = new();
+
+    private readonly bool _enforceSchemaFingerprint;
+    private readonly ILogger _logger;
+
+    public MemoryPackSchemaEnvelopeSerializer(
+        bool enforceSchemaFingerprint = true,
+        ILogger? logger = null)
+    {
+        _enforceSchemaFingerprint = enforceSchemaFingerprint;
+        _logger = logger ?? NullLogger.Instance;
+    }
 
     /// <summary>
-    /// Logger used for fingerprint mismatch warnings when enforcement is disabled.
+    /// Returns the size of the logical payload, stripping the envelope wrapper if present.
+    /// This is stateless and provided as a static utility.
     /// </summary>
-    internal static ILogger Logger { get; set; } = NullLogger.Instance;
-
     public static int GetLogicalPayloadSize(ReadOnlySpan<byte> data, MemoryPackSerializerOptions? options = null)
     {
         if (!HasEnvelopePrefix(data))
@@ -33,12 +51,29 @@ internal static class MemoryPackSchemaEnvelopeSerializer
         return envelope.Payload.Length;
     }
 
+    /// <remarks>
+    /// Allocation note: serialization requires two passes — one to serialize <typeparamref name="T"/>
+    /// into an intermediate buffer so its byte length is known, and a second to serialize the
+    /// <see cref="MemoryPackSchemaEnvelope"/> wrapper (which embeds the payload as a length-prefixed
+    /// <c>byte[]</c> field).  The <c>ToArray()</c> call on line below materialises a copy of the
+    /// payload bytes into the envelope's <c>Payload</c> array; this is unavoidable given that
+    /// MemoryPack's auto-generated serializer for <see cref="MemoryPackSchemaEnvelope"/> expects a
+    /// concrete <c>byte[]</c>.  Eliminating this copy would require either (a) writing a custom
+    /// MemoryPack formatter that splices the payload bytes inline, or (b) changing the wire format —
+    /// both are breaking changes.  The overhead is proportional to payload size and is the known
+    /// cost of envelope-based schema versioning.
+    /// </remarks>
     public static void Serialize<T>(IBufferWriter<byte> writer, T value, MemoryPackSerializerOptions? options = null)
     {
         var descriptor = MemoryPackSchemaMetadata.GetDescriptor<T>();
+
+        // First pass: serialize the value to measure its byte size for the envelope Payload field.
         var payloadBuffer = new ArrayBufferWriter<byte>();
         MemoryPackSerializer.Serialize(payloadBuffer, value, options);
 
+        // ToArray() copies payloadBuffer's written bytes into the envelope's byte[] Payload field.
+        // This is a known allocation — see the <remarks> above for why it cannot be eliminated
+        // without a wire-format change.
         writer.Write(Magic);
         var envelope = new MemoryPackSchemaEnvelope
         {
@@ -48,10 +83,11 @@ internal static class MemoryPackSchemaEnvelopeSerializer
             Payload = payloadBuffer.WrittenSpan.ToArray()
         };
 
+        // Second pass: serialize the envelope (magic + header fields + payload bytes) to the output.
         MemoryPackSerializer.Serialize(writer, envelope, options);
     }
 
-    public static T? Deserialize<T>(ReadOnlySpan<byte> data, MemoryPackSerializerOptions? options = null)
+    public T? Deserialize<T>(ReadOnlySpan<byte> data, MemoryPackSerializerOptions? options = null)
     {
         var descriptor = MemoryPackSchemaMetadata.GetDescriptor<T>();
 
@@ -88,13 +124,13 @@ internal static class MemoryPackSchemaEnvelopeSerializer
         // Fingerprint check: configurable strict vs. warning-only mode
         if (!string.Equals(envelope.SchemaFingerprint, descriptor.SchemaFingerprint, StringComparison.Ordinal))
         {
-            if (EnforceSchemaFingerprint)
+            if (_enforceSchemaFingerprint)
             {
                 throw new MemoryPackSerializationException(
                     $"Schema fingerprint mismatch for {descriptor.SchemaId}. The MemoryPack contract changed without a compatible migration path.");
             }
 
-            Logger.LogWarning(
+            _logger.LogWarning(
                 "Schema fingerprint mismatch for {SchemaId} (incoming: {IncomingFingerprint}, local: {LocalFingerprint}). " +
                 "Proceeding with deserialization because EnforceSchemaFingerprint is disabled. " +
                 "Ensure MemoryPack positional rules are followed to avoid data corruption.",

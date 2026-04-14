@@ -23,6 +23,22 @@ internal interface IRawJetStreamPublisher
     Task PublishRawAsync(string subject, ReadOnlyMemory<byte> payload, string? messageId, MessageHeaders? headers = null, CancellationToken cancellationToken = default);
 }
 
+/// <summary>
+/// Allows a decorator to publish bytes that were already serialized during a size-check pass,
+/// while still having all typed-publish headers (Content-Type, version, schema metadata, telemetry)
+/// attached by <see cref="NatsJetStreamBus"/>. This avoids a second serialization in the
+/// below-threshold path of <see cref="FlySwattr.NATS.Core.Decorators.OffloadingJetStreamPublisher"/>.
+/// </summary>
+internal interface IPreserializedJetStreamPublisher
+{
+    Task PublishBytesAsync<T>(
+        string subject,
+        ReadOnlyMemory<byte> serializedPayload,
+        string? messageId,
+        MessageHeaders? headers = null,
+        CancellationToken cancellationToken = default);
+}
+
 internal interface IRawJetStreamConsumer
 {
     Task ConsumeRawAsync(
@@ -40,7 +56,7 @@ internal interface IRawJetStreamConsumer
         CancellationToken cancellationToken = default);
 }
 
-public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJetStreamPublisher, IRawJetStreamConsumer, IAsyncDisposable
+public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJetStreamPublisher, IRawJetStreamConsumer, IPreserializedJetStreamPublisher, IAsyncDisposable
 {
     private readonly string[] _reservedPublishHeaders;
     private readonly string[] _reservedRawPublishHeaders;
@@ -97,19 +113,10 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
         ];
     }
 
-    public Task PublishAsync<T>(string subject, T message, CancellationToken cancellationToken = default)
-    {
-        throw new ArgumentException(
-            "A messageId must be provided for JetStream publishing to ensure application-level idempotency. " +
-            "Use a business-key-derived ID (e.g., 'Order123-Created') to enable proper de-duplication across retries.",
-            nameof(message));
-    }
-
     public async Task PublishAsync<T>(string subject, T message, string? messageId, MessageHeaders? headers = null, CancellationToken cancellationToken = default)
     {
         var stopwatch = Stopwatch.StartNew();
         MessageSecurity.ValidatePublishSubject(subject);
-        MessageSecurity.RejectReservedHeaders(headers, _reservedPublishHeaders);
         
         // Require a caller-provided message ID for true application-level idempotency.
         // Auto-generating GUIDs would defeat JetStream's deduplication on retries.
@@ -122,13 +129,8 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
         }
 
         using var activity = NatsTelemetry.ActivitySource.StartActivity($"{subject} publish", ActivityKind.Producer);
-        if (activity != null)
-        {
-            activity.SetTag(NatsTelemetry.MessagingSystem, NatsTelemetry.MessagingSystemName);
-            activity.SetTag(NatsTelemetry.MessagingDestinationName, subject);
-            activity.SetTag(NatsTelemetry.MessagingOperation, "publish");
-            activity.SetTag(NatsTelemetry.MessagingMessageId, messageId);
-        }
+        NatsTelemetry.ApplyMessagingTags(activity, subject);
+        activity?.SetTag(NatsTelemetry.MessagingMessageId, messageId);
 
         var natsHeaders = new NatsHeaders
         {
@@ -138,12 +140,10 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
         };
 
         // Merge custom headers if provided
-        if (headers != null)
+        var validatedHeaders = MessageSecurity.BuildValidatedHeaders(headers, _reservedPublishHeaders, paramName: nameof(headers));
+        foreach (var header in validatedHeaders)
         {
-            foreach (var header in headers.Headers)
-            {
-                natsHeaders[header.Key] = header.Value;
-            }
+            natsHeaders[header.Key] = header.Value;
         }
         
         NatsTelemetry.InjectTraceContext(activity, natsHeaders);
@@ -162,7 +162,7 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
         
         // Record metrics
         stopwatch.Stop();
-        var tags = new TagList { { NatsTelemetry.MessagingDestinationName, subject } };
+        var tags = NatsTelemetry.CreateMessagingTags(subject);
         NatsTelemetry.MessagesPublished.Add(1, tags);
         NatsTelemetry.PublishDuration.Record(stopwatch.Elapsed.TotalMilliseconds, tags);
 
@@ -181,7 +181,7 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
         {
             var msg = messages[i];
             MessageSecurity.ValidatePublishSubject(msg.Subject);
-            MessageSecurity.RejectReservedHeaders(msg.Headers, _reservedPublishHeaders);
+            MessageSecurity.BuildValidatedHeaders(msg.Headers, _reservedPublishHeaders, paramName: nameof(messages));
 
             if (string.IsNullOrWhiteSpace(msg.MessageId))
             {
@@ -225,7 +225,6 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
     public async Task PublishRawAsync(string subject, ReadOnlyMemory<byte> payload, string? messageId, MessageHeaders? headers = null, CancellationToken cancellationToken = default)
     {
         MessageSecurity.ValidatePublishSubject(subject);
-        MessageSecurity.RejectReservedHeaders(headers, _reservedRawPublishHeaders);
 
         if (string.IsNullOrWhiteSpace(messageId))
         {
@@ -241,12 +240,10 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
             [_wireOptions.VersionHeaderName] = _wireOptions.ProtocolVersion.ToString()
         };
 
-        if (headers != null)
+        var validatedHeaders = MessageSecurity.BuildValidatedHeaders(headers, _reservedRawPublishHeaders, paramName: nameof(headers));
+        foreach (var header in validatedHeaders)
         {
-            foreach (var header in headers.Headers)
-            {
-                natsHeaders[header.Key] = header.Value;
-            }
+            natsHeaders[header.Key] = header.Value;
         }
 
         var ack = await _jsContext.PublishAsync(
@@ -258,6 +255,67 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
             cancellationToken: cancellationToken);
 
         ack.EnsureSuccess();
+    }
+
+    /// <summary>
+    /// Publishes bytes that were already serialized by the caller (e.g. during a size-check pass)
+    /// and adds the same headers as <see cref="PublishAsync{T}"/>: Content-Type, message-ID, wire
+    /// version, MemoryPack schema metadata, and distributed trace context.  This avoids a second
+    /// serialization when the payload is already known to be below the offloading threshold.
+    /// </summary>
+    public async Task PublishBytesAsync<T>(
+        string subject,
+        ReadOnlyMemory<byte> serializedPayload,
+        string? messageId,
+        MessageHeaders? headers = null,
+        CancellationToken cancellationToken = default)
+    {
+        var stopwatch = Stopwatch.StartNew();
+        MessageSecurity.ValidatePublishSubject(subject);
+
+        if (string.IsNullOrWhiteSpace(messageId))
+        {
+            throw new ArgumentException(
+                "A messageId must be provided for JetStream publishing to ensure application-level idempotency.",
+                nameof(messageId));
+        }
+
+        using var activity = NatsTelemetry.ActivitySource.StartActivity($"{subject} publish", ActivityKind.Producer);
+        NatsTelemetry.ApplyMessagingTags(activity, subject);
+        activity?.SetTag(NatsTelemetry.MessagingMessageId, messageId);
+
+        var natsHeaders = new NatsHeaders
+        {
+            ["Content-Type"] = _serializer.GetContentType<T>(),
+            ["Nats-Msg-Id"] = messageId,
+            [_wireOptions.VersionHeaderName] = _wireOptions.ProtocolVersion.ToString()
+        };
+
+        var validatedHeaders = MessageSecurity.BuildValidatedHeaders(headers, _reservedPublishHeaders, paramName: nameof(headers));
+        foreach (var header in validatedHeaders)
+        {
+            natsHeaders[header.Key] = header.Value;
+        }
+
+        NatsTelemetry.InjectTraceContext(activity, natsHeaders);
+        MemoryPackSchemaMetadata.AddHeadersIfNeeded<T>(natsHeaders);
+
+        var ack = await _jsContext.PublishAsync(
+            subject,
+            serializedPayload.ToArray(),
+            serializer: RawByteArraySerializer.Instance,
+            headers: natsHeaders,
+            opts: new NatsJSPubOpts { MsgId = messageId },
+            cancellationToken: cancellationToken);
+
+        ack.EnsureSuccess();
+
+        stopwatch.Stop();
+        var tags = NatsTelemetry.CreateMessagingTags(subject);
+        NatsTelemetry.MessagesPublished.Add(1, tags);
+        NatsTelemetry.PublishDuration.Record(stopwatch.Elapsed.TotalMilliseconds, tags);
+
+        _logger.LogDebug("Published pre-serialized JetStream message to {Subject} with MsgId {MsgId}", subject, messageId);
     }
 
     public Task ConsumeAsync<T>(
@@ -318,7 +376,8 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
         INatsDeserialize<T>? deserializer = null)
     {
         var opts = options ?? JetStreamConsumeOptions.Default;
-        string? consumerName = opts.QueueGroup?.Value;
+        ValidateConsumeOptions(opts);
+        string? consumerName = opts.DurableName?.Value ?? opts.LegacyDurableName;
 
         try
         {
@@ -334,8 +393,13 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
                     Name = "ephemeral_" + Guid.NewGuid().ToString("N"),
                     FilterSubject = subject.Value,
                     DeliverPolicy = ConsumerConfigDeliverPolicy.New,
-                    AckPolicy = ConsumerConfigAckPolicy.Explicit
+                    AckPolicy = ConsumerConfigAckPolicy.Explicit,
+                    DeliverGroup = opts.DeliverGroup?.Value
                 };
+                if (opts.MaxAckPending.HasValue)
+                {
+                    config.MaxAckPending = opts.MaxAckPending.Value;
+                }
                 consumer = await _jsContext.CreateOrUpdateConsumerAsync(stream.Value, config, cancellationToken);
             }
 
@@ -372,6 +436,7 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
         INatsDeserialize<T>? deserializer = null)
     {
         var opts = options ?? JetStreamConsumeOptions.Default;
+        ValidateConsumeOptions(opts);
         try
         {
             var jsConsumer = await _jsContext.GetConsumerAsync(stream.Value, consumer.Value, cancellationToken);
@@ -400,6 +465,34 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
 
     private Task StartBackgroundConsumerAsync<T>(BasicNatsConsumerService<T> service, CancellationToken cancellationToken)
         => _backgroundTaskManager.StartAsync(service, cancellationToken);
+
+    private static void ValidateConsumeOptions(JetStreamConsumeOptions options)
+    {
+        if (options.MaxDegreeOfParallelism is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "MaxDegreeOfParallelism must be greater than zero when specified.");
+        }
+
+        if (options.MaxConcurrency is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "MaxConcurrency must be greater than zero when specified.");
+        }
+
+        if (options.BatchSize <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "BatchSize must be greater than zero.");
+        }
+
+        if (options.MaxAckPending is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "MaxAckPending must be greater than zero when specified.");
+        }
+
+        if (options.DurableName != null && options.LegacyDurableName != null && options.DurableName.Value != options.LegacyDurableName)
+        {
+            throw new ArgumentException("QueueGroup can only be used as a backward-compatible alias for DurableName when both values match.", nameof(options));
+        }
+    }
 
     public async ValueTask DisposeAsync()
     {
