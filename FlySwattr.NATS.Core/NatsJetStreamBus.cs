@@ -318,7 +318,8 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
         INatsDeserialize<T>? deserializer = null)
     {
         var opts = options ?? JetStreamConsumeOptions.Default;
-        string? consumerName = opts.QueueGroup?.Value;
+        ValidateConsumeOptions(opts);
+        string? consumerName = opts.DurableName?.Value ?? opts.LegacyDurableName;
 
         try
         {
@@ -334,8 +335,13 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
                     Name = "ephemeral_" + Guid.NewGuid().ToString("N"),
                     FilterSubject = subject.Value,
                     DeliverPolicy = ConsumerConfigDeliverPolicy.New,
-                    AckPolicy = ConsumerConfigAckPolicy.Explicit
+                    AckPolicy = ConsumerConfigAckPolicy.Explicit,
+                    DeliverGroup = opts.DeliverGroup?.Value
                 };
+                if (opts.MaxAckPending.HasValue)
+                {
+                    config.MaxAckPending = opts.MaxAckPending.Value;
+                }
                 consumer = await _jsContext.CreateOrUpdateConsumerAsync(stream.Value, config, cancellationToken);
             }
 
@@ -372,6 +378,7 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
         INatsDeserialize<T>? deserializer = null)
     {
         var opts = options ?? JetStreamConsumeOptions.Default;
+        ValidateConsumeOptions(opts);
         try
         {
             var jsConsumer = await _jsContext.GetConsumerAsync(stream.Value, consumer.Value, cancellationToken);
@@ -400,6 +407,34 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
 
     private Task StartBackgroundConsumerAsync<T>(BasicNatsConsumerService<T> service, CancellationToken cancellationToken)
         => _backgroundTaskManager.StartAsync(service, cancellationToken);
+
+    private static void ValidateConsumeOptions(JetStreamConsumeOptions options)
+    {
+        if (options.MaxDegreeOfParallelism is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "MaxDegreeOfParallelism must be greater than zero when specified.");
+        }
+
+        if (options.MaxConcurrency is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "MaxConcurrency must be greater than zero when specified.");
+        }
+
+        if (options.BatchSize <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "BatchSize must be greater than zero.");
+        }
+
+        if (options.MaxAckPending is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "MaxAckPending must be greater than zero when specified.");
+        }
+
+        if (options.DurableName != null && options.LegacyDurableName != null && options.DurableName.Value != options.LegacyDurableName)
+        {
+            throw new ArgumentException("QueueGroup can only be used as a backward-compatible alias for DurableName when both values match.", nameof(options));
+        }
+    }
 
     public async ValueTask DisposeAsync()
     {

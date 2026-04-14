@@ -112,7 +112,8 @@ internal class TopologyConsumerHostedService<TSource> : IHostedService
             EnableValidationMiddleware = registration.Options.EnableValidationMiddleware,
             ResiliencePipelineKey = registration.Options.ResiliencePipelineKey,
             DlqPolicy = spec.DeadLetterPolicy,
-            AckTimeout = registration.Options.AckTimeout
+            AckTimeout = registration.Options.AckTimeout,
+            InProgressHeartbeatInterval = registration.Options.InProgressHeartbeatInterval
         };
 
         foreach (var middlewareType in registration.Options.MiddlewareTypes)
@@ -182,6 +183,7 @@ internal class TopologyConsumerHostedService<TSource> : IHostedService
             offloadingOptions,
             maxConcurrency,
             options.AckTimeout,
+            options.InProgressHeartbeatInterval,
             resiliencePipeline,
             healthMetrics,
             _readySignal,

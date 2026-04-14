@@ -142,17 +142,18 @@ internal class NatsDlqStore : IDlqStore
     }
 
     /// <summary>
-    /// Builds a hierarchical KV key from stream, consumer, and entry ID.
-    /// Format: {stream}.{consumer}.{id}
+    /// The persistent KV key is the DLQ entry ID itself.
+    /// Entry IDs are expected to be stable and hierarchical (for example: stream.consumer.sequence)
+    /// so list filters still map cleanly onto native KV wildcard lookups.
     /// </summary>
-    private static string BuildKey(string stream, string consumer, string id) 
-        => $"{SanitizeToken(stream)}.{SanitizeToken(consumer)}.{id}";
+    private static string BuildKey(string id)
+        => SanitizeToken(id);
     
     /// <summary>
     /// Sanitizes a token for use in NATS KV keys by replacing reserved characters.
     /// </summary>
     private static string SanitizeToken(string token) 
-        => token.Replace(".", "_dot_").Replace("*", "_star_").Replace(">", "_gt_");
+        => token.Replace("*", "_star_").Replace(">", "_gt_");
     
     /// <summary>
     /// Builds the NATS wildcard pattern for filtering keys.
@@ -173,6 +174,7 @@ internal class NatsDlqStore : IDlqStore
     {
         ArgumentNullException.ThrowIfNull(entry);
         ArgumentException.ThrowIfNullOrWhiteSpace(entry.Id);
+        ValidateEntryId(entry);
 
         await EnsureInitializedAsync(cancellationToken);
 
@@ -189,7 +191,7 @@ internal class NatsDlqStore : IDlqStore
 
         try
         {
-            var key = BuildKey(entry.OriginalStream, entry.OriginalConsumer, entry.Id);
+            var key = BuildKey(entry.Id);
             var json = JsonSerializer.Serialize(entry);
             await Store.PutAsync(key, json, cancellationToken: cancellationToken);
             
@@ -215,8 +217,7 @@ internal class NatsDlqStore : IDlqStore
 
         try
         {
-            // The id parameter is the full hierarchical key
-            var kvEntry = await Store.GetEntryAsync<string>(id, cancellationToken: cancellationToken);
+            var kvEntry = await Store.GetEntryAsync<string>(BuildKey(id), cancellationToken: cancellationToken);
             if (string.IsNullOrEmpty(kvEntry.Value))
             {
                 return null;
@@ -294,7 +295,8 @@ internal class NatsDlqStore : IDlqStore
 
         try
         {
-            var kvEntry = await Store.GetEntryAsync<string>(id, cancellationToken: cancellationToken);
+            var storageKey = BuildKey(id);
+            var kvEntry = await Store.GetEntryAsync<string>(storageKey, cancellationToken: cancellationToken);
             if (string.IsNullOrEmpty(kvEntry.Value))
             {
                 _logger.LogWarning("Cannot update status for DLQ entry {MessageId}: not found", id);
@@ -310,7 +312,7 @@ internal class NatsDlqStore : IDlqStore
             var updatedEntry = entry with { Status = status, StoreRevision = null };
             var json = JsonSerializer.Serialize(updatedEntry);
             var newRevision = await Store.UpdateAsync(
-                id,
+                storageKey,
                 json,
                 expectedRevision ?? kvEntry.Revision,
                 serializer: null,
@@ -349,6 +351,7 @@ internal class NatsDlqStore : IDlqStore
         try
         {
             // Check if entry exists first (id is the full hierarchical key)
+            var storageKey = BuildKey(id);
             var entry = await GetAsync(id, cancellationToken);
             if (entry == null)
             {
@@ -356,7 +359,7 @@ internal class NatsDlqStore : IDlqStore
                 return false;
             }
 
-            await Store.DeleteAsync(id, cancellationToken: cancellationToken);
+            await Store.DeleteAsync(storageKey, cancellationToken: cancellationToken);
             _logger.LogDebug("Deleted DLQ entry {MessageId}", id);
             return true;
         }
@@ -364,6 +367,17 @@ internal class NatsDlqStore : IDlqStore
         {
             _logger.LogError(ex, "Failed to delete DLQ entry {MessageId}", id);
             throw;
+        }
+    }
+
+    private static void ValidateEntryId(DlqMessageEntry entry)
+    {
+        var expectedPrefix = $"{entry.OriginalStream}.{entry.OriginalConsumer}.";
+        if (!entry.Id.StartsWith(expectedPrefix, StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+                $"DLQ entry id '{entry.Id}' must start with '{expectedPrefix}' to remain consistent across store and remediation operations.",
+                nameof(entry));
         }
     }
 }

@@ -23,10 +23,13 @@ public static class ServiceCollectionExtensions
         Action<NatsConfiguration> configure)
     {
         // 1. Configuration
-        services.AddOptions<NatsConfiguration>().Configure(configure);
+        services.AddOptions<NatsConfiguration>()
+            .Configure(configure)
+            .ValidateOnStart();
         services.AddOptions<MessageTypeAliasOptions>();
         services.AddOptions<WireCompatibilityOptions>();
         services.AddOptions<DlqStoreFailureOptions>();
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IValidateOptions<NatsConfiguration>, NatsConfigurationOptionsValidator>());
         services.AddSingleton(sp => sp.GetRequiredService<IOptions<NatsConfiguration>>().Value);
         services.TryAddSingleton<NatsCoreServicesMarker>();
 

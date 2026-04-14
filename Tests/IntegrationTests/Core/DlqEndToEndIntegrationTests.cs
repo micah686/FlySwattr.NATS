@@ -196,7 +196,7 @@ public partial class DlqEndToEndIntegrationTests
                 // Convert DlqMessage to DlqMessageEntry and store to KV
                 var entry = new DlqMessageEntry
                 {
-                    Id = $"seq-{msg.Data.OriginalSequence}",
+                    Id = $"{msg.Data.OriginalStream}.{msg.Data.OriginalConsumer}.{msg.Data.OriginalSequence}",
                     OriginalStream = msg.Data.OriginalStream,
                     OriginalConsumer = msg.Data.OriginalConsumer,
                     OriginalSubject = msg.Data.OriginalSubject,
@@ -239,8 +239,7 @@ public partial class DlqEndToEndIntegrationTests
         // Stop failing - next message will succeed
         shouldFail = false;
 
-        // Build the full key for the DLQ entry
-        var dlqKey = $"{streamName}.{consumerName}.{dlqEntry.Id}";
+        var dlqKey = dlqEntry.Id;
 
         // Replay with modified payload
         var fixedOrder = new OrderEvent(order.OrderId, order.Amount, "Fixed");
@@ -322,7 +321,7 @@ public partial class DlqEndToEndIntegrationTests
         // Manually store a DLQ entry
         var entry = new DlqMessageEntry
         {
-            Id = "test-msg-123",
+            Id = "test-stream.test-consumer.test-msg-123",
             OriginalStream = "test-stream",
             OriginalConsumer = "test-consumer",
             OriginalSubject = "test.subject",
@@ -338,7 +337,7 @@ public partial class DlqEndToEndIntegrationTests
         await dlqStore.StoreAsync(entry);
 
         // Act
-        var key = $"{entry.OriginalStream}.{entry.OriginalConsumer}.{entry.Id}";
+        var key = entry.Id;
         var result = await remediationService.InspectAsync(key);
 
         // Assert
@@ -401,7 +400,7 @@ public partial class DlqEndToEndIntegrationTests
         // Store an entry
         var entry = new DlqMessageEntry
         {
-            Id = "archive-test-msg",
+            Id = "archive-stream.archive-consumer.archive-test-msg",
             OriginalStream = "archive-stream",
             OriginalConsumer = "archive-consumer",
             OriginalSubject = "archive.subject",
@@ -412,7 +411,7 @@ public partial class DlqEndToEndIntegrationTests
         };
         await dlqStore.StoreAsync(entry);
 
-        var key = $"{entry.OriginalStream}.{entry.OriginalConsumer}.{entry.Id}";
+        var key = entry.Id;
 
         // Act
         var result = await remediationService.ArchiveAsync(key, "No longer needed");

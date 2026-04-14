@@ -36,4 +36,18 @@ public class PayloadOffloadingOptions
     /// Default: "claimcheck"
     /// </summary>
     public string ObjectKeyPrefix { get; set; } = "claimcheck";
+
+    /// <summary>
+    /// Maximum claim-check payload size that will be hydrated into memory.
+    /// Oversized payloads are rejected before download.
+    /// Default: 10MB.
+    /// </summary>
+    public int MaxHydrationBytes { get; set; } = 10 * 1024 * 1024;
+
+    /// <summary>
+    /// Maximum pooled buffer budget available to a single claim-check hydration operation.
+    /// This bounds temporary memory reserved during download.
+    /// Default: 10MB.
+    /// </summary>
+    public int HydrationMemoryBudgetBytes { get; set; } = 10 * 1024 * 1024;
 }

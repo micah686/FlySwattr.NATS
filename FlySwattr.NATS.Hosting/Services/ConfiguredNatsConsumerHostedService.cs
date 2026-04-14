@@ -110,6 +110,7 @@ internal sealed class ConfiguredNatsConsumerHostedService<TMessage> : IHostedSer
             offloadingOptions,
             _options.MaxConcurrency,
             _options.AckTimeout,
+            _options.InProgressHeartbeatInterval,
             resiliencePipeline,
             healthMetrics,
             topologyReadySignal,

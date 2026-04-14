@@ -25,9 +25,9 @@ internal class NatsTopologyManager : ITopologyManager
     private readonly INatsObjContext _objContext;
     private readonly ILogger<NatsTopologyManager> _logger;
     private readonly IDlqPolicyRegistry _dlqRegistry;
-    private readonly Medallion.Threading.IDistributedLockProvider _lockProvider;
+    private readonly Medallion.Threading.IDistributedLockProvider? _lockProvider;
 
-    public NatsTopologyManager(INatsJSContext jsContext, INatsKVContext kvContext, INatsObjContext objContext, ILogger<NatsTopologyManager> logger, IDlqPolicyRegistry dlqRegistry, Medallion.Threading.IDistributedLockProvider lockProvider)
+    public NatsTopologyManager(INatsJSContext jsContext, INatsKVContext kvContext, INatsObjContext objContext, ILogger<NatsTopologyManager> logger, IDlqPolicyRegistry dlqRegistry, Medallion.Threading.IDistributedLockProvider? lockProvider = null)
     {
         _jsContext = jsContext;
         _kvContext = kvContext;
@@ -35,6 +35,25 @@ internal class NatsTopologyManager : ITopologyManager
         _logger = logger;
         _dlqRegistry = dlqRegistry;
         _lockProvider = lockProvider;
+    }
+
+    private ValueTask<IAsyncDisposable> AcquireTopologyLockAsync(string lockKey, CancellationToken cancellationToken)
+    {
+        if (_lockProvider == null)
+        {
+            _logger.LogWarning(
+                "No distributed lock provider is registered. Topology operation {LockKey} will proceed without cross-instance coordination.",
+                lockKey);
+            return ValueTask.FromResult<IAsyncDisposable>(NoOpAsyncDisposable.Instance);
+        }
+
+        return AcquireDistributedLockAsync(lockKey, cancellationToken);
+    }
+
+    private async ValueTask<IAsyncDisposable> AcquireDistributedLockAsync(string lockKey, CancellationToken cancellationToken)
+    {
+        var handle = await _lockProvider!.CreateLock(lockKey).AcquireAsync(TopologyLockTimeout, cancellationToken);
+        return handle;
     }
 
     private async Task<T?> GetOrDefaultAsync<T>(Func<ValueTask<T>> getter) where T : class
@@ -82,7 +101,7 @@ internal class NatsTopologyManager : ITopologyManager
             _logger.LogInformation("Ensuring stream {Stream}...", spec.Name);
 
             var lockKey = $"topology_lock_stream_{spec.Name.Value}";
-            await using var _ = await _lockProvider.CreateLock(lockKey).AcquireAsync(TopologyLockTimeout, cancellationToken);
+            await using var _ = await AcquireTopologyLockAsync(lockKey, cancellationToken);
 
             var existingStream = await GetOrDefaultAsync(() => 
                 _jsContext.GetStreamAsync(spec.Name.Value, cancellationToken: cancellationToken));
@@ -200,13 +219,26 @@ internal class NatsTopologyManager : ITopologyManager
                     _ => throw new ArgumentOutOfRangeException(nameof(spec.DeliverPolicy), spec.DeliverPolicy, "Unknown deliver policy")
                 },
                 Backoff = backoff,
+                DeliverGroup = spec.DeliverGroup?.Value
             };
+            if (spec.MaxAckPending.HasValue)
+            {
+                config.MaxAckPending = spec.MaxAckPending.Value;
+            }
 
             ValidateNatsName(spec.DurableName.Value, "Consumer");
             _logger.LogInformation("Ensuring consumer {Stream}/{Consumer}...", spec.StreamName, spec.DurableName);
 
             var lockKey = $"topology_lock_consumer_{spec.StreamName.Value}_{spec.DurableName.Value}";
-            await using var _ = await _lockProvider.CreateLock(lockKey).AcquireAsync(TopologyLockTimeout, cancellationToken);
+            await using var _ = await AcquireTopologyLockAsync(lockKey, cancellationToken);
+
+            var existingConsumer = await GetOrDefaultAsync(() =>
+                _jsContext.GetConsumerAsync(spec.StreamName.Value, spec.DurableName.Value, cancellationToken));
+
+            if (existingConsumer != null)
+            {
+                ValidateImmutableConsumerUpdate(existingConsumer.Info.Config, config, spec);
+            }
 
             try
             {
@@ -214,16 +246,7 @@ internal class NatsTopologyManager : ITopologyManager
             }
             catch (NatsJSApiException ex) when (IsImmutablePropertyError(ex))
             {
-                // Consumer exists but has immutable properties that differ from our config
-                // Recreation strategy: delete and recreate the consumer
-                _logger.LogWarning(
-                    "Consumer {Stream}/{Consumer} has immutable property conflicts (ErrCode: {ErrCode}). Recreating consumer...",
-                    spec.StreamName, spec.DurableName, ex.Error.ErrCode);
-                
-                await _jsContext.DeleteConsumerAsync(spec.StreamName.Value, spec.DurableName.Value, cancellationToken);
-                await _jsContext.CreateOrUpdateConsumerAsync(spec.StreamName.Value, config, cancellationToken);
-                
-                _logger.LogInformation("Consumer {Stream}/{Consumer} recreated successfully.", spec.StreamName, spec.DurableName);
+                throw CreateImmutableConsumerMismatchException(spec, ex);
             }
             
             _logger.LogInformation("Consumer {Stream}/{Consumer} ready.", spec.StreamName, spec.DurableName);
@@ -328,7 +351,7 @@ internal class NatsTopologyManager : ITopologyManager
              };
 
              var lockKey = $"topology_lock_kv_bucket_{spec.Name.Value}";
-             await using var _ = await _lockProvider.CreateLock(lockKey).AcquireAsync(TopologyLockTimeout, cancellationToken);
+             await using var _ = await AcquireTopologyLockAsync(lockKey, cancellationToken);
 
              // Create-first to avoid TOCTOU races during concurrent startups
              try
@@ -372,7 +395,7 @@ internal class NatsTopologyManager : ITopologyManager
              };
 
              var lockKey = $"topology_lock_obj_store_{spec.Name.Value}";
-             await using var _ = await _lockProvider.CreateLock(lockKey).AcquireAsync(TopologyLockTimeout, cancellationToken);
+             await using var _ = await AcquireTopologyLockAsync(lockKey, cancellationToken);
 
              // Create-first to avoid TOCTOU races during concurrent startups
              try
@@ -392,5 +415,55 @@ internal class NatsTopologyManager : ITopologyManager
             _logger.LogError(ex, "Error creating Object Store {Bucket}", spec.Name);
             throw;
         }
+    }
+
+    private static void ValidateImmutableConsumerUpdate(ConsumerConfig existing, ConsumerConfig desired, ConsumerSpec spec)
+    {
+        var mismatches = new List<string>();
+
+        if (!string.Equals(existing.DurableName, desired.DurableName, StringComparison.Ordinal))
+            mismatches.Add($"DurableName: existing='{existing.DurableName}' desired='{desired.DurableName}'");
+
+        if (!string.Equals(existing.DeliverGroup, desired.DeliverGroup, StringComparison.Ordinal))
+            mismatches.Add($"DeliverGroup: existing='{existing.DeliverGroup}' desired='{desired.DeliverGroup}'");
+
+        if (existing.DeliverPolicy != desired.DeliverPolicy)
+            mismatches.Add($"DeliverPolicy: existing='{existing.DeliverPolicy}' desired='{desired.DeliverPolicy}'");
+
+        if (existing.AckPolicy != desired.AckPolicy)
+            mismatches.Add($"AckPolicy: existing='{existing.AckPolicy}' desired='{desired.AckPolicy}'");
+
+        if (!string.Equals(existing.FilterSubject, desired.FilterSubject, StringComparison.Ordinal))
+            mismatches.Add($"FilterSubject: existing='{existing.FilterSubject}' desired='{desired.FilterSubject}'");
+
+        var existingFilterSubjects = existing.FilterSubjects ?? [];
+        var desiredFilterSubjects = desired.FilterSubjects ?? [];
+        if (!existingFilterSubjects.SequenceEqual(desiredFilterSubjects))
+            mismatches.Add("FilterSubjects");
+
+        if (mismatches.Count > 0)
+        {
+            throw CreateImmutableConsumerMismatchException(spec, mismatches);
+        }
+    }
+
+    private static InvalidOperationException CreateImmutableConsumerMismatchException(ConsumerSpec spec, NatsJSApiException ex)
+        => CreateImmutableConsumerMismatchException(
+            spec,
+            [$"JetStream rejected the update with immutable configuration error {ex.Error.ErrCode}: {ex.Error.Description}"]);
+
+    private static InvalidOperationException CreateImmutableConsumerMismatchException(ConsumerSpec spec, IReadOnlyList<string> mismatches)
+    {
+        var details = string.Join("; ", mismatches);
+        return new InvalidOperationException(
+            $"Consumer {spec.StreamName.Value}/{spec.DurableName.Value} has immutable topology drift. " +
+            $"Refusing to delete/recreate automatically. Detected mismatches: {details}. " +
+            "Apply the change explicitly via operator workflow.");
+    }
+
+    private sealed class NoOpAsyncDisposable : IAsyncDisposable
+    {
+        public static NoOpAsyncDisposable Instance { get; } = new();
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }
