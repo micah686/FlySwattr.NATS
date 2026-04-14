@@ -31,4 +31,10 @@ public class NatsConfiguration
     /// When disabled, fingerprint mismatches emit a warning log instead.
     /// </summary>
     public bool EnforceSchemaFingerprint { get; set; } = true;
+
+    /// <summary>
+    /// Enable privacy-focused sanitization for exception messages captured in DLQ metadata and logs.
+    /// Default: true.
+    /// </summary>
+    public bool SanitizeExceptionMessages { get; set; } = true;
 }

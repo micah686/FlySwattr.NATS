@@ -70,7 +70,8 @@ public class DefaultDlqPoisonHandlerTests
         IJetStreamPublisher? publisher = null,
         IMessageSerializer? serializer = null,
         IObjectStore? objectStore = null,
-        IDlqNotificationService? notificationService = null)
+        IDlqNotificationService? notificationService = null,
+        bool sanitizeExceptionMessages = true)
     {
         return new DefaultDlqPoisonHandler<TestMessage>(
             publisher ?? _publisher,
@@ -79,7 +80,11 @@ public class DefaultDlqPoisonHandlerTests
             objectStore ?? _objectStore,
             notificationService ?? _notificationService,
             _policyRegistry,
-            _logger);
+            _logger,
+            natsOptions: Options.Create(new NatsConfiguration
+            {
+                SanitizeExceptionMessages = sanitizeExceptionMessages
+            }));
     }
 
     #endregion
@@ -315,6 +320,37 @@ public class DefaultDlqPoisonHandlerTests
 
         capturedDlqMessage.ShouldNotBeNull();
         capturedDlqMessage.ErrorReason.ShouldBe("InvalidOperationException: bad secret value");
+    }
+
+    [Test]
+    public async Task HandleAsync_WhenSanitizationDisabled_ShouldKeepValidationDetails()
+    {
+        var policy = new DeadLetterPolicy { SourceStream = "orders-stream", SourceConsumer = "orders-consumer", TargetStream = StreamName.From("dlq"), TargetSubject = "dlq.orders" };
+        _policyRegistry.Get("orders-stream", "orders-consumer").Returns(policy);
+        _serializer.Serialize(Arg.Any<IBufferWriter<byte>>(), Arg.Any<TestMessage>());
+        _serializer.GetContentType<TestMessage>().Returns("application/json");
+
+        DlqMessage? capturedDlqMessage = null;
+        _publisher.PublishAsync(
+                Arg.Any<string>(),
+                Arg.Any<DlqMessage>(),
+                Arg.Any<string>(),
+                Arg.Any<MessageHeaders?>(),
+                Arg.Any<CancellationToken>())
+            .Returns(callInfo =>
+            {
+                capturedDlqMessage = callInfo.Arg<DlqMessage>();
+                return Task.CompletedTask;
+            });
+
+        var handler = CreateHandler(sanitizeExceptionMessages: false);
+        var exception = new MessageValidationException("orders.created", ["Email: 'user@example.com' is invalid"]);
+
+        await handler.HandleAsync(_context, "orders-stream", "orders-consumer", 3, exception, CancellationToken.None);
+
+        capturedDlqMessage.ShouldNotBeNull();
+        capturedDlqMessage.ErrorReason.ShouldNotBeNull();
+        capturedDlqMessage.ErrorReason.ShouldContain("user@example.com");
     }
     
     #endregion

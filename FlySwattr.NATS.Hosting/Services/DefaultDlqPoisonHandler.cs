@@ -29,6 +29,7 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
     private readonly IDlqNotificationService? _notificationService;
     private readonly IDlqPolicyRegistry _dlqPolicyRegistry;
     private readonly DlqStoreFailureOptions _failureOptions;
+    private readonly bool _sanitizeExceptionMessages;
     private readonly ILogger _logger;
 
     public DefaultDlqPoisonHandler(
@@ -39,7 +40,8 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
         IDlqNotificationService? notificationService,
         IDlqPolicyRegistry dlqPolicyRegistry,
         ILogger<DefaultDlqPoisonHandler<T>> logger,
-        IOptions<DlqStoreFailureOptions>? failureOptions = null)
+        IOptions<DlqStoreFailureOptions>? failureOptions = null,
+        IOptions<NatsConfiguration>? natsOptions = null)
     {
         _dlqPublisher = dlqPublisher;
         _serializer = serializer;
@@ -48,6 +50,7 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
         _notificationService = notificationService;
         _dlqPolicyRegistry = dlqPolicyRegistry;
         _failureOptions = failureOptions?.Value ?? new DlqStoreFailureOptions();
+        _sanitizeExceptionMessages = natsOptions?.Value.SanitizeExceptionMessages ?? true;
         _logger = logger;
     }
 
@@ -86,7 +89,7 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
                     var prefix = isValidationFailure ? "dlq-validation" : "dlq";
                     var dlqMessageId = $"{prefix}-{streamName}-{consumerName}-{context.Sequence}";
                     
-                    await _dlqPublisher.PublishAsync(policy.TargetSubject, dlqMessage, dlqMessageId, cancellationToken: cancellationToken);
+                    await _dlqPublisher.PublishAsync(policy.TargetSubject, dlqMessage, dlqMessageId, headers: null, cancellationToken: cancellationToken);
 
                     if (_notificationService != null)
                     {
@@ -197,7 +200,7 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
             FailedAt = DateTimeOffset.UtcNow,
             Payload = payload,
             PayloadEncoding = contentType,
-            ErrorReason = MessageSecurity.SanitizeExceptionMessage(ex),
+            ErrorReason = MessageSecurity.SanitizeExceptionMessage(ex, _sanitizeExceptionMessages),
             OriginalHeaders = context.Headers.Headers,
             OriginalMessageType = _typeAliasRegistry.GetAlias(typeof(T)),
             SerializerType = serializerType
@@ -220,7 +223,7 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
                 OriginalSubject: context.Subject,
                 OriginalSequence: context.Sequence,
                 DeliveryCount: (int)context.NumDelivered,
-                ErrorReason: MessageSecurity.SanitizeExceptionMessage(ex),
+                ErrorReason: MessageSecurity.SanitizeExceptionMessage(ex, _sanitizeExceptionMessages),
                 OccurredAt: DateTimeOffset.UtcNow
             );
             await _notificationService!.NotifyAsync(notification, token);
@@ -231,11 +234,29 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
         }
     }
 
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Validation failed for message on {Subject} (Stream: {StreamName}, Consumer: {ConsumerName}). Routing to DLQ.")]
-    private partial void LogValidationFailed(string streamName, string consumerName, string subject, Exception exception);
+    private void LogValidationFailed(string streamName, string consumerName, string subject, Exception exception)
+    {
+        if (_sanitizeExceptionMessages)
+        {
+            LogValidationFailedSanitized(streamName, consumerName, subject,
+                MessageSecurity.SanitizeExceptionMessage(exception, _sanitizeExceptionMessages));
+            return;
+        }
 
-    [LoggerMessage(Level = LogLevel.Error, Message = "Handler failed for {StreamName}/{ConsumerName} (Delivery {DeliveryCount}/{MaxDeliver}), initiating DLQ procedure")]
-    private partial void LogDlqInitiated(string streamName, string consumerName, uint deliveryCount, long maxDeliver, Exception exception);
+        LogValidationFailedWithException(streamName, consumerName, subject, exception);
+    }
+
+    private void LogDlqInitiated(string streamName, string consumerName, uint deliveryCount, long maxDeliver, Exception exception)
+    {
+        if (_sanitizeExceptionMessages)
+        {
+            LogDlqInitiatedSanitized(streamName, consumerName, deliveryCount, maxDeliver,
+                MessageSecurity.SanitizeExceptionMessage(exception, _sanitizeExceptionMessages));
+            return;
+        }
+
+        LogDlqInitiatedWithException(streamName, consumerName, deliveryCount, maxDeliver, exception);
+    }
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to serialize message for DLQ")]
     private partial void LogDlqSerializationFailed(Exception exception);
@@ -252,9 +273,36 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
     [LoggerMessage(Level = LogLevel.Warning, Message = "Large payload ({ActualSize} bytes) exceeds inline limit ({MaxSize} bytes). Policy: ForceInline — storing full payload inline (may exceed NATS limits).")]
     private partial void LogForceInlinePayload(int actualSize, int maxSize);
 
-    [LoggerMessage(Level = LogLevel.Warning, Message = "Handler failed for {StreamName}/{ConsumerName} (Delivery {DeliveryCount}), sending NAK with backoff")]
-    private partial void LogHandlerFailedWithNak(string streamName, string consumerName, uint deliveryCount, Exception exception);
+    private void LogHandlerFailedWithNak(string streamName, string consumerName, uint deliveryCount, Exception exception)
+    {
+        if (_sanitizeExceptionMessages)
+        {
+            LogHandlerFailedWithNakSanitized(streamName, consumerName, deliveryCount,
+                MessageSecurity.SanitizeExceptionMessage(exception, _sanitizeExceptionMessages));
+            return;
+        }
+
+        LogHandlerFailedWithNakWithException(streamName, consumerName, deliveryCount, exception);
+    }
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to send DLQ notification for {StreamName}/{ConsumerName}")]
     private partial void LogDlqNotificationFailed(string streamName, string consumerName, Exception exception);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Validation failed for message on {Subject} (Stream: {StreamName}, Consumer: {ConsumerName}). Routing to DLQ.")]
+    private partial void LogValidationFailedWithException(string streamName, string consumerName, string subject, Exception exception);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Validation failed for message on {Subject} (Stream: {StreamName}, Consumer: {ConsumerName}). Routing to DLQ. Reason: {SanitizedReason}")]
+    private partial void LogValidationFailedSanitized(string streamName, string consumerName, string subject, string sanitizedReason);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Handler failed for {StreamName}/{ConsumerName} (Delivery {DeliveryCount}/{MaxDeliver}), initiating DLQ procedure")]
+    private partial void LogDlqInitiatedWithException(string streamName, string consumerName, uint deliveryCount, long maxDeliver, Exception exception);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Handler failed for {StreamName}/{ConsumerName} (Delivery {DeliveryCount}/{MaxDeliver}), initiating DLQ procedure. Reason: {SanitizedReason}")]
+    private partial void LogDlqInitiatedSanitized(string streamName, string consumerName, uint deliveryCount, long maxDeliver, string sanitizedReason);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Handler failed for {StreamName}/{ConsumerName} (Delivery {DeliveryCount}), sending NAK with backoff")]
+    private partial void LogHandlerFailedWithNakWithException(string streamName, string consumerName, uint deliveryCount, Exception exception);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Handler failed for {StreamName}/{ConsumerName} (Delivery {DeliveryCount}), sending NAK with backoff. Reason: {SanitizedReason}")]
+    private partial void LogHandlerFailedWithNakSanitized(string streamName, string consumerName, uint deliveryCount, string sanitizedReason);
 }

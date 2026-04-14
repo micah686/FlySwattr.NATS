@@ -1,5 +1,6 @@
 using System.Text;
 using FlySwattr.NATS.Abstractions;
+using FlySwattr.NATS.Abstractions.Exceptions;
 
 namespace FlySwattr.NATS.Core.Services;
 
@@ -61,20 +62,93 @@ public static class MessageSecurity
         return objectKey;
     }
 
-    public static string SanitizeExceptionMessage(Exception exception)
+    public static string SanitizeExceptionMessage(Exception exception, bool enablePrivacySanitization = true)
     {
         ArgumentNullException.ThrowIfNull(exception);
 
-        var builder = new StringBuilder(exception.Message.Length);
-        foreach (var character in exception.Message)
+        if (enablePrivacySanitization)
+        {
+            if (exception is MessageValidationException messageValidationException)
+            {
+                var propertyNames = messageValidationException.Errors
+                    .Select(ExtractValidationPropertyName)
+                    .Where(static x => !string.IsNullOrWhiteSpace(x))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray();
+
+                var details = propertyNames.Length > 0
+                    ? $"Fields={string.Join(", ", propertyNames)}"
+                    : $"{messageValidationException.Errors.Count} error(s)";
+
+                return BuildPayload(exception.GetType().Name,
+                    $"Validation failed for message on subject '{messageValidationException.Subject}'. {details}");
+            }
+
+            if (TryBuildFluentValidationSummary(exception, out var fluentValidationSummary))
+            {
+                return BuildPayload(exception.GetType().Name, fluentValidationSummary);
+            }
+        }
+
+        return BuildPayload(exception.GetType().Name, exception.Message);
+    }
+
+    private static bool TryBuildFluentValidationSummary(Exception exception, out string summary)
+    {
+        summary = string.Empty;
+
+        if (!string.Equals(exception.GetType().FullName, "FluentValidation.ValidationException", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var errorsProperty = exception.GetType().GetProperty("Errors");
+        if (errorsProperty?.GetValue(exception) is not System.Collections.IEnumerable errors)
+        {
+            summary = "Validation failed";
+            return true;
+        }
+
+        var fields = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var error in errors)
+        {
+            var propertyName = error?.GetType().GetProperty("PropertyName")?.GetValue(error) as string;
+            if (!string.IsNullOrWhiteSpace(propertyName))
+            {
+                fields.Add(propertyName);
+            }
+        }
+
+        summary = fields.Count > 0
+            ? $"Validation failed. Fields={string.Join(", ", fields)}"
+            : "Validation failed";
+
+        return true;
+    }
+
+    private static string ExtractValidationPropertyName(string error)
+    {
+        if (string.IsNullOrWhiteSpace(error))
+        {
+            return string.Empty;
+        }
+
+        var colonIndex = error.IndexOf(':');
+        return colonIndex <= 0 ? string.Empty : error[..colonIndex].Trim();
+    }
+
+    private static string BuildPayload(string exceptionTypeName, string message)
+    {
+        var builder = new StringBuilder(message.Length);
+        foreach (var character in message)
         {
             builder.Append(char.IsControl(character) ? ' ' : character);
         }
 
         var normalized = string.Join(" ", builder.ToString().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
         var payload = string.IsNullOrWhiteSpace(normalized)
-            ? exception.GetType().Name
-            : $"{exception.GetType().Name}: {normalized}";
+            ? exceptionTypeName
+            : $"{exceptionTypeName}: {normalized}";
 
         return payload.Length <= MaxStoredErrorLength
             ? payload

@@ -78,7 +78,8 @@ internal sealed class ConfiguredNatsConsumerHostedService<TMessage> : IHostedSer
                 objectStore,
                 notificationService,
                 registry,
-                _serviceProvider.GetRequiredService<ILogger<DefaultDlqPoisonHandler<TMessage>>>());
+                _serviceProvider.GetRequiredService<ILogger<DefaultDlqPoisonHandler<TMessage>>>(),
+                natsOptions: _serviceProvider.GetService<IOptions<NatsConfiguration>>());
         }
 
         _worker = new NatsConsumerBackgroundService<TMessage>(

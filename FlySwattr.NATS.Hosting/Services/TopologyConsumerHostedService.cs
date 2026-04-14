@@ -6,6 +6,7 @@ using FlySwattr.NATS.Hosting.Health;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using NATS.Client.JetStream;
 using Polly;
 
@@ -152,7 +153,9 @@ internal class TopologyConsumerHostedService<TSource> : IHostedService
             objectStore,
             notificationService,
             dlqRegistry,
-            poisonHandlerLogger);
+            poisonHandlerLogger,
+            null,
+            _serviceProvider.GetService<IOptions<NatsConfiguration>>());
 
         // Resolve optional services
         var healthMetrics = _serviceProvider.GetService<IConsumerHealthMetrics>();
