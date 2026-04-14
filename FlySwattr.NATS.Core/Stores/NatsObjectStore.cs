@@ -118,7 +118,7 @@ internal class NatsObjectStore : IObjectStore, IAsyncDisposable
     public async Task<string> PutAsync(string key, Stream data, CancellationToken cancellationToken = default)
     {
         var stopwatch = Stopwatch.StartNew();
-        var tags = new TagList { { "operation", "put" }, { "bucket", _bucket } };
+        var tags = NatsTelemetry.CreateStoreOperationTags("put", _bucket);
         
         try
         {
@@ -155,7 +155,7 @@ internal class NatsObjectStore : IObjectStore, IAsyncDisposable
     public async Task GetAsync(string key, Stream target, CancellationToken cancellationToken = default)
     {
         var stopwatch = Stopwatch.StartNew();
-        var tags = new TagList { { "operation", "get" }, { "bucket", _bucket } };
+        var tags = NatsTelemetry.CreateStoreOperationTags("get", _bucket);
         
         try
         {
@@ -192,7 +192,7 @@ internal class NatsObjectStore : IObjectStore, IAsyncDisposable
     public async Task DeleteAsync(string key, CancellationToken cancellationToken = default)
     {
         var stopwatch = Stopwatch.StartNew();
-        var tags = new TagList { { "operation", "delete" }, { "bucket", _bucket } };
+        var tags = NatsTelemetry.CreateStoreOperationTags("delete", _bucket);
         
         try
         {
@@ -293,7 +293,7 @@ internal class NatsObjectStore : IObjectStore, IAsyncDisposable
     public async Task<IEnumerable<ObjectInfo>> ListAsync(bool showDeleted = false, CancellationToken cancellationToken = default)
     {
         var stopwatch = Stopwatch.StartNew();
-        var tags = new TagList { { "operation", "list" }, { "bucket", _bucket } };
+        var tags = NatsTelemetry.CreateStoreOperationTags("list", _bucket);
         
         try
         {
@@ -328,6 +328,7 @@ internal class NatsObjectStore : IObjectStore, IAsyncDisposable
 
     public async Task WatchAsync(Func<ObjectInfo, Task> handler, CancellationToken cancellationToken = default)
     {
+        var backoff = TimeSpan.FromSeconds(1);
         while (!cancellationToken.IsCancellationRequested)
         {
             try
@@ -346,19 +347,31 @@ internal class NatsObjectStore : IObjectStore, IAsyncDisposable
                         _logger.LogError(handlerEx, "Object store watch handler failed for bucket {Bucket}; continuing watch", _bucket);
                     }
                 }
-                return;
+
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    break;
+                }
+
+                _logger.LogWarning("Object store watch for bucket {Bucket} completed unexpectedly; retrying in {BackoffMs}ms", _bucket, backoff.TotalMilliseconds);
+                await Task.Delay(backoff, cancellationToken);
+                backoff = backoff < TimeSpan.FromSeconds(30) ? backoff * 2 : TimeSpan.FromSeconds(30);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
             }
             catch (NatsJSApiException ex) when (ex.Error.Code is 503 or 504)
             {
                 InvalidateCache();
-                _logger.LogWarning(ex, "Object store watch for bucket {Bucket} dropped due to transient error; retrying in 1s", _bucket);
+                _logger.LogWarning(ex, "Object store watch for bucket {Bucket} dropped due to transient error; retrying in {BackoffMs}ms", _bucket, backoff.TotalMilliseconds);
                 try
                 {
-                    await Task.Delay(1000, cancellationToken);
+                    await Task.Delay(backoff, cancellationToken);
+                    backoff = backoff < TimeSpan.FromSeconds(30) ? backoff * 2 : TimeSpan.FromSeconds(30);
                 }
                 catch (OperationCanceledException)
                 {
-                    // Cancellation requested during delay - exit watch loop
                     break;
                 }
             }

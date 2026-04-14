@@ -20,10 +20,6 @@ public class NatsMessageBusTelemetryTests : IAsyncDisposable
 
     public NatsMessageBusTelemetryTests()
     {
-        _connection = Substitute.For<INatsConnection>();
-        _logger = Substitute.For<ILogger<NatsMessageBus>>();
-        _bus = new NatsMessageBus(_connection, _logger);
-
         // Set up ActivityListener to capture activities
         _listener = new ActivityListener
         {
@@ -32,6 +28,15 @@ public class NatsMessageBusTelemetryTests : IAsyncDisposable
             ActivityStarted = activity => _capturedActivities.Add(activity)
         };
         ActivitySource.AddActivityListener(_listener);
+
+        using (NatsTelemetry.ActivitySource.StartActivity("telemetry-warmup", ActivityKind.Internal))
+        {
+        }
+        _capturedActivities.Clear();
+
+        _connection = Substitute.For<INatsConnection>();
+        _logger = Substitute.For<ILogger<NatsMessageBus>>();
+        _bus = new NatsMessageBus(_connection, _logger);
     }
 
     public async ValueTask DisposeAsync()

@@ -76,7 +76,7 @@ internal class NatsKeyValueStore : IKeyValueStore, IAsyncDisposable
     public async Task PutAsync<T>(string key, T value, CancellationToken cancellationToken = default)
     {
         var stopwatch = Stopwatch.StartNew();
-        var tags = new TagList { { "operation", "put" }, { "bucket", _bucket } };
+        var tags = NatsTelemetry.CreateStoreOperationTags("put", _bucket);
         
         try
         {
@@ -103,7 +103,7 @@ internal class NatsKeyValueStore : IKeyValueStore, IAsyncDisposable
     public async Task<T?> GetAsync<T>(string key, CancellationToken cancellationToken = default)
     {
         var stopwatch = Stopwatch.StartNew();
-        var tags = new TagList { { "operation", "get" }, { "bucket", _bucket } };
+        var tags = NatsTelemetry.CreateStoreOperationTags("get", _bucket);
         
         try
         {
@@ -135,7 +135,7 @@ internal class NatsKeyValueStore : IKeyValueStore, IAsyncDisposable
     public async Task DeleteAsync(string key, CancellationToken cancellationToken = default)
     {
         var stopwatch = Stopwatch.StartNew();
-        var tags = new TagList { { "operation", "delete" }, { "bucket", _bucket } };
+        var tags = NatsTelemetry.CreateStoreOperationTags("delete", _bucket);
         
         try
         {

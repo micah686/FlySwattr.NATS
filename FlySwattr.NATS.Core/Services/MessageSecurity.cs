@@ -1,12 +1,14 @@
 using System.Text;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Abstractions.Exceptions;
+using NATS.Client.Core;
 
 namespace FlySwattr.NATS.Core.Services;
 
 public static class MessageSecurity
 {
     private const int MaxStoredErrorLength = 256;
+    private const string NatsHeaderPrefix = "Nats-";
 
     internal static readonly StringComparer HeaderComparer = StringComparer.OrdinalIgnoreCase;
 
@@ -35,6 +37,36 @@ public static class MessageSecurity
         throw new ArgumentException(
             $"The following headers are reserved for internal use and cannot be overridden: {string.Join(", ", collisions)}",
             paramName);
+    }
+
+    public static NatsHeaders BuildValidatedHeaders(
+        MessageHeaders? headers,
+        IEnumerable<string>? reservedHeaderNames = null,
+        IEnumerable<string>? allowlistedNatsHeaders = null,
+        string paramName = "headers")
+    {
+        if (reservedHeaderNames != null)
+        {
+            RejectReservedHeaders(headers, reservedHeaderNames, paramName);
+        }
+
+        var natsHeaders = new NatsHeaders();
+        if (headers == null || headers.Headers.Count == 0)
+        {
+            return natsHeaders;
+        }
+
+        var allowlisted = allowlistedNatsHeaders is null
+            ? null
+            : new HashSet<string>(allowlistedNatsHeaders, HeaderComparer);
+
+        foreach (var (key, value) in headers.Headers)
+        {
+            ValidateHeader(key, value, allowlisted, paramName);
+            natsHeaders.Add(key, value);
+        }
+
+        return natsHeaders;
     }
 
     public static string ValidateObjectStoreKey(string objectKey, string paramName = "objectKey")
@@ -153,5 +185,44 @@ public static class MessageSecurity
         return payload.Length <= MaxStoredErrorLength
             ? payload
             : $"{payload[..(MaxStoredErrorLength - 3)]}...";
+    }
+
+    private static void ValidateHeader(
+        string key,
+        string value,
+        HashSet<string>? allowlistedNatsHeaders,
+        string paramName)
+    {
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            throw new ArgumentException("Header key cannot be null or whitespace", paramName);
+        }
+
+        if (key.Contains(':') || key.Any(char.IsControl))
+        {
+            throw new ArgumentException(
+                $"Invalid header key '{key}'. Keys cannot contain colons or control characters.",
+                paramName);
+        }
+
+        if (value == null)
+        {
+            throw new ArgumentException($"Header value for '{key}' cannot be null", paramName);
+        }
+
+        if (value.Any(char.IsControl))
+        {
+            throw new ArgumentException(
+                $"Invalid header value for '{key}'. Values cannot contain control characters.",
+                paramName);
+        }
+
+        if (key.StartsWith(NatsHeaderPrefix, StringComparison.OrdinalIgnoreCase) &&
+            (allowlistedNatsHeaders == null || !allowlistedNatsHeaders.Contains(key)))
+        {
+            throw new ArgumentException(
+                $"Header '{key}' is reserved for NATS internals and cannot be set by callers.",
+                paramName);
+        }
     }
 }

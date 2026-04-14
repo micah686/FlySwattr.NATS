@@ -97,19 +97,10 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
         ];
     }
 
-    public Task PublishAsync<T>(string subject, T message, CancellationToken cancellationToken = default)
-    {
-        throw new ArgumentException(
-            "A messageId must be provided for JetStream publishing to ensure application-level idempotency. " +
-            "Use a business-key-derived ID (e.g., 'Order123-Created') to enable proper de-duplication across retries.",
-            nameof(message));
-    }
-
     public async Task PublishAsync<T>(string subject, T message, string? messageId, MessageHeaders? headers = null, CancellationToken cancellationToken = default)
     {
         var stopwatch = Stopwatch.StartNew();
         MessageSecurity.ValidatePublishSubject(subject);
-        MessageSecurity.RejectReservedHeaders(headers, _reservedPublishHeaders);
         
         // Require a caller-provided message ID for true application-level idempotency.
         // Auto-generating GUIDs would defeat JetStream's deduplication on retries.
@@ -122,13 +113,8 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
         }
 
         using var activity = NatsTelemetry.ActivitySource.StartActivity($"{subject} publish", ActivityKind.Producer);
-        if (activity != null)
-        {
-            activity.SetTag(NatsTelemetry.MessagingSystem, NatsTelemetry.MessagingSystemName);
-            activity.SetTag(NatsTelemetry.MessagingDestinationName, subject);
-            activity.SetTag(NatsTelemetry.MessagingOperation, "publish");
-            activity.SetTag(NatsTelemetry.MessagingMessageId, messageId);
-        }
+        NatsTelemetry.ApplyMessagingTags(activity, subject);
+        activity?.SetTag(NatsTelemetry.MessagingMessageId, messageId);
 
         var natsHeaders = new NatsHeaders
         {
@@ -138,12 +124,10 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
         };
 
         // Merge custom headers if provided
-        if (headers != null)
+        var validatedHeaders = MessageSecurity.BuildValidatedHeaders(headers, _reservedPublishHeaders, paramName: nameof(headers));
+        foreach (var header in validatedHeaders)
         {
-            foreach (var header in headers.Headers)
-            {
-                natsHeaders[header.Key] = header.Value;
-            }
+            natsHeaders[header.Key] = header.Value;
         }
         
         NatsTelemetry.InjectTraceContext(activity, natsHeaders);
@@ -162,7 +146,7 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
         
         // Record metrics
         stopwatch.Stop();
-        var tags = new TagList { { NatsTelemetry.MessagingDestinationName, subject } };
+        var tags = NatsTelemetry.CreateMessagingTags(subject);
         NatsTelemetry.MessagesPublished.Add(1, tags);
         NatsTelemetry.PublishDuration.Record(stopwatch.Elapsed.TotalMilliseconds, tags);
 
@@ -181,7 +165,7 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
         {
             var msg = messages[i];
             MessageSecurity.ValidatePublishSubject(msg.Subject);
-            MessageSecurity.RejectReservedHeaders(msg.Headers, _reservedPublishHeaders);
+            MessageSecurity.BuildValidatedHeaders(msg.Headers, _reservedPublishHeaders, paramName: nameof(messages));
 
             if (string.IsNullOrWhiteSpace(msg.MessageId))
             {
@@ -225,7 +209,6 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
     public async Task PublishRawAsync(string subject, ReadOnlyMemory<byte> payload, string? messageId, MessageHeaders? headers = null, CancellationToken cancellationToken = default)
     {
         MessageSecurity.ValidatePublishSubject(subject);
-        MessageSecurity.RejectReservedHeaders(headers, _reservedRawPublishHeaders);
 
         if (string.IsNullOrWhiteSpace(messageId))
         {
@@ -241,12 +224,10 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
             [_wireOptions.VersionHeaderName] = _wireOptions.ProtocolVersion.ToString()
         };
 
-        if (headers != null)
+        var validatedHeaders = MessageSecurity.BuildValidatedHeaders(headers, _reservedRawPublishHeaders, paramName: nameof(headers));
+        foreach (var header in validatedHeaders)
         {
-            foreach (var header in headers.Headers)
-            {
-                natsHeaders[header.Key] = header.Value;
-            }
+            natsHeaders[header.Key] = header.Value;
         }
 
         var ack = await _jsContext.PublishAsync(

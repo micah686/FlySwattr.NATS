@@ -116,6 +116,67 @@ public class NatsObjectStoreTests : IAsyncDisposable
         largeStream.CopyToCalled.ShouldBeFalse("NatsObjectStore should not call CopyTo/Async");
     }
 
+    [Test]
+    public async Task WatchAsync_ShouldReconnect_WhenUnderlyingWatchCompletesUnexpectedly()
+    {
+        var seenKeys = new List<string>();
+        var watchCalls = 0;
+
+        _objStore.WatchAsync(cancellationToken: Arg.Any<CancellationToken>())
+            .Returns(_ =>
+            {
+                var call = Interlocked.Increment(ref watchCalls);
+                return call switch
+                {
+                    1 => CompletedWatch(),
+                    2 => SingleEventWatch("after-reconnect"),
+                    _ => EndlessWatch()
+                };
+            });
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var watchTask = _sut.WatchAsync(info =>
+        {
+            seenKeys.Add(info.Key);
+            cts.Cancel();
+            return Task.CompletedTask;
+        }, cts.Token);
+
+        try
+        {
+            await watchTask;
+        }
+        catch (OperationCanceledException)
+        {
+        }
+
+        watchCalls.ShouldBeGreaterThanOrEqualTo(2);
+        seenKeys.ShouldContain("after-reconnect");
+    }
+
+    private static async IAsyncEnumerable<ObjectMetadata> CompletedWatch()
+    {
+        await Task.CompletedTask;
+        yield break;
+    }
+
+    private static async IAsyncEnumerable<ObjectMetadata> SingleEventWatch(string key)
+    {
+        yield return new ObjectMetadata
+        {
+            Bucket = BucketName,
+            Name = key,
+            Size = 1
+        };
+        await Task.CompletedTask;
+    }
+
+    private static async IAsyncEnumerable<ObjectMetadata> EndlessWatch()
+    {
+        await Task.Delay(Timeout.InfiniteTimeSpan);
+        yield break;
+    }
+
     private class MockStream : Stream
     {
         private readonly long _length;

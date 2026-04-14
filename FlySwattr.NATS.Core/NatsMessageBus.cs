@@ -86,12 +86,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
         MessageSecurity.ValidatePublishSubject(subject);
         var stopwatch = Stopwatch.StartNew();
         using var activity = NatsTelemetry.ActivitySource.StartActivity($"{subject} publish", ActivityKind.Producer);
-        if (activity != null)
-        {
-            activity.SetTag(NatsTelemetry.MessagingSystem, NatsTelemetry.MessagingSystemName);
-            activity.SetTag(NatsTelemetry.MessagingDestinationName, subject);
-            activity.SetTag(NatsTelemetry.MessagingOperation, "publish");
-        }
+        NatsTelemetry.ApplyMessagingTags(activity, subject);
 
         var natsHeaders = new NatsHeaders();
         NatsTelemetry.InjectTraceContext(activity, natsHeaders);
@@ -101,7 +96,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
         
         // Record metrics
         stopwatch.Stop();
-        var tags = new TagList { { NatsTelemetry.MessagingDestinationName, subject } };
+        var tags = NatsTelemetry.CreateMessagingTags(subject);
         NatsTelemetry.MessagesPublished.Add(1, tags);
         NatsTelemetry.PublishDuration.Record(stopwatch.Elapsed.TotalMilliseconds, tags);
     }
@@ -109,39 +104,11 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
     public async Task PublishAsync<T>(string subject, T message, MessageHeaders? headers, CancellationToken cancellationToken = default)
     {
         MessageSecurity.ValidatePublishSubject(subject);
-        MessageSecurity.RejectReservedHeaders(headers, ReservedHeaders);
         var stopwatch = Stopwatch.StartNew();
         using var activity = NatsTelemetry.ActivitySource.StartActivity($"{subject} publish", ActivityKind.Producer);
-        if (activity != null)
-        {
-            activity.SetTag(NatsTelemetry.MessagingSystem, NatsTelemetry.MessagingSystemName);
-            activity.SetTag(NatsTelemetry.MessagingDestinationName, subject);
-            activity.SetTag(NatsTelemetry.MessagingOperation, "publish");
-        }
-        
-        var natsHeaders = new NatsHeaders();
-        if (headers?.Headers.Count > 0)
-        {
-            foreach (var kvp in headers.Headers)
-            {
-                if (string.IsNullOrWhiteSpace(kvp.Key))
-                {
-                    throw new ArgumentException("Header key cannot be null or whitespace", nameof(headers));
-                }
-                
-                if (kvp.Key.Contains(':') || kvp.Key.Any(char.IsControl))
-                {
-                    throw new ArgumentException($"Invalid header key '{kvp.Key}'. Keys cannot contain colons or control characters.", nameof(headers));
-                }
-                
-                if (kvp.Value == null)
-                {
-                    throw new ArgumentException($"Header value for '{kvp.Key}' cannot be null", nameof(headers));
-                }
+        NatsTelemetry.ApplyMessagingTags(activity, subject);
 
-                natsHeaders.Add(kvp.Key, kvp.Value);
-            }
-        }
+        var natsHeaders = MessageSecurity.BuildValidatedHeaders(headers, ReservedHeaders, paramName: nameof(headers));
         
         NatsTelemetry.InjectTraceContext(activity, natsHeaders);
         MemoryPackSchemaMetadata.AddHeadersIfNeeded<T>(natsHeaders);
@@ -150,7 +117,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
         
         // Record metrics
         stopwatch.Stop();
-        var tags = new TagList { { NatsTelemetry.MessagingDestinationName, subject } };
+        var tags = NatsTelemetry.CreateMessagingTags(subject);
         NatsTelemetry.MessagesPublished.Add(1, tags);
         NatsTelemetry.PublishDuration.Record(stopwatch.Elapsed.TotalMilliseconds, tags);
     }
@@ -192,9 +159,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
                         
                         if (activity != null)
                         {
-                            activity.SetTag(NatsTelemetry.MessagingSystem, NatsTelemetry.MessagingSystemName);
-                            activity.SetTag(NatsTelemetry.MessagingDestinationName, subject);
-                            activity.SetTag(NatsTelemetry.MessagingOperation, "receive");
+                            NatsTelemetry.ApplyMessagingTags(activity, subject);
                             activity.SetTag(NatsTelemetry.NatsSubject, msg.Subject);
                             if (msg.ReplyTo != null)
                             {
@@ -203,7 +168,7 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
                         }
 
                         var handlerStopwatch = Stopwatch.StartNew();
-                        var handlerTags = new TagList { { NatsTelemetry.MessagingDestinationName, subject } };
+                        var handlerTags = NatsTelemetry.CreateMessagingTags(subject);
                         try
                         {
                             _logger.LogDebug("Received message on {Subject}", msg.Subject);
@@ -215,11 +180,12 @@ public class NatsMessageBus : IMessageBus, IAsyncDisposable
                         }
                         catch (Exception ex)
                         {
-                            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+                            activity?.SetStatus(ActivityStatusCode.Error, NatsTelemetry.SanitizeExceptionForTelemetry(ex));
                             _logger.LogError(ex, "Error handling message {Subject}", subject);
                             
                             // Record failure metrics
-                            var errorTags = new TagList { { NatsTelemetry.MessagingDestinationName, subject }, { "error.type", ex.GetType().Name } };
+                            var errorTags = NatsTelemetry.CreateMessagingTags(subject);
+                            errorTags.Add("error.type", ex.GetType().Name);
                             NatsTelemetry.MessagesFailed.Add(1, errorTags);
                         }
                         finally

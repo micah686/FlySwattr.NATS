@@ -92,12 +92,17 @@ public static class ServiceCollectionExtensions
                 sp.GetRequiredService<ILogger<NatsKeyValueStore>>()
             ));
         
-        services.AddSingleton<Func<string, IObjectStore>>(sp => bucket =>
-            new NatsObjectStore(
-                sp.GetRequiredService<INatsObjContext>(),
-                bucket,
-                sp.GetRequiredService<ILogger<NatsObjectStore>>()
-            ));
+        services.AddSingleton<ObjectStoreRegistry>(sp =>
+            new ObjectStoreRegistry(bucket =>
+                new NatsObjectStore(
+                    sp.GetRequiredService<INatsObjContext>(),
+                    bucket,
+                    sp.GetRequiredService<ILogger<NatsObjectStore>>())));
+        services.AddSingleton<Func<string, IObjectStore>>(sp =>
+        {
+            var registry = sp.GetRequiredService<ObjectStoreRegistry>();
+            return registry.GetOrCreate;
+        });
 
         // 5. Core Bus (No resilience dependencies)
         //services.AddSingleton<NatsJetStreamBus>();
@@ -119,7 +124,6 @@ public static class ServiceCollectionExtensions
             sp.GetService<IObjectStore>(),
             sp.GetService<IDlqNotificationService>()
         ));
-
         return services;
     }
 

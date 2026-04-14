@@ -19,4 +19,21 @@ public class FusionCacheConfiguration
     
     /// <summary>Cache duration for not-found keys (shorter to allow quick refresh when key is created).</summary>
     public TimeSpan NotFoundCacheDuration { get; set; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Maximum number of cache size units allowed in the underlying in-memory cache.
+    /// Entries use <see cref="EntrySizeUnits"/> as their size.
+    /// </summary>
+    public long MemorySizeLimit { get; set; } = 10_000;
+
+    /// <summary>
+    /// Size units charged to each cache entry.
+    /// Defaults to 1, making <see cref="MemorySizeLimit"/> behave like a bounded entry count.
+    /// </summary>
+    public long EntrySizeUnits { get; set; } = 1;
+
+    /// <summary>
+    /// Percentage of the cache compacted when the memory cache is under pressure.
+    /// </summary>
+    public double CompactionPercentage { get; set; } = 0.2d;
 }

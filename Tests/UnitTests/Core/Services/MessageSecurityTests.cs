@@ -1,4 +1,5 @@
 using FlySwattr.NATS.Abstractions.Exceptions;
+using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core.Services;
 using Shouldly;
 using TUnit.Core;
@@ -46,5 +47,27 @@ public class MessageSecurityTests
         var sanitized = MessageSecurity.SanitizeExceptionMessage(exception);
 
         sanitized.ShouldContain(tokenValue);
+    }
+
+    [Test]
+    public void BuildValidatedHeaders_ShouldRejectUserDefinedNatsHeaders()
+    {
+        var headers = new MessageHeaders(new Dictionary<string, string>
+        {
+            ["Nats-Custom"] = "value"
+        });
+
+        Should.Throw<ArgumentException>(() => MessageSecurity.BuildValidatedHeaders(headers));
+    }
+
+    [Test]
+    public void BuildValidatedHeaders_ShouldRejectControlCharactersInValues()
+    {
+        var headers = new MessageHeaders(new Dictionary<string, string>
+        {
+            ["X-Test"] = "bad\r\nvalue"
+        });
+
+        Should.Throw<ArgumentException>(() => MessageSecurity.BuildValidatedHeaders(headers));
     }
 }

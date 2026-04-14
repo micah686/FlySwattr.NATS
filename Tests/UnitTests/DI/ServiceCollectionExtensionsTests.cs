@@ -1,4 +1,5 @@
 using FlySwattr.NATS.Abstractions;
+using FlySwattr.NATS.Caching.Configuration;
 using FlySwattr.NATS.Caching.Extensions;
 using FlySwattr.NATS.Caching.Stores;
 using FlySwattr.NATS.Configuration;
@@ -10,6 +11,7 @@ using FlySwattr.NATS.Hosting.Middleware;
 using FlySwattr.NATS.Resilience.Extensions;
 using FlySwattr.NATS.Hosting.Health;
 using Medallion.Threading;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
@@ -189,6 +191,29 @@ public class ServiceCollectionExtensionsTests
 
         await Assert.That(decoratedStore.GetType()).IsEqualTo(typeof(CachingKeyValueStore));
         await Assert.That(innerStore.GetType()).IsEqualTo(typeof(NatsKeyValueStore));
+    }
+
+    [Test]
+    public async Task AddEnterpriseNATSMessaging_ShouldApplySafeCacheMemoryDefaults()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+
+        services.AddEnterpriseNATSMessaging(opts =>
+        {
+            opts.Core.Url = "nats://localhost:4222";
+            opts.Caching.MemorySizeLimit = 321;
+            opts.Caching.EntrySizeUnits = 2;
+            opts.Caching.CompactionPercentage = 0.15d;
+        });
+
+        using var provider = services.BuildServiceProvider();
+        var memoryOptions = provider.GetRequiredService<IOptions<MemoryCacheOptions>>().Value;
+        var cacheOptions = provider.GetRequiredService<IOptions<FusionCacheConfiguration>>().Value;
+
+        await Assert.That(memoryOptions.SizeLimit).IsEqualTo(321L);
+        await Assert.That(memoryOptions.CompactionPercentage).IsEqualTo(0.15d);
+        await Assert.That(cacheOptions.EntrySizeUnits).IsEqualTo(2L);
     }
 
     [Test]

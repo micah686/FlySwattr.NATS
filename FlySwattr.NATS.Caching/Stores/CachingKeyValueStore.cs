@@ -60,6 +60,7 @@ internal class CachingKeyValueStore : IKeyValueStore
                 new FusionCacheEntryOptions
                 {
                     Duration = _cacheConfig.MemoryCacheDuration,
+                    Size = _cacheConfig.EntrySizeUnits,
                     FailSafeMaxDuration = _cacheConfig.FailSafeMaxDuration,
                     FactorySoftTimeout = _cacheConfig.FactorySoftTimeout,
                     FactoryHardTimeout = _cacheConfig.FactoryHardTimeout,

@@ -1,6 +1,8 @@
 using FlySwattr.NATS.Abstractions;
+using FlySwattr.NATS.Core.Services;
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
+using System.Reflection;
 using NATS.Client.Core;
 
 namespace FlySwattr.NATS.Core.Telemetry;
@@ -11,6 +13,8 @@ namespace FlySwattr.NATS.Core.Telemetry;
 /// </summary>
 public static class NatsTelemetry
 {
+    private static TelemetryRuntimeOptions _runtimeOptions = new();
+
     // ==================== Tracing ====================
     
     /// <summary>
@@ -35,7 +39,7 @@ public static class NatsTelemetry
     /// <summary>
     /// The Meter for recording FlySwattr.NATS metrics.
     /// </summary>
-    public static readonly Meter Meter = new(MeterName, "1.0.0");
+    public static readonly Meter Meter = new(MeterName, GetInstrumentationVersion());
 
     // ---- Counters ----
     
@@ -121,6 +125,65 @@ public static class NatsTelemetry
     public const string NatsQueueGroup = "messaging.nats.queue_group";
     public const string NatsSubject = "messaging.nats.subject";
 
+    public static void Configure(
+        bool includeBucketNameInTags = true,
+        bool includeDestinationNameInTags = true)
+    {
+        Volatile.Write(ref _runtimeOptions, new TelemetryRuntimeOptions(
+            includeBucketNameInTags,
+            includeDestinationNameInTags));
+    }
+
+    public static void ApplyMessagingTags(Activity? activity, string? destinationName)
+    {
+        if (activity == null)
+        {
+            return;
+        }
+
+        activity.SetTag(MessagingSystem, MessagingSystemName);
+        activity.SetTag(MessagingOperation, activity.Kind switch
+        {
+            ActivityKind.Consumer => "receive",
+            ActivityKind.Client => "request",
+            _ => "publish"
+        });
+
+        if (Volatile.Read(ref _runtimeOptions).IncludeDestinationNameInTags && !string.IsNullOrWhiteSpace(destinationName))
+        {
+            activity.SetTag(MessagingDestinationName, destinationName);
+        }
+    }
+
+    public static TagList CreateMessagingTags(string? destinationName)
+    {
+        var tags = new TagList();
+        if (Volatile.Read(ref _runtimeOptions).IncludeDestinationNameInTags && !string.IsNullOrWhiteSpace(destinationName))
+        {
+            tags.Add(MessagingDestinationName, destinationName);
+        }
+
+        return tags;
+    }
+
+    public static TagList CreateStoreOperationTags(string operation, string? bucketName)
+    {
+        var tags = new TagList
+        {
+            { "operation", operation }
+        };
+
+        if (Volatile.Read(ref _runtimeOptions).IncludeBucketNameInTags && !string.IsNullOrWhiteSpace(bucketName))
+        {
+            tags.Add("bucket", bucketName);
+        }
+
+        return tags;
+    }
+
+    public static string SanitizeExceptionForTelemetry(Exception exception)
+        => MessageSecurity.SanitizeExceptionMessage(exception, enablePrivacySanitization: true);
+
     public static void InjectTraceContext(Activity? activity, NatsHeaders headers)
     {
         if (activity?.Id == null) return;
@@ -167,4 +230,24 @@ public static class NatsTelemetry
         
         return default;
     }
+
+    private static string GetInstrumentationVersion()
+    {
+        var assembly = typeof(NatsTelemetry).Assembly;
+        var informationalVersion = assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
+            .InformationalVersion;
+
+        if (!string.IsNullOrWhiteSpace(informationalVersion))
+        {
+            var plusIndex = informationalVersion.IndexOf('+');
+            return plusIndex >= 0 ? informationalVersion[..plusIndex] : informationalVersion;
+        }
+
+        return assembly.GetName().Version?.ToString() ?? "0.0.0";
+    }
+
+    private sealed record TelemetryRuntimeOptions(
+        bool IncludeBucketNameInTags = true,
+        bool IncludeDestinationNameInTags = true);
 }

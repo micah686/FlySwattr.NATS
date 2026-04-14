@@ -433,7 +433,7 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
                 }
                 catch (Exception ex)
                 {
-                    activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+                    activity?.SetStatus(ActivityStatusCode.Error, NatsTelemetry.SanitizeExceptionForTelemetry(ex));
                     try
                     {
                         var configuredLimit = _consumer.Info.Config.MaxDeliver;

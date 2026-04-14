@@ -2,6 +2,7 @@ using FlySwattr.NATS.Caching.Extensions;
 using FlySwattr.NATS.Configuration;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core.Extensions;
+using FlySwattr.NATS.Core.Telemetry;
 using FlySwattr.NATS.DistributedLock.Extensions;
 using FlySwattr.NATS.Hosting.Extensions;
 using FlySwattr.NATS.Resilience.Extensions;
@@ -86,6 +87,10 @@ public static class ServiceCollectionExtensions
 
         // Register the enterprise options for use by other components
         services.TryAddSingleton(Options.Create(options));
+        services.TryAddSingleton(Options.Create(options.Telemetry));
+        NatsTelemetry.Configure(
+            options.Telemetry.IncludeBucketNameInTags,
+            options.Telemetry.IncludeDestinationNameInTags);
         services.Configure<ConsumerResilienceOptions>(opts =>
         {
             opts.MaxRetryAttempts = options.ConsumerResilience.MaxRetryAttempts;
@@ -164,6 +169,9 @@ public static class ServiceCollectionExtensions
                 cacheOpts.FactorySoftTimeout = options.Caching.FactorySoftTimeout;
                 cacheOpts.FactoryHardTimeout = options.Caching.FactoryHardTimeout;
                 cacheOpts.NotFoundCacheDuration = options.Caching.NotFoundCacheDuration;
+                cacheOpts.MemorySizeLimit = options.Caching.MemorySizeLimit;
+                cacheOpts.EntrySizeUnits = options.Caching.EntrySizeUnits;
+                cacheOpts.CompactionPercentage = options.Caching.CompactionPercentage;
             });
         }
 

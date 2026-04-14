@@ -64,14 +64,6 @@ public class NatsJetStreamBusTests : IAsyncDisposable
     }
 
     [Test]
-    public async Task PublishAsync_WithoutMessageIdOverload_ShouldThrowArgumentException()
-    {
-        // Act & Assert - the overload without messageId should throw
-        await Assert.ThrowsAsync<ArgumentException>(async () =>
-            await _bus.PublishAsync("test.subject", new { Data = "test" }));
-    }
-
-    [Test]
     public async Task PublishAsync_ShouldThrow_OnFailure()
     {
         // Arrange - mock the generic PublishAsync<T> method that NatsJetStreamBus calls
@@ -96,6 +88,18 @@ public class NatsJetStreamBusTests : IAsyncDisposable
         var headers = new MessageHeaders(new Dictionary<string, string>
         {
             ["Content-Type"] = "text/plain"
+        });
+
+        await Assert.ThrowsAsync<ArgumentException>(async () =>
+            await _bus.PublishAsync("test.subject", new TestMessage("test"), "msg-1", headers));
+    }
+
+    [Test]
+    public async Task PublishAsync_ShouldRejectUserDefinedNatsHeaders()
+    {
+        var headers = new MessageHeaders(new Dictionary<string, string>
+        {
+            ["Nats-Custom"] = "value"
         });
 
         await Assert.ThrowsAsync<ArgumentException>(async () =>
