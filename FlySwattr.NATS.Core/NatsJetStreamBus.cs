@@ -403,15 +403,16 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
                 consumer = await _jsContext.CreateOrUpdateConsumerAsync(stream.Value, config, cancellationToken);
             }
 
-            var effectiveParallelism = opts.MaxDegreeOfParallelism ?? 10;
+            var batchSize = opts.BatchSize > 0 ? opts.BatchSize : (opts.MaxDegreeOfParallelism ?? 10);
             var service = new BasicNatsConsumerService<T>(
                 consumer,
                 stream.Value,
                 consumerName ?? consumer.Info?.Name ?? "unknown_consumer",
                 handler,
                 _logger,
-                effectiveParallelism,
-                deserializer);
+                batchSize,
+                deserializer,
+                opts.MaxConcurrency);
 
             await StartBackgroundConsumerAsync(service, cancellationToken);
         }
@@ -440,15 +441,16 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
         try
         {
             var jsConsumer = await _jsContext.GetConsumerAsync(stream.Value, consumer.Value, cancellationToken);
-            var effectiveParallelism = opts.MaxDegreeOfParallelism ?? 10;
+            var batchSize = opts.BatchSize > 0 ? opts.BatchSize : (opts.MaxDegreeOfParallelism ?? 10);
             var service = new BasicNatsConsumerService<T>(
                 jsConsumer,
                 stream.Value,
                 consumer.Value,
                 handler,
                 _logger,
-                effectiveParallelism,
-                deserializer);
+                batchSize,
+                deserializer,
+                opts.MaxConcurrency);
 
             await StartBackgroundConsumerAsync(service, cancellationToken);
         }
@@ -510,6 +512,7 @@ internal class BasicNatsConsumerService<T> : BackgroundService
     private readonly Func<IJsMessageContext<T>, Task> _handler;
     private readonly ILogger _logger;
     private readonly int _maxMsgs;
+    private readonly int? _maxConcurrency;
     private readonly INatsDeserialize<T>? _deserializer;
 
     public BasicNatsConsumerService(
@@ -519,7 +522,8 @@ internal class BasicNatsConsumerService<T> : BackgroundService
         Func<IJsMessageContext<T>, Task> handler,
         ILogger logger,
         int maxMsgs,
-        INatsDeserialize<T>? deserializer = null)
+        INatsDeserialize<T>? deserializer = null,
+        int? maxConcurrency = null)
     {
         _consumer = consumer;
         _stream = stream;
@@ -527,11 +531,14 @@ internal class BasicNatsConsumerService<T> : BackgroundService
         _handler = handler;
         _logger = logger;
         _maxMsgs = maxMsgs;
+        _maxConcurrency = maxConcurrency;
         _deserializer = deserializer;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        var concurrencySemaphore = _maxConcurrency.HasValue ? new SemaphoreSlim(_maxConcurrency.Value) : null;
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -548,14 +555,20 @@ internal class BasicNatsConsumerService<T> : BackgroundService
 
                 await foreach (var msg in messages)
                 {
+                    // Acquire permit from concurrency semaphore if configured
+                    if (concurrencySemaphore != null)
+                    {
+                        await concurrencySemaphore.WaitAsync(stoppingToken);
+                    }
+
                     var handlerStopwatch = Stopwatch.StartNew();
-                    var tags = new TagList 
-                    { 
+                    var tags = new TagList
+                    {
                         { NatsTelemetry.MessagingDestinationName, _stream },
                         { NatsTelemetry.NatsStream, _stream },
                         { NatsTelemetry.NatsConsumer, _consumerName }
                     };
-                    
+
                     try
                     {
                         var parentContext = NatsTelemetry.ExtractTraceContext(msg.Headers);
@@ -573,17 +586,17 @@ internal class BasicNatsConsumerService<T> : BackgroundService
 
                         var context = new JsMessageContext<T>(msg);
                         await _handler(context);
-                        
+
                         // Record success metrics
                         NatsTelemetry.MessagesReceived.Add(1, tags);
                     }
                     catch (Exception ex)
                     {
                         _logger.LogError(ex, "Error processing message from {Stream}/{Consumer}", _stream, _consumerName);
-                        
+
                         // Record failure metrics
-                        var errorTags = new TagList 
-                        { 
+                        var errorTags = new TagList
+                        {
                             { NatsTelemetry.MessagingDestinationName, _stream },
                             { NatsTelemetry.NatsStream, _stream },
                             { NatsTelemetry.NatsConsumer, _consumerName },
@@ -595,6 +608,9 @@ internal class BasicNatsConsumerService<T> : BackgroundService
                     {
                         handlerStopwatch.Stop();
                         NatsTelemetry.MessageProcessingDuration.Record(handlerStopwatch.Elapsed.TotalMilliseconds, tags);
+
+                        // Release permit if using concurrency control
+                        concurrencySemaphore?.Release();
                     }
                 }
             }

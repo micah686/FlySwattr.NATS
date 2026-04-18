@@ -6,6 +6,7 @@ using FlySwattr.NATS.Abstractions.Exceptions;
 using FlySwattr.NATS.Core;
 using FlySwattr.NATS.Core.Configuration;
 using FlySwattr.NATS.Core.Services;
+using FlySwattr.NATS.Core.Stores;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -28,6 +29,7 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
     private readonly IObjectStore? _objectStore;
     private readonly IDlqNotificationService? _notificationService;
     private readonly IDlqPolicyRegistry _dlqPolicyRegistry;
+    private readonly IDlqStore? _dlqStore;
     private readonly DlqStoreFailureOptions _failureOptions;
     private readonly bool _sanitizeExceptionMessages;
     private readonly ILogger _logger;
@@ -41,7 +43,8 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
         IDlqPolicyRegistry dlqPolicyRegistry,
         ILogger<DefaultDlqPoisonHandler<T>> logger,
         IOptions<DlqStoreFailureOptions>? failureOptions = null,
-        IOptions<NatsConfiguration>? natsOptions = null)
+        IOptions<NatsConfiguration>? natsOptions = null,
+        IDlqStore? dlqStore = null)
     {
         _dlqPublisher = dlqPublisher;
         _serializer = serializer;
@@ -49,6 +52,7 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
         _objectStore = objectStore;
         _notificationService = notificationService;
         _dlqPolicyRegistry = dlqPolicyRegistry;
+        _dlqStore = dlqStore;
         _failureOptions = failureOptions?.Value ?? new DlqStoreFailureOptions();
         _sanitizeExceptionMessages = natsOptions?.Value.SanitizeExceptionMessages ?? true;
         _logger = logger;
@@ -90,6 +94,37 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
                     var dlqMessageId = $"{prefix}-{streamName}-{consumerName}-{context.Sequence}";
                     
                     await _dlqPublisher.PublishAsync(policy.TargetSubject, dlqMessage, dlqMessageId, headers: null, cancellationToken: cancellationToken);
+
+                    // Persist the DLQ entry to the store (with payload) immediately after publish succeeds
+                    if (_dlqStore != null)
+                    {
+                        try
+                        {
+                            var entry = new DlqMessageEntry
+                            {
+                                Id = $"{dlqMessage.OriginalStream}.{dlqMessage.OriginalConsumer}.{dlqMessage.OriginalSequence}",
+                                OriginalStream = dlqMessage.OriginalStream,
+                                OriginalConsumer = dlqMessage.OriginalConsumer,
+                                OriginalSubject = dlqMessage.OriginalSubject,
+                                OriginalSequence = dlqMessage.OriginalSequence,
+                                DeliveryCount = dlqMessage.DeliveryCount,
+                                StoredAt = dlqMessage.FailedAt,
+                                Status = DlqMessageStatus.Pending,
+                                ErrorReason = dlqMessage.ErrorReason,
+                                Payload = dlqMessage.Payload,
+                                PayloadEncoding = dlqMessage.PayloadEncoding,
+                                OriginalMessageType = dlqMessage.OriginalMessageType,
+                                SerializerType = dlqMessage.SerializerType,
+                                OriginalHeaders = dlqMessage.OriginalHeaders
+                            };
+                            await _dlqStore.StoreAsync(entry, cancellationToken);
+                        }
+                        catch (Exception storeEx)
+                        {
+                            LogDlqStoreFailure(storeEx);
+                            // Store failure does not prevent termination; the message is already published to the stream
+                        }
+                    }
 
                     if (_notificationService != null)
                     {
@@ -263,6 +298,9 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Failed to DLQ message")]
     private partial void LogDlqFailed(Exception exception);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to persist DLQ entry to store (entry may still be retrievable from DLQ stream)")]
+    private partial void LogDlqStoreFailure(Exception exception);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "No DLQ policy, publisher, or serializer available. Terminating poison message.")]
     private partial void LogNoDlqAvailable();
