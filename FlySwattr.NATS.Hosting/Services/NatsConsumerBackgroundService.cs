@@ -4,7 +4,6 @@ using System.Buffers;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core.Configuration;
 using FlySwattr.NATS.Abstractions.Exceptions;
-using FlySwattr.NATS.Core.Decorators;
 using FlySwattr.NATS.Core.Services;
 using FlySwattr.NATS.Core.Telemetry;
 using FlySwattr.NATS.Hosting.Health;

@@ -58,15 +58,26 @@ internal class TopologyProvisioningService : IHostedService
             // Step 1: Wait for NATS connection to be established (Cold Start protection)
             await WaitForConnectionAsync(cancellationToken);
 
+            // Track provisioning failures - will determine ready signal success/failure
+            var failedResources = new List<Exception>();
+
             var sources = _topologySources.ToList();
             if (sources.Count == 0)
             {
                 _logger.LogWarning("No ITopologySource implementations registered. No topology will be provisioned.");
 
                 // Even with no topology sources, we may need to provision auto-infrastructure
-                await ProvisionAutoInfrastructureAsync(hasConsumersWithDlq: false, cancellationToken);
+                await ProvisionAutoInfrastructureAsync(hasConsumersWithDlq: false, failedResources, cancellationToken);
 
-                _readySignal?.SignalReady();
+                if (failedResources.Count > 0)
+                {
+                    _logger.LogError("Topology provisioning completed with {FailureCount} failure(s).", failedResources.Count);
+                    _readySignal?.SignalFailed(new AggregateException("Topology provisioning partially failed", failedResources));
+                }
+                else
+                {
+                    _readySignal?.SignalReady();
+                }
                 return;
             }
 
@@ -86,10 +97,7 @@ internal class TopologyProvisioningService : IHostedService
             var hasConsumersWithDlq = allConsumers.Any(c => c.DeadLetterPolicy != null);
 
             // Provision auto-infrastructure first (DLQ bucket, payload offloading bucket)
-            await ProvisionAutoInfrastructureAsync(hasConsumersWithDlq, cancellationToken);
-
-            // Track provisioning failures - will determine ready signal success/failure
-            var failedResources = new List<Exception>();
+            await ProvisionAutoInfrastructureAsync(hasConsumersWithDlq, failedResources, cancellationToken);
 
             // Provision KV buckets from topology sources
             foreach (var bucketSpec in allBuckets)
@@ -180,7 +188,7 @@ internal class TopologyProvisioningService : IHostedService
     /// <summary>
     /// Provisions "batteries included" auto-infrastructure like DLQ buckets and payload offloading buckets.
     /// </summary>
-    private async Task ProvisionAutoInfrastructureAsync(bool hasConsumersWithDlq, CancellationToken cancellationToken)
+    private async Task ProvisionAutoInfrastructureAsync(bool hasConsumersWithDlq, IList<Exception> failedResources, CancellationToken cancellationToken)
     {
         // Auto-create DLQ KV bucket when any consumer has a DeadLetterPolicy
         if (hasConsumersWithDlq && _options.AutoCreateDlqBucket)
@@ -198,6 +206,7 @@ internal class TopologyProvisioningService : IHostedService
             {
                 _logger.LogError(ex, "Failed to auto-create DLQ bucket '{BucketName}'. DLQ functionality may be impaired.",
                     _options.DlqBucketName);
+                failedResources.Add(ex);
             }
         }
 
@@ -221,6 +230,7 @@ internal class TopologyProvisioningService : IHostedService
             {
                 _logger.LogError(ex, "Failed to auto-create payload offloading bucket '{BucketName}'. Large payload handling may fail.",
                     _options.PayloadOffloadingBucketName);
+                failedResources.Add(ex);
             }
         }
     }

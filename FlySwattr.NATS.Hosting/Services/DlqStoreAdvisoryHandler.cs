@@ -43,6 +43,7 @@ internal partial class DlqStoreAdvisoryHandler : IDlqAdvisoryHandler
 
             await _dlqStore.StoreAsync(entry, cancellationToken);
             LogStored(advisory.Stream, advisory.Consumer, advisory.StreamSeq);
+            LogNoPayloadWarning(advisory.Stream, advisory.Consumer, advisory.StreamSeq);
         }
         catch (Exception ex)
         {
@@ -52,6 +53,9 @@ internal partial class DlqStoreAdvisoryHandler : IDlqAdvisoryHandler
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Stored DLQ entry for {Stream}/{Consumer} seq {StreamSeq}")]
     private partial void LogStored(string stream, string consumer, ulong streamSeq);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "DLQ entry for {Stream}/{Consumer} seq {StreamSeq} from advisory listener does not include payload; use DefaultDlqPoisonHandler (inline handler) for full payload")]
+    private partial void LogNoPayloadWarning(string stream, string consumer, ulong streamSeq);
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Failed to store DLQ entry for {Stream}/{Consumer} seq {StreamSeq}")]
     private partial void LogStoreFailed(string stream, string consumer, ulong streamSeq, Exception exception);

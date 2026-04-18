@@ -5,4 +5,3 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("Benchmarks")]
 [assembly: InternalsVisibleTo("DynamicProxyGenAssembly2")] // For NSubstitute
 [assembly: InternalsVisibleTo("FlySwattr.NATS.Caching")]
-[assembly: InternalsVisibleTo("FlySwattr.NATS.Hosting")]

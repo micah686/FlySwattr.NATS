@@ -67,6 +67,7 @@ internal sealed class ConfiguredNatsConsumerHostedService<TMessage> : IHostedSer
             : _serviceProvider.GetService<IJetStreamPublisher>();
 
         var notificationService = _serviceProvider.GetService<IDlqNotificationService>();
+        var dlqStore = _serviceProvider.GetService<IDlqStore>();
         var resiliencePipeline = _options.ResiliencePipelineKey != null
             ? _serviceProvider.GetKeyedService<ResiliencePipeline>(_options.ResiliencePipelineKey)
             : null;
@@ -103,7 +104,8 @@ internal sealed class ConfiguredNatsConsumerHostedService<TMessage> : IHostedSer
                 notificationService,
                 registry,
                 _serviceProvider.GetRequiredService<ILogger<DefaultDlqPoisonHandler<TMessage>>>(),
-                natsOptions: _serviceProvider.GetService<IOptions<NatsConfiguration>>());
+                natsOptions: _serviceProvider.GetService<IOptions<NatsConfiguration>>(),
+                dlqStore: dlqStore);
         }
 
         _worker = new NatsConsumerBackgroundService<TMessage>(

@@ -30,6 +30,7 @@ public class DefaultDlqPoisonHandlerTests
     private IObjectStore _objectStore = null!;
     private IDlqNotificationService _notificationService = null!;
     private IDlqPolicyRegistry _policyRegistry = null!;
+    private IDlqStore _dlqStore = null!;
     private IMessageTypeAliasRegistry _typeAliasRegistry = null!;
     private ILogger<DefaultDlqPoisonHandler<TestMessage>> _logger = null!;
     private IJsMessageContext<TestMessage> _context = null!;
@@ -42,6 +43,7 @@ public class DefaultDlqPoisonHandlerTests
         _objectStore = Substitute.For<IObjectStore>();
         _notificationService = Substitute.For<IDlqNotificationService>();
         _policyRegistry = Substitute.For<IDlqPolicyRegistry>();
+        _dlqStore = Substitute.For<IDlqStore>();
         _typeAliasRegistry = new MessageTypeAliasRegistry(Options.Create(new MessageTypeAliasOptions()));
         _typeAliasRegistry.Register<TestMessage>(nameof(TestMessage));
         _logger = Substitute.For<ILogger<DefaultDlqPoisonHandler<TestMessage>>>();
@@ -72,6 +74,7 @@ public class DefaultDlqPoisonHandlerTests
         IMessageSerializer? serializer = null,
         IObjectStore? objectStore = null,
         IDlqNotificationService? notificationService = null,
+        IDlqStore? dlqStore = null,
         bool sanitizeExceptionMessages = true)
     {
         return new DefaultDlqPoisonHandler<TestMessage>(
@@ -85,7 +88,8 @@ public class DefaultDlqPoisonHandlerTests
             natsOptions: Options.Create(new NatsConfiguration
             {
                 SanitizeExceptionMessages = sanitizeExceptionMessages
-            }));
+            }),
+            dlqStore: dlqStore == null ? null : (dlqStore ?? _dlqStore));
     }
 
     #endregion
@@ -729,6 +733,81 @@ public class DefaultDlqPoisonHandlerTests
         
         // Message should still be terminated
         await context.Received(1).TermAsync(Arg.Any<CancellationToken>());
+    }
+
+    #endregion
+
+    #region DLQ Store Persistence
+
+    /// <summary>
+    /// When IDlqStore is provided, HandleAsync should persist the entry to the store
+    /// in addition to publishing to the DLQ subject.
+    /// </summary>
+    [Test]
+    public async Task HandleAsync_WithDlqStore_ShouldPersistToStore()
+    {
+        // Arrange
+        var dlqStore = Substitute.For<IDlqStore>();
+        var policy = new DeadLetterPolicy { SourceStream = "orders-stream", SourceConsumer = "orders-consumer", TargetStream = StreamName.From("dlq"), TargetSubject = "dlq.orders" };
+        _policyRegistry.Get("orders-stream", "orders-consumer").Returns(policy);
+
+        _serializer.Serialize(Arg.Any<IBufferWriter<byte>>(), Arg.Any<TestMessage>());
+        _serializer.GetContentType<TestMessage>().Returns("application/json");
+
+        _publisher.PublishAsync(
+            Arg.Any<string>(),
+            Arg.Any<DlqMessage>(),
+            Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
+            Arg.Any<CancellationToken>())
+            .Returns(Task.CompletedTask);
+
+        var handler = CreateHandler(dlqStore: dlqStore);
+        var exception = new InvalidOperationException("Processing failed");
+
+        // Act
+        await handler.HandleAsync(_context, "orders-stream", "orders-consumer", 3, exception, CancellationToken.None);
+
+        // Assert - store should have been called
+        await dlqStore.Received(1).StoreAsync(Arg.Any<DlqMessageEntry>(), Arg.Any<CancellationToken>());
+    }
+
+    /// <summary>
+    /// When IDlqStore is null, HandleAsync should not attempt to persist but should still publish DLQ message.
+    /// </summary>
+    [Test]
+    public async Task HandleAsync_WithoutDlqStore_ShouldSkipStoreAndPublish()
+    {
+        // Arrange
+        var policy = new DeadLetterPolicy { SourceStream = "orders-stream", SourceConsumer = "orders-consumer", TargetStream = StreamName.From("dlq"), TargetSubject = "dlq.orders" };
+        _policyRegistry.Get("orders-stream", "orders-consumer").Returns(policy);
+
+        _serializer.Serialize(Arg.Any<IBufferWriter<byte>>(), Arg.Any<TestMessage>());
+        _serializer.GetContentType<TestMessage>().Returns("application/json");
+
+        _publisher.PublishAsync(
+            Arg.Any<string>(),
+            Arg.Any<DlqMessage>(),
+            Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
+            Arg.Any<CancellationToken>())
+            .Returns(Task.CompletedTask);
+
+        var handler = CreateHandler(dlqStore: null);
+        var exception = new InvalidOperationException("Processing failed");
+
+        // Act
+        await handler.HandleAsync(_context, "orders-stream", "orders-consumer", 3, exception, CancellationToken.None);
+
+        // Assert - publisher should be called, but store should not
+        await _publisher.Received(1).PublishAsync(
+            "dlq.orders",
+            Arg.Any<DlqMessage>(),
+            Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
+            Arg.Any<CancellationToken>());
+
+        await _dlqStore.DidNotReceive().StoreAsync(Arg.Any<DlqMessageEntry>(), Arg.Any<CancellationToken>());
     }
 
     #endregion

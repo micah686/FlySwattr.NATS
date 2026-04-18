@@ -8,7 +8,7 @@ namespace FlySwattr.NATS.Resilience.Decorators;
 
 /// <summary>
 /// Decorator that wraps IJetStreamConsumer with bulkhead isolation, per-consumer fairness,
-/// and consumer-level circuit breakers. Ensures ConsumeAsync calls respect global and 
+/// and consumer-level circuit breakers. Ensures ConsumeAsync calls respect global and
 /// per-consumer limits to prevent high-volume consumers from monopolizing shared resources.
 /// </summary>
 /// <remarks>
@@ -18,6 +18,14 @@ namespace FlySwattr.NATS.Resilience.Decorators;
 ///   <item>Global Bulkhead (outer): Pool-wide limit shared across all consumers in the pool</item>
 ///   <item>Per-Consumer Semaphore (inner): Optional limit per consumer to ensure fairness</item>
 /// </list>
+/// </para>
+/// <para>
+/// <strong>Scope:</strong> This decorator applies only to direct <c>IJetStreamConsumer</c> API callers
+/// (push-consumer consumption path). The hosted consumer runtime (e.g., <c>NatsConsumerBackgroundService</c>
+/// from <c>AddNatsConsumer</c> or <c>AddNatsTopologyWithConsumers</c>) uses <c>INatsJSConsumer.ConsumeAsync</c>
+/// (pull-consumer path) and is <strong>not</strong> wrapped by this decorator. Hosted consumers obtain
+/// resilience via <c>ConsumerResilienceOptions</c>, which builds a Polly retry pipeline that wraps the
+/// per-message handler, providing circuit-breaker and timeout protection appropriate for the pull-consumer model.
 /// </para>
 /// </remarks>
 internal class ResilientJetStreamConsumer : IJetStreamConsumer

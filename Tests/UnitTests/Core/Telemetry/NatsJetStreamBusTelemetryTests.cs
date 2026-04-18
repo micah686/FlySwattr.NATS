@@ -364,8 +364,10 @@ public class NatsJetStreamBusTelemetryTests : IAsyncDisposable
         await _bus.PublishAsync(subject1, message, "msg-1");
         await _bus.PublishAsync(subject2, message, "msg-2");
 
-        // Assert - find our specific activities
-        var ourActivities = _capturedActivities.Skip(startCount).Where(a => a.OperationName.Contains(prefix) && a.OperationName.Contains("publish")).ToList();
+        // Assert - find our specific activities by subject and "publish" operation
+        var ourActivities = _capturedActivities.Skip(startCount)
+            .Where(a => a.OperationName == $"{subject1} publish" || a.OperationName == $"{subject2} publish")
+            .ToList();
         ourActivities.Count.ShouldBe(2);
         ourActivities[0].TraceId.ShouldBe(parentActivity.TraceId);
         ourActivities[1].TraceId.ShouldBe(parentActivity.TraceId);

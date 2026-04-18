@@ -113,6 +113,8 @@ internal class TopologyConsumerHostedService<TSource> : IHostedService
             EnableValidationMiddleware = registration.Options.EnableValidationMiddleware,
             ResiliencePipelineKey = registration.Options.ResiliencePipelineKey,
             DlqPolicy = spec.DeadLetterPolicy,
+            DlqPublisherServiceKey = registration.Options.DlqPublisherServiceKey,
+            PoisonHandlerKey = registration.Options.PoisonHandlerKey,
             AckTimeout = registration.Options.AckTimeout,
             InProgressHeartbeatInterval = registration.Options.InProgressHeartbeatInterval
         };
@@ -139,10 +141,19 @@ internal class TopologyConsumerHostedService<TSource> : IHostedService
             dlqRegistry.Register(spec.StreamName.Value, spec.DurableName.Value, spec.DeadLetterPolicy);
         }
 
-        // Use ActivatorUtilities so all DI-registered constructor params are resolved
-        // automatically (IJetStreamPublisher, IMessageSerializer, IObjectStore, loggers, etc.)
-        // without enumerating them positionally here.
-        var poisonHandler = ActivatorUtilities.CreateInstance(_serviceProvider, defaultPoisonHandlerType);
+        // Resolve poison handler: use keyed service if specified, otherwise construct default
+        object poisonHandler;
+        if (registration.Options.PoisonHandlerKey != null)
+        {
+            poisonHandler = _serviceProvider.GetRequiredKeyedService(poisonHandlerType, registration.Options.PoisonHandlerKey);
+        }
+        else
+        {
+            // Use ActivatorUtilities so all DI-registered constructor params are resolved
+            // automatically (IJetStreamPublisher, IMessageSerializer, IObjectStore, loggers, etc.)
+            // without enumerating them positionally here.
+            poisonHandler = ActivatorUtilities.CreateInstance(_serviceProvider, defaultPoisonHandlerType);
+        }
 
         // Resolve services still needed for the worker (claim-check hydration support)
         var serializer = _serviceProvider.GetService<IMessageSerializer>();

@@ -14,9 +14,22 @@ namespace FlySwattr.NATS.Hosting.Services;
 
 /// <summary>
 /// Default implementation of IPoisonMessageHandler that implements the Store+Notify DLQ pattern.
-/// Handles transient failures with NAK/Backoff and permanent failures (or exhausted retries) 
+/// Handles transient failures with NAK/Backoff and permanent failures (or exhausted retries)
 /// by offloading to a Dead Letter Queue and optionally notifying via IDlqNotificationService.
 /// </summary>
+/// <remarks>
+/// <para>
+/// <strong>Canonical DLQ entry writer:</strong> This handler is the primary source of truth for
+/// DLQ entries with full payload and context. It is invoked when a message fails validation or
+/// exhausts retries, and writes both to the JetStream DLQ subject and (if IDlqStore is available)
+/// to the KV-backed DLQ entry store for auditing and remediation.
+/// </para>
+/// <para>
+/// The DlqStoreAdvisoryHandler is a fallback observer that also writes to the KV store but
+/// only captures advisory events (without payload), used for cases where the inline handler
+/// context is unavailable. Both paths converge on the same KV store.
+/// </para>
+/// </remarks>
 /// <typeparam name="T">The message payload type.</typeparam>
 internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
 {
