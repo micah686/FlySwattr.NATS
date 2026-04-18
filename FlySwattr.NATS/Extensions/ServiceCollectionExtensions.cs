@@ -1,6 +1,7 @@
 using FlySwattr.NATS.Caching.Extensions;
 using FlySwattr.NATS.Configuration;
 using FlySwattr.NATS.Abstractions;
+using FlySwattr.NATS.Core.Configuration;
 using FlySwattr.NATS.Core.Extensions;
 using FlySwattr.NATS.Core.Telemetry;
 using FlySwattr.NATS.DistributedLock.Extensions;
@@ -212,11 +213,13 @@ public static class ServiceCollectionExtensions
 
         // 7. Hosting & Health Checks
         // Consumer health metrics, startup checks, and health endpoints
-        services.AddFlySwattrNatsHosting(healthOpts =>
-        {
-            healthOpts.LoopIterationTimeout = options.HealthCheck.LoopIterationTimeout;
-            healthOpts.NoMessageWarningTimeout = options.HealthCheck.NoMessageWarningTimeout;
-        });
+        services.AddFlySwattrNatsHosting(
+            healthOpts =>
+            {
+                healthOpts.LoopIterationTimeout = options.HealthCheck.LoopIterationTimeout;
+                healthOpts.NoMessageWarningTimeout = options.HealthCheck.NoMessageWarningTimeout;
+            },
+            failFastOnStartup: options.FailFastOnStartup);
 
         // 8. DLQ Advisory Listener (Batteries Included)
         // Auto-register when topology provisioning is enabled for MAX_DELIVERIES monitoring

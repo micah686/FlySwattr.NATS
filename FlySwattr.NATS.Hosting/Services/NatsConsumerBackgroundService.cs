@@ -138,7 +138,42 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
         }
     }
 
-
+    internal static NatsConsumerBackgroundService<T> Create(
+        INatsJSConsumer consumer,
+        string streamName,
+        string consumerName,
+        Func<IJsMessageContext<T>, Task> handler,
+        NatsJSConsumeOpts consumeOpts,
+        ILogger logger,
+        IPoisonMessageHandler<T> poisonHandler,
+        IMessageSerializer? serializer,
+        IObjectStore? objectStore,
+        PayloadOffloadingOptions? offloadingOptions,
+        int? maxDegreeOfParallelism = null,
+        TimeSpan? ackTimeout = null,
+        TimeSpan? inProgressHeartbeatInterval = null,
+        ResiliencePipeline? resiliencePipeline = null,
+        IConsumerHealthMetrics? healthMetrics = null,
+        ITopologyReadySignal? topologyReadySignal = null,
+        IEnumerable<IConsumerMiddleware<T>>? middlewares = null)
+        => new NatsConsumerBackgroundService<T>(
+            consumer,
+            streamName,
+            consumerName,
+            handler,
+            consumeOpts,
+            logger,
+            poisonHandler,
+            serializer,
+            objectStore,
+            offloadingOptions,
+            maxDegreeOfParallelism,
+            ackTimeout,
+            inProgressHeartbeatInterval,
+            resiliencePipeline,
+            healthMetrics,
+            topologyReadySignal,
+            middlewares);
 
     /// <summary>
     /// Factory method for creating message context. Virtual for testability.
@@ -604,6 +639,7 @@ internal class JsMessageContextWrapper<T> : IJsMessageContext<T>, IPostAckLifecy
 {
     private readonly INatsJSMsg<T> _msg;
     private List<Func<CancellationToken, Task>>? _afterAckCallbacks;
+    private bool _acknowledged;
 
     public JsMessageContextWrapper(INatsJSMsg<T> msg)
     {
@@ -624,15 +660,25 @@ internal class JsMessageContextWrapper<T> : IJsMessageContext<T>, IPostAckLifecy
 
     public async Task AckAsync(CancellationToken cancellationToken = default)
     {
+        if (_acknowledged) return;
+        _acknowledged = true;
         await _msg.AckAsync(cancellationToken: cancellationToken);
         await RunAfterAckCallbacksAsync(cancellationToken);
     }
 
-    public async Task NackAsync(TimeSpan? delay = null, CancellationToken cancellationToken = default) =>
+    public async Task NackAsync(TimeSpan? delay = null, CancellationToken cancellationToken = default)
+    {
+        if (_acknowledged) return;
+        _acknowledged = true;
         await _msg.NakAsync(delay: delay ?? TimeSpan.FromSeconds(5), cancellationToken: cancellationToken);
+    }
 
-    public async Task TermAsync(CancellationToken cancellationToken = default) =>
+    public async Task TermAsync(CancellationToken cancellationToken = default)
+    {
+        if (_acknowledged) return;
+        _acknowledged = true;
         await _msg.AckTerminateAsync(cancellationToken: cancellationToken);
+    }
 
     public async Task InProgressAsync(CancellationToken cancellationToken = default) =>
         await _msg.AckProgressAsync(cancellationToken: cancellationToken);
@@ -670,6 +716,7 @@ internal class HydratedMessageContext<T> : IJsMessageContext<T>, IPostAckLifecyc
     private readonly IJsMessageContext<byte[]> _inner;
     private readonly T _message;
     private List<Func<CancellationToken, Task>>? _afterAckCallbacks;
+    private bool _acknowledged;
 
     public HydratedMessageContext(IJsMessageContext<byte[]> inner, T message, string? claimCheckObjectKey = null)
     {
@@ -695,12 +742,25 @@ internal class HydratedMessageContext<T> : IJsMessageContext<T>, IPostAckLifecyc
 
     public async Task AckAsync(CancellationToken cancellationToken = default)
     {
+        if (_acknowledged) return;
+        _acknowledged = true;
         await _inner.AckAsync(cancellationToken);
         await RunAfterAckCallbacksAsync(cancellationToken);
     }
 
-    public Task NackAsync(TimeSpan? delay = null, CancellationToken cancellationToken = default) => _inner.NackAsync(delay, cancellationToken);
-    public Task TermAsync(CancellationToken cancellationToken = default) => _inner.TermAsync(cancellationToken);
+    public async Task NackAsync(TimeSpan? delay = null, CancellationToken cancellationToken = default)
+    {
+        if (_acknowledged) return;
+        _acknowledged = true;
+        await _inner.NackAsync(delay, cancellationToken);
+    }
+
+    public async Task TermAsync(CancellationToken cancellationToken = default)
+    {
+        if (_acknowledged) return;
+        _acknowledged = true;
+        await _inner.TermAsync(cancellationToken);
+    }
     public Task InProgressAsync(CancellationToken cancellationToken = default) => _inner.InProgressAsync(cancellationToken);
     public Task RespondAsync<TResponse>(TResponse response, CancellationToken cancellationToken = default) => _inner.RespondAsync(response, cancellationToken);
 

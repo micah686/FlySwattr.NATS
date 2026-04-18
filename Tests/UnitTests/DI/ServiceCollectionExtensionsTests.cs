@@ -49,10 +49,9 @@ public class ServiceCollectionExtensionsTests
         var hostedServices = sp.GetServices<IHostedService>();
         await Assert.That(hostedServices).IsNotNull();
         // NatsConsumerBackgroundService is only registered when users add specific consumers
-        // DlqAdvisoryListenerService must be added explicitly or we should check if Enterprise adds it (it doesn't appear to)
-        
-        await Assert.That(hostedServices.Any(s => s.GetType().Name == "NatsStartupCheck")).IsTrue();
-        
+        // NatsStartupCheck is opt-in (FailFastOnStartup is false by default, so it should NOT be registered)
+        await Assert.That(hostedServices.Any(s => s.GetType().Name == "NatsStartupCheck")).IsFalse();
+
         await Assert.That(sp.GetService<IConsumerHealthMetrics>()).IsNotNull();
         
         // Assert - Topology

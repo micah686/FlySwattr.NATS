@@ -88,6 +88,9 @@ internal class TopologyProvisioningService : IHostedService
             // Provision auto-infrastructure first (DLQ bucket, payload offloading bucket)
             await ProvisionAutoInfrastructureAsync(hasConsumersWithDlq, cancellationToken);
 
+            // Track provisioning failures - will determine ready signal success/failure
+            var failedResources = new List<Exception>();
+
             // Provision KV buckets from topology sources
             foreach (var bucketSpec in allBuckets)
             {
@@ -99,6 +102,7 @@ internal class TopologyProvisioningService : IHostedService
                 {
                     _logger.LogError(ex, "Failed to provision KV bucket {BucketName}. Continuing with remaining topology.",
                         bucketSpec.Name);
+                    failedResources.Add(ex);
                 }
             }
 
@@ -113,6 +117,7 @@ internal class TopologyProvisioningService : IHostedService
                 {
                     _logger.LogError(ex, "Failed to provision Object Store {BucketName}. Continuing with remaining topology.",
                         objectStoreSpec.Name);
+                    failedResources.Add(ex);
                 }
             }
 
@@ -127,6 +132,7 @@ internal class TopologyProvisioningService : IHostedService
                 {
                     _logger.LogError(ex, "Failed to provision stream {StreamName}. Continuing with remaining topology.",
                         streamSpec.Name);
+                    failedResources.Add(ex);
                     // Continue provisioning other streams - don't fail startup for a single stream failure
                 }
             }
@@ -142,14 +148,21 @@ internal class TopologyProvisioningService : IHostedService
                 {
                     _logger.LogError(ex, "Failed to provision consumer {ConsumerName} on stream {StreamName}. Continuing with remaining topology.",
                         consumerSpec.DurableName, consumerSpec.StreamName);
+                    failedResources.Add(ex);
                     // Continue provisioning other consumers
                 }
             }
 
-            _logger.LogInformation("Topology provisioning completed.");
-
-            // Signal dependent services that topology is ready
-            _readySignal?.SignalReady();
+            if (failedResources.Count > 0)
+            {
+                _logger.LogError("Topology provisioning completed with {FailureCount} failure(s).", failedResources.Count);
+                _readySignal?.SignalFailed(new AggregateException("Topology provisioning partially failed", failedResources));
+            }
+            else
+            {
+                _logger.LogInformation("Topology provisioning completed.");
+                _readySignal?.SignalReady();
+            }
         }
         catch (OperationCanceledException)
         {

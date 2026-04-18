@@ -9,6 +9,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NATS.Client.JetStream;
 using Polly;
+using Polly.Retry;
 
 namespace FlySwattr.NATS.Hosting.Services;
 
@@ -170,16 +171,27 @@ internal class TopologyConsumerHostedService<TSource> : IHostedService
             ? _serviceProvider.GetKeyedService<ResiliencePipeline>(registration.Options.ResiliencePipelineKey)
             : null;
 
+        if (resiliencePipeline == null)
+        {
+            var consumerResilienceOpts = _serviceProvider.GetService<Microsoft.Extensions.Options.IOptions<ConsumerResilienceOptions>>()?.Value;
+            if (consumerResilienceOpts != null)
+                resiliencePipeline = BuildDefaultResiliencePipeline(consumerResilienceOpts);
+        }
+
         // Build middleware
         var middlewares = ResolveMiddlewares(registration.MessageType, _serviceProvider, options);
 
         var workerLogger = _serviceProvider.GetRequiredService(loggerType);
 
         // Note: NatsConsumerBackgroundService<T> is generic and constructed per message type at
-        // runtime. Activator.CreateInstance is used here because the type is only known at runtime.
-        // The constructor is positional; if the signature changes, update this call site to match.
-        var worker = Activator.CreateInstance(
-            workerType,
+        // runtime. The static Create factory is the single point where the constructor signature
+        // is defined; if the factory signature changes, the compiler will enforce updates here.
+        var createMethod = workerType.GetMethod(
+            "Create",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+
+        var worker = createMethod!.Invoke(null, new object?[]
+        {
             consumer,
             spec.StreamName.Value,
             spec.DurableName.Value,
@@ -196,7 +208,8 @@ internal class TopologyConsumerHostedService<TSource> : IHostedService
             resiliencePipeline,
             healthMetrics,
             _readySignal,
-            middlewares);
+            middlewares
+        });
 
         if (worker is IHostedService hostedService)
         {
@@ -255,6 +268,21 @@ internal class TopologyConsumerHostedService<TSource> : IHostedService
         }
 
         return typedArray;
+    }
+
+    private static ResiliencePipeline BuildDefaultResiliencePipeline(ConsumerResilienceOptions opts)
+    {
+        var retryStrategy = new RetryStrategyOptions
+        {
+            ShouldHandle = new PredicateBuilder().Handle<Exception>(),
+            BackoffType = DelayBackoffType.Exponential,
+            MaxRetryAttempts = opts.MaxRetryAttempts,
+            UseJitter = opts.UseJitter,
+        };
+
+        return new ResiliencePipelineBuilder()
+            .AddRetry(retryStrategy)
+            .Build();
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)

@@ -9,6 +9,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NATS.Client.JetStream;
 using Polly;
+using Polly.Retry;
 
 namespace FlySwattr.NATS.Hosting.Services;
 
@@ -69,6 +70,14 @@ internal sealed class ConfiguredNatsConsumerHostedService<TMessage> : IHostedSer
         var resiliencePipeline = _options.ResiliencePipelineKey != null
             ? _serviceProvider.GetKeyedService<ResiliencePipeline>(_options.ResiliencePipelineKey)
             : null;
+
+        if (resiliencePipeline == null)
+        {
+            var consumerResilienceOpts = _serviceProvider.GetService<IOptions<ConsumerResilienceOptions>>()?.Value;
+            if (consumerResilienceOpts != null)
+                resiliencePipeline = BuildDefaultResiliencePipeline(consumerResilienceOpts);
+        }
+
         var healthMetrics = _serviceProvider.GetService<IConsumerHealthMetrics>();
         var topologyReadySignal = _serviceProvider.GetService<ITopologyReadySignal>();
         var middlewares = ServiceCollectionExtensions.ResolveMiddlewares<TMessage>(_serviceProvider, _options);
@@ -121,4 +130,19 @@ internal sealed class ConfiguredNatsConsumerHostedService<TMessage> : IHostedSer
 
     public Task StopAsync(CancellationToken cancellationToken)
         => _worker?.StopAsync(cancellationToken) ?? Task.CompletedTask;
+
+    private static ResiliencePipeline BuildDefaultResiliencePipeline(ConsumerResilienceOptions opts)
+    {
+        var retryStrategy = new RetryStrategyOptions
+        {
+            ShouldHandle = new PredicateBuilder().Handle<Exception>(),
+            BackoffType = DelayBackoffType.Exponential,
+            MaxRetryAttempts = opts.MaxRetryAttempts,
+            UseJitter = opts.UseJitter,
+        };
+
+        return new ResiliencePipelineBuilder()
+            .AddRetry(retryStrategy)
+            .Build();
+    }
 }
