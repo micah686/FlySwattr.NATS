@@ -371,9 +371,16 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
                 $"Claim-check payload '{objectKey}' is too large to hydrate into managed memory safely ({info.Size} bytes).");
         }
 
-        using var pooledStream = new PooledWriteStream((int)info.Size);
-        await _objectStore.GetAsync(objectKey, pooledStream, cancellationToken);
-        return _serializer!.Deserialize<T>(pooledStream.WrittenMemory);
+        var pooledStream = new PooledWriteStream((int)info.Size);
+        try
+        {
+            await _objectStore.GetAsync(objectKey, pooledStream, cancellationToken);
+            return _serializer!.Deserialize<T>(pooledStream.WrittenMemory);
+        }
+        finally
+        {
+            pooledStream.ReturnBuffer();
+        }
     }
 
     private async Task WriteWithBackpressureAsync(
@@ -858,18 +865,24 @@ internal sealed class PooledWriteStream : Stream
         ObjectDisposedException.ThrowIf(_disposed, this);
     }
 
+    // NATS object-store GetAsync disposes the target stream on completion; treat
+    // Dispose as a no-op so WrittenMemory remains readable, and return the rented
+    // buffer only via the explicit ReturnBuffer() call below.
     protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
+    }
+
+    public void ReturnBuffer()
     {
         if (_disposed)
         {
-            base.Dispose(disposing);
             return;
         }
 
         ArrayPool<byte>.Shared.Return(_buffer, clearArray: true);
         _buffer = [];
         _disposed = true;
-        base.Dispose(disposing);
     }
 
     public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
