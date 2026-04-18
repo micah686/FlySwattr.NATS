@@ -299,6 +299,51 @@ public class TopologyConsumerHostedServiceTests
 
     #endregion
 
+    #region Constructor Signature Regression Tests
+
+    /// <summary>
+    /// Regression test: Verifies the TopologyConsumerHostedService constructor signature
+    /// has not drifted. This is critical because StartConsumerAsync uses ActivatorUtilities
+    /// to instantiate NatsConsumerBackgroundService via reflection, and the poison handler
+    /// is created with specific parameter names and order via positional arguments.
+    ///
+    /// If someone changes the constructor signature without updating the activation code,
+    /// this test will catch it immediately.
+    /// </summary>
+    [Test]
+    public void ConstructorSignature_ShouldNotDrift()
+    {
+        // Arrange
+        var constructorInfo = typeof(TopologyConsumerHostedService<TestTopology>)
+            .GetConstructors(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public)
+            .FirstOrDefault();
+
+        // Act & Assert
+        constructorInfo.ShouldNotBeNull("TopologyConsumerHostedService constructor not found");
+
+        var parameters = constructorInfo.GetParameters();
+        parameters.Length.ShouldBe(5, "Constructor should have exactly 5 parameters");
+
+        // Verify parameter names and types in expected order
+        parameters[0].Name.ShouldBe("topologySource");
+        parameters[0].ParameterType.Name.ShouldContain("TestTopology");
+
+        parameters[1].Name.ShouldBe("builder");
+        parameters[1].ParameterType.Name.ShouldContain("TopologyBuilder");
+
+        parameters[2].Name.ShouldBe("serviceProvider");
+        parameters[2].ParameterType.ShouldBe(typeof(IServiceProvider));
+
+        parameters[3].Name.ShouldBe("logger");
+        parameters[3].ParameterType.Name.ShouldContain("ILogger");
+
+        parameters[4].Name.ShouldBe("readySignal");
+        parameters[4].ParameterType.Name.ShouldContain("ITopologyReadySignal");
+        parameters[4].IsOptional.ShouldBeTrue("readySignal parameter should be optional");
+    }
+
+    #endregion
+
     #region Test Types
 
     public class TestTopology : ITopologySource

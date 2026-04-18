@@ -81,7 +81,8 @@ public static class ServiceCollectionExtensions
                 sp.GetRequiredService<ILogger<NatsJetStreamBus>>(),
                 sp.GetRequiredService<IMessageSerializer>(),
                 sp.GetRequiredService<BackgroundTaskManager>(),
-                sp.GetService<IOptions<WireCompatibilityOptions>>());
+                sp.GetService<IOptions<WireCompatibilityOptions>>(),
+                sp.GetService<IOptions<NatsConfiguration>>());
         });
         
         // 4. Stores (Factories returning Core implementations)
@@ -122,7 +123,8 @@ public static class ServiceCollectionExtensions
             sp.GetRequiredService<ILogger<Services.NatsDlqRemediationService>>(),
             sp.GetRequiredService<NatsJetStreamBus>(),
             sp.GetService<IObjectStore>(),
-            sp.GetService<IDlqNotificationService>()
+            sp.GetService<IDlqNotificationService>(),
+            wireOptions: sp.GetService<IOptions<WireCompatibilityOptions>>()
         ));
         return services;
     }

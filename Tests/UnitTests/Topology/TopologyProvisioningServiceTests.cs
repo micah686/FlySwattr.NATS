@@ -149,8 +149,9 @@ public class TopologyProvisioningServiceTests
         // Should have tried both
         await _topologyManager.Received(1).EnsureStreamAsync(badStream, Arg.Any<CancellationToken>());
         await _topologyManager.Received(1).EnsureStreamAsync(goodStream, Arg.Any<CancellationToken>());
-        
-        // Should still signal ready (partial success is allowed)
-        _readySignal.Received(1).SignalReady();
+
+        // Should signal failure due to partial provisioning
+        _readySignal.Received(1).SignalFailed(Arg.Any<AggregateException>());
+        _readySignal.DidNotReceive().SignalReady();
     }
 }

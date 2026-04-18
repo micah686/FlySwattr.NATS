@@ -69,15 +69,27 @@ public class HybridNatsSerializer : IMessageSerializer
 
     public T Deserialize<T>(ReadOnlyMemory<byte> data)
     {
+        // Enforce the inbound size cap before we hand bytes to MemoryPack / JSON so an attacker
+        // cannot force unbounded allocations by publishing an oversized (or oversized-envelope)
+        // payload. The check covers the raw wire size; the envelope serializer also validates
+        // the inner Payload length below for the MemoryPack path.
+        if (data.Length > _maxPayloadSize)
+        {
+            throw new InvalidOperationException(
+                $"Inbound payload is {data.Length} bytes which exceeds the configured MaxPayloadSize of {_maxPayloadSize} bytes.");
+        }
+
         if (MemoryPackSchemaMetadata.IsMemoryPackable<T>())
         {
             try
             {
-                // Fast path: MemoryPack using instance serializer with configured enforcement
-                return _envelopeSerializer.Deserialize<T>(data.Span, _memoryPackOptions)
+                // Fast path: MemoryPack using instance serializer with configured enforcement.
+                // The envelope serializer enforces the same cap on the inner Payload field so an
+                // attacker can't smuggle a huge byte[] inside a small wire message.
+                return _envelopeSerializer.Deserialize<T>(data.Span, _maxPayloadSize, _memoryPackOptions)
                        ?? throw new MemoryPackSerializationException($"MemoryPack deserialization returned null for type {typeof(T).Name}");
             }
-            catch (Exception ex) when (ex is not MemoryPackSerializationException)
+            catch (Exception ex) when (ex is not MemoryPackSerializationException and not InvalidOperationException)
             {
                  throw new MemoryPackSerializationException($"Failed to deserialize {typeof(T).Name} with MemoryPack", ex);
             }

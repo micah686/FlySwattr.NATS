@@ -1,5 +1,7 @@
 using FlySwattr.NATS.Abstractions;
+using FlySwattr.NATS.Core.Configuration;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace FlySwattr.NATS.Core.Services;
 
@@ -12,22 +14,10 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
     private const string ContentTypeHeader = "Content-Type";
     private const string MessageIdHeader = "Nats-Msg-Id";
 
-    /// <summary>
-    /// Headers that are transport-generated or protocol-level and must be stripped on replay.
-    /// Replaying these causes modified replays to hit reserved-header rejection and raw replays
-    /// of previously offloaded messages to hydrate stale object-store payloads.
-    /// </summary>
-    private static readonly HashSet<string> ReplayBlockedHeaders = new(StringComparer.OrdinalIgnoreCase)
-    {
-        MessageIdHeader,
-        ContentTypeHeader,
-        "traceparent",
-        "tracestate",
-        "X-ClaimCheck-Ref",
-        "X-ClaimCheck-Type",
-        "X-FlySwattr-Version",
-        "X-FlySwattr-SchemaHash"
-    };
+    private const string DefaultVersionHeaderName = "X-FlySwattr-Version";
+    private const string SchemaHashHeaderName = "X-FlySwattr-SchemaHash";
+    private const string ClaimCheckRefHeaderName = "X-ClaimCheck-Ref";
+    private const string ClaimCheckTypeHeaderName = "X-ClaimCheck-Type";
 
     private readonly IDlqStore _dlqStore;
     private readonly IJetStreamPublisher _publisher;
@@ -39,6 +29,14 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
     private readonly IDlqAuditService? _auditService;
     private readonly ILogger<NatsDlqRemediationService> _logger;
 
+    /// <summary>
+    /// Headers that are transport-generated or protocol-level and must be stripped on replay.
+    /// Replaying these causes modified replays to hit reserved-header rejection and raw replays
+    /// of previously offloaded messages to hydrate stale object-store payloads. Built in the
+    /// constructor so <see cref="WireCompatibilityOptions.VersionHeaderName"/> overrides are honored.
+    /// </summary>
+    private readonly HashSet<string> _replayBlockedHeaders;
+
     public NatsDlqRemediationService(
         IDlqStore dlqStore,
         IJetStreamPublisher publisher,
@@ -47,7 +45,8 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
         ILogger<NatsDlqRemediationService> logger,
         IObjectStore? objectStore = null,
         IDlqNotificationService? notificationService = null,
-        IDlqAuditService? auditService = null)
+        IDlqAuditService? auditService = null,
+        IOptions<WireCompatibilityOptions>? wireOptions = null)
     {
         _dlqStore = dlqStore ?? throw new ArgumentNullException(nameof(dlqStore));
         _publisher = publisher ?? throw new ArgumentNullException(nameof(publisher));
@@ -57,6 +56,7 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
         _objectStore = objectStore;
         _notificationService = notificationService;
         _auditService = auditService;
+        _replayBlockedHeaders = BuildReplayBlockedHeaders(wireOptions?.Value);
     }
 
     internal NatsDlqRemediationService(
@@ -68,7 +68,8 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
         IRawJetStreamPublisher rawPublisher,
         IObjectStore? objectStore,
         IDlqNotificationService? notificationService,
-        IDlqAuditService? auditService = null)
+        IDlqAuditService? auditService = null,
+        IOptions<WireCompatibilityOptions>? wireOptions = null)
     {
         _dlqStore = dlqStore ?? throw new ArgumentNullException(nameof(dlqStore));
         _publisher = publisher ?? throw new ArgumentNullException(nameof(publisher));
@@ -79,6 +80,26 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
         _objectStore = objectStore;
         _notificationService = notificationService;
         _auditService = auditService;
+        _replayBlockedHeaders = BuildReplayBlockedHeaders(wireOptions?.Value);
+    }
+
+    private static HashSet<string> BuildReplayBlockedHeaders(WireCompatibilityOptions? wireOptions)
+    {
+        var versionHeader = string.IsNullOrWhiteSpace(wireOptions?.VersionHeaderName)
+            ? DefaultVersionHeaderName
+            : wireOptions!.VersionHeaderName;
+
+        return new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            MessageIdHeader,
+            ContentTypeHeader,
+            "traceparent",
+            "tracestate",
+            ClaimCheckRefHeaderName,
+            ClaimCheckTypeHeaderName,
+            versionHeader,
+            SchemaHashHeaderName,
+        };
     }
 
     /// <inheritdoc />
@@ -503,7 +524,7 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
             ?? throw new InvalidOperationException("Unable to invoke typed replay publish."));
     }
 
-    private static MessageHeaders? CreateReplayHeaders(DlqMessageEntry entry)
+    private MessageHeaders? CreateReplayHeaders(DlqMessageEntry entry)
     {
         if (entry.OriginalHeaders == null || entry.OriginalHeaders.Count == 0)
         {
@@ -514,7 +535,7 @@ internal partial class NatsDlqRemediationService : IDlqRemediationService
         // claim-check, trace, schema, and protocol-version headers so they get
         // regenerated by the publish pipeline on replay.
         var headers = entry.OriginalHeaders
-            .Where(kvp => !ReplayBlockedHeaders.Contains(kvp.Key))
+            .Where(kvp => !_replayBlockedHeaders.Contains(kvp.Key))
             .ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
 
         return headers.Count == 0 ? null : new MessageHeaders(headers);

@@ -17,7 +17,8 @@ namespace FlySwattr.NATS.Resilience.Decorators;
 internal class ResilientJetStreamPublisher : IJetStreamPublisher
 {
     private readonly IJetStreamPublisher _inner;
-    private readonly ResiliencePipeline _compositePipeline;
+    private readonly ResiliencePipeline _globalPipeline;
+    private readonly HierarchicalResilienceBuilder _resilienceBuilder;
     private readonly ILogger<ResilientJetStreamPublisher> _logger;
 
     /// <summary>
@@ -35,11 +36,11 @@ internal class ResilientJetStreamPublisher : IJetStreamPublisher
     {
         _inner = inner;
         _logger = logger;
+        _resilienceBuilder = resilienceBuilder;
 
-        // Build the global publisher pipeline with retry and circuit breaker
-        // Note: Hedging requires a typed ResiliencePipelineBuilder<T> and is better suited for idempotent operations
-        // For publish operations, we use retry with circuit breaker protection
-        var globalPipeline = new ResiliencePipelineBuilder()
+        // Build the global publisher pipeline with retry and circuit breaker.
+        // Each subject prefix gets its own composite pipeline (via _resilienceBuilder) layered on top of this global one.
+        _globalPipeline = new ResiliencePipelineBuilder()
             .AddCircuitBreaker(new CircuitBreakerStrategyOptions
             {
                 Name = "Publisher_Global",
@@ -67,18 +68,17 @@ internal class ResilientJetStreamPublisher : IJetStreamPublisher
                 ShouldHandle = new PredicateBuilder().Handle<Exception>(ex => IsTransient(ex))
             })
             .Build();
-
-        // Get the composite pipeline from the builder (adds publisher-level circuit breaker)
-        _compositePipeline = resilienceBuilder.GetPipeline("publisher:global", globalPipeline);
     }
 
     public async Task PublishAsync<T>(string subject, T message, string? messageId, MessageHeaders? headers = null, CancellationToken cancellationToken = default)
     {
-        // Pass the messageId through - the inner publisher will validate and enforce the requirement.
+        // Use a per-subject-prefix pipeline so a failing subject cannot trip the circuit breaker
+        // for unrelated subjects. The prefix (first dot-segment) groups subjects by logical stream root.
         // This is critical: the retry pipeline MUST use the same messageId for all attempts
         // to leverage JetStream's deduplication. Generating a new ID per retry would defeat
         // the entire purpose of both retries AND idempotency.
-        await _compositePipeline.ExecuteAsync(async ct =>
+        var pipeline = _resilienceBuilder.GetPipeline($"publisher:{ExtractPrefix(subject)}", _globalPipeline);
+        await pipeline.ExecuteAsync(async ct =>
         {
             await _inner.PublishAsync(subject, message, messageId, headers, ct);
         }, cancellationToken);
@@ -88,13 +88,21 @@ internal class ResilientJetStreamPublisher : IJetStreamPublisher
         IReadOnlyList<BatchMessage<T>> messages,
         CancellationToken cancellationToken = default)
     {
-        // Wrap the entire batch in a single resilience execution.
+        // Wrap the entire batch in a single resilience execution under a shared "batch" key.
         // Partial retry of individual messages within a batch is complex and
         // risks duplicate publishes; the caller should retry the full batch.
-        await _compositePipeline.ExecuteAsync(async ct =>
+        var pipeline = _resilienceBuilder.GetPipeline("publisher:batch", _globalPipeline);
+        await pipeline.ExecuteAsync(async ct =>
         {
             await _inner.PublishBatchAsync(messages, ct);
         }, cancellationToken);
+    }
+
+    private static string ExtractPrefix(string subject)
+    {
+        if (string.IsNullOrEmpty(subject)) return "unknown";
+        var dot = subject.IndexOf('.');
+        return dot < 0 ? subject : subject[..dot];
     }
 
     private static bool IsOperationCanceled(Exception ex) => ex is OperationCanceledException;

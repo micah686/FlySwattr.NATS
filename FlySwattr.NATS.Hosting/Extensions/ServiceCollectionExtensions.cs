@@ -21,7 +21,8 @@ public static class ServiceCollectionExtensions
 {
     public static IServiceCollection AddFlySwattrNatsHosting(
         this IServiceCollection services,
-        Action<NatsConsumerHealthCheckOptions>? configureHealthCheck = null)
+        Action<NatsConsumerHealthCheckOptions>? configureHealthCheck = null,
+        bool failFastOnStartup = false)
     {
         // Register consumer health metrics singleton for zombie detection
         services.AddSingleton<IConsumerHealthMetrics, NatsConsumerHealthMetrics>();
@@ -37,8 +38,11 @@ public static class ServiceCollectionExtensions
             .AddCheck<NatsHealthCheck>("nats_health")
             .AddCheck<NatsConsumerHealthCheck>("nats_consumer_health");
 
-        // Startup Check
-        services.AddHostedService<NatsStartupCheck>();
+        // Startup Check (conditional - opt-in for hard fail on startup)
+        if (failFastOnStartup)
+        {
+            services.AddHostedService<NatsStartupCheck>();
+        }
 
         return services;
     }

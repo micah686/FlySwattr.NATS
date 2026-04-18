@@ -28,6 +28,12 @@ public static class ServiceCollectionExtensions
     ///   <item>Per-Consumer Semaphore: Optional limits to prevent high-volume consumers from monopolizing resources</item>
     /// </list>
     /// </para>
+    /// <para>
+    /// <strong>Scope:</strong> This decoration applies only to the direct <c>IJetStreamConsumer</c> API (push-consumer path).
+    /// The hosted consumer runtime from <c>AddNatsConsumer</c> or <c>AddNatsTopologyWithConsumers</c> is <strong>not</strong>
+    /// affected. Hosted consumers obtain their resilience (retry, circuit-breaker, timeout) via <see cref="ConsumerResilienceOptions"/>,
+    /// which is configured per-consumer during registration.
+    /// </para>
     /// </remarks>
     public static IServiceCollection AddFlySwattrNatsResilience(
         this IServiceCollection services, 

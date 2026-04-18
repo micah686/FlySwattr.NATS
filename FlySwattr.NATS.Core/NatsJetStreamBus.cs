@@ -66,6 +66,7 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
     private readonly IMessageSerializer _serializer;
     private readonly BackgroundTaskManager _backgroundTaskManager;
     private readonly WireCompatibilityOptions _wireOptions;
+    private readonly int _batchPublishMaxConcurrency;
     private int _disposed;
 
     public NatsJetStreamBus(
@@ -87,13 +88,15 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
         ILogger<NatsJetStreamBus> logger,
         IMessageSerializer serializer,
         BackgroundTaskManager backgroundTaskManager,
-        IOptions<WireCompatibilityOptions>? wireOptions = null)
+        IOptions<WireCompatibilityOptions>? wireOptions = null,
+        IOptions<NatsConfiguration>? natsOptions = null)
     {
         _jsContext = jsContext;
         _logger = logger;
         _serializer = serializer;
         _backgroundTaskManager = backgroundTaskManager;
         _wireOptions = wireOptions?.Value ?? new WireCompatibilityOptions();
+        _batchPublishMaxConcurrency = natsOptions?.Value.BatchPublishMaxConcurrency ?? 32;
 
         // Build reserved header lists including the version header
         _reservedPublishHeaders =
@@ -192,12 +195,29 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
             }
         }
 
-        // Publish all concurrently
+        // Publish concurrently, bounded by BatchPublishMaxConcurrency
+        var sem = _batchPublishMaxConcurrency > 0
+            ? new SemaphoreSlim(_batchPublishMaxConcurrency)
+            : null;
         var tasks = new Task[messages.Count];
         for (var i = 0; i < messages.Count; i++)
         {
             var msg = messages[i];
-            tasks[i] = PublishAsync(msg.Subject, msg.Message, msg.MessageId, msg.Headers, cancellationToken);
+            if (sem != null)
+            {
+                tasks[i] = PublishThrottledAsync(msg, sem, cancellationToken);
+            }
+            else
+            {
+                tasks[i] = PublishAsync(msg.Subject, msg.Message, msg.MessageId, msg.Headers, cancellationToken);
+            }
+        }
+
+        async Task PublishThrottledAsync(BatchMessage<T> bm, SemaphoreSlim s, CancellationToken ct)
+        {
+            await s.WaitAsync(ct);
+            try { await PublishAsync(bm.Subject, bm.Message, bm.MessageId, bm.Headers, ct); }
+            finally { s.Release(); }
         }
 
         // Collect failures
@@ -403,15 +423,16 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
                 consumer = await _jsContext.CreateOrUpdateConsumerAsync(stream.Value, config, cancellationToken);
             }
 
-            var effectiveParallelism = opts.MaxDegreeOfParallelism ?? 10;
+            var batchSize = opts.BatchSize > 0 ? opts.BatchSize : (opts.MaxDegreeOfParallelism ?? 10);
             var service = new BasicNatsConsumerService<T>(
                 consumer,
                 stream.Value,
                 consumerName ?? consumer.Info?.Name ?? "unknown_consumer",
                 handler,
                 _logger,
-                effectiveParallelism,
-                deserializer);
+                batchSize,
+                deserializer,
+                opts.MaxConcurrency);
 
             await StartBackgroundConsumerAsync(service, cancellationToken);
         }
@@ -440,15 +461,16 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
         try
         {
             var jsConsumer = await _jsContext.GetConsumerAsync(stream.Value, consumer.Value, cancellationToken);
-            var effectiveParallelism = opts.MaxDegreeOfParallelism ?? 10;
+            var batchSize = opts.BatchSize > 0 ? opts.BatchSize : (opts.MaxDegreeOfParallelism ?? 10);
             var service = new BasicNatsConsumerService<T>(
                 jsConsumer,
                 stream.Value,
                 consumer.Value,
                 handler,
                 _logger,
-                effectiveParallelism,
-                deserializer);
+                batchSize,
+                deserializer,
+                opts.MaxConcurrency);
 
             await StartBackgroundConsumerAsync(service, cancellationToken);
         }
@@ -510,6 +532,7 @@ internal class BasicNatsConsumerService<T> : BackgroundService
     private readonly Func<IJsMessageContext<T>, Task> _handler;
     private readonly ILogger _logger;
     private readonly int _maxMsgs;
+    private readonly int? _maxConcurrency;
     private readonly INatsDeserialize<T>? _deserializer;
 
     public BasicNatsConsumerService(
@@ -519,7 +542,8 @@ internal class BasicNatsConsumerService<T> : BackgroundService
         Func<IJsMessageContext<T>, Task> handler,
         ILogger logger,
         int maxMsgs,
-        INatsDeserialize<T>? deserializer = null)
+        INatsDeserialize<T>? deserializer = null,
+        int? maxConcurrency = null)
     {
         _consumer = consumer;
         _stream = stream;
@@ -527,11 +551,14 @@ internal class BasicNatsConsumerService<T> : BackgroundService
         _handler = handler;
         _logger = logger;
         _maxMsgs = maxMsgs;
+        _maxConcurrency = maxConcurrency;
         _deserializer = deserializer;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        var concurrencySemaphore = _maxConcurrency.HasValue ? new SemaphoreSlim(_maxConcurrency.Value) : null;
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -548,14 +575,20 @@ internal class BasicNatsConsumerService<T> : BackgroundService
 
                 await foreach (var msg in messages)
                 {
+                    // Acquire permit from concurrency semaphore if configured
+                    if (concurrencySemaphore != null)
+                    {
+                        await concurrencySemaphore.WaitAsync(stoppingToken);
+                    }
+
                     var handlerStopwatch = Stopwatch.StartNew();
-                    var tags = new TagList 
-                    { 
+                    var tags = new TagList
+                    {
                         { NatsTelemetry.MessagingDestinationName, _stream },
                         { NatsTelemetry.NatsStream, _stream },
                         { NatsTelemetry.NatsConsumer, _consumerName }
                     };
-                    
+
                     try
                     {
                         var parentContext = NatsTelemetry.ExtractTraceContext(msg.Headers);
@@ -573,28 +606,42 @@ internal class BasicNatsConsumerService<T> : BackgroundService
 
                         var context = new JsMessageContext<T>(msg);
                         await _handler(context);
-                        
+
                         // Record success metrics
                         NatsTelemetry.MessagesReceived.Add(1, tags);
                     }
                     catch (Exception ex)
                     {
                         _logger.LogError(ex, "Error processing message from {Stream}/{Consumer}", _stream, _consumerName);
-                        
+
                         // Record failure metrics
-                        var errorTags = new TagList 
-                        { 
+                        var errorTags = new TagList
+                        {
                             { NatsTelemetry.MessagingDestinationName, _stream },
                             { NatsTelemetry.NatsStream, _stream },
                             { NatsTelemetry.NatsConsumer, _consumerName },
                             { "error.type", ex.GetType().Name }
                         };
                         NatsTelemetry.MessagesFailed.Add(1, errorTags);
+
+                        // Nak so the server redelivers instead of waiting for the ack-wait timeout.
+                        // Best-effort — swallow nak failures so they can't knock the consumer loop down.
+                        try
+                        {
+                            await msg.NakAsync(delay: TimeSpan.FromSeconds(5), cancellationToken: stoppingToken);
+                        }
+                        catch (Exception nakEx)
+                        {
+                            _logger.LogWarning(nakEx, "Failed to NAK message from {Stream}/{Consumer} after handler exception", _stream, _consumerName);
+                        }
                     }
                     finally
                     {
                         handlerStopwatch.Stop();
                         NatsTelemetry.MessageProcessingDuration.Record(handlerStopwatch.Elapsed.TotalMilliseconds, tags);
+
+                        // Release permit if using concurrency control
+                        concurrencySemaphore?.Release();
                     }
                 }
             }

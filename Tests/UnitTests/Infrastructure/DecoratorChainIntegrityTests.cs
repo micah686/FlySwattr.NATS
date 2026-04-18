@@ -157,6 +157,33 @@ public class DecoratorChainIntegrityTests
         consumer.ShouldBeOfType<NatsJetStreamBus>();
     }
 
+    /// <summary>
+    /// Negative-path test: Verifies that registering resilience before offloading throws.
+    /// This ensures the decorator ordering validation catches incorrect registration sequences.
+    /// </summary>
+    [Test]
+    public void DecoratorOrdering_ShouldThrow_WhenResilienceRegisteredBeforeOffloading()
+    {
+        // Act & Assert - should throw InvalidOperationException
+        Should.Throw<InvalidOperationException>(() =>
+        {
+            var services = new ServiceCollection();
+            services.AddLogging(builder => builder.AddConsole());
+
+            services.AddFlySwattrNatsCore(config =>
+            {
+                config.Url = "nats://localhost:4222";
+            });
+
+            // Intentionally register resilience BEFORE offloading (wrong order)
+            services.AddFlySwattrNatsResilience();
+            services.AddPayloadOffloading();
+
+            var provider = services.BuildServiceProvider();
+            _ = provider.GetRequiredService<IJetStreamConsumer>();
+        });
+    }
+
     private static T? GetInnerField<T>(object obj, string fieldName) where T : class
     {
         var field = obj.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic);

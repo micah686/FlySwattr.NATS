@@ -81,7 +81,10 @@ internal class OffloadingJetStreamConsumer : IJetStreamConsumer
         string claimCheckRef,
         CancellationToken cancellationToken)
     {
-        var objectKey = ExtractObjectKey(claimCheckRef);
+        var objectKey = MessageSecurity.ValidateClaimCheckReference(
+            claimCheckRef,
+            _options.ObjectKeyPrefix,
+            nameof(claimCheckRef));
         _logger.LogDebug("Resolving claim check from header: {ObjectKey}", objectKey);
         var payload = await DownloadPayloadAsync(objectKey, cancellationToken);
         var message = _serializer.Deserialize<T>(payload);
@@ -93,15 +96,6 @@ internal class OffloadingJetStreamConsumer : IJetStreamConsumer
         using var memoryStream = new MemoryStream();
         await _objectStore.GetAsync(objectKey, memoryStream, cancellationToken);
         return memoryStream.ToArray();
-    }
-
-    private static string ExtractObjectKey(string reference)
-    {
-        const string prefix = "objstore://";
-        var objectKey = reference.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
-            ? reference[prefix.Length..]
-            : reference;
-        return MessageSecurity.ValidateObjectStoreKey(objectKey, nameof(reference));
     }
 }
 

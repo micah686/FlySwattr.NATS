@@ -75,7 +75,7 @@ public partial class ClaimCheckFailureTests
             ThresholdBytes = 100, // Very small threshold to force offloading
             ObjectKeyPrefix = "claimcheck"
         };
-        var typeAliasRegistry = new MessageTypeAliasRegistry(Options.Create(new MessageTypeAliasOptions()));
+        var typeAliasRegistry = new MessageTypeAliasRegistry(Options.Create(new MessageTypeAliasOptions { RequireExplicitAliases = false }));
 
         var publisher = new OffloadingJetStreamPublisher(
             innerBus, objectStore, serializer, typeAliasRegistry,

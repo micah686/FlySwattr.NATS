@@ -4,7 +4,6 @@ using System.Buffers;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core.Configuration;
 using FlySwattr.NATS.Abstractions.Exceptions;
-using FlySwattr.NATS.Core.Decorators;
 using FlySwattr.NATS.Core.Services;
 using FlySwattr.NATS.Core.Telemetry;
 using FlySwattr.NATS.Hosting.Health;
@@ -138,7 +137,42 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
         }
     }
 
-
+    internal static NatsConsumerBackgroundService<T> Create(
+        INatsJSConsumer consumer,
+        string streamName,
+        string consumerName,
+        Func<IJsMessageContext<T>, Task> handler,
+        NatsJSConsumeOpts consumeOpts,
+        ILogger logger,
+        IPoisonMessageHandler<T> poisonHandler,
+        IMessageSerializer? serializer,
+        IObjectStore? objectStore,
+        PayloadOffloadingOptions? offloadingOptions,
+        int? maxDegreeOfParallelism = null,
+        TimeSpan? ackTimeout = null,
+        TimeSpan? inProgressHeartbeatInterval = null,
+        ResiliencePipeline? resiliencePipeline = null,
+        IConsumerHealthMetrics? healthMetrics = null,
+        ITopologyReadySignal? topologyReadySignal = null,
+        IEnumerable<IConsumerMiddleware<T>>? middlewares = null)
+        => new NatsConsumerBackgroundService<T>(
+            consumer,
+            streamName,
+            consumerName,
+            handler,
+            consumeOpts,
+            logger,
+            poisonHandler,
+            serializer,
+            objectStore,
+            offloadingOptions,
+            maxDegreeOfParallelism,
+            ackTimeout,
+            inProgressHeartbeatInterval,
+            resiliencePipeline,
+            healthMetrics,
+            topologyReadySignal,
+            middlewares);
 
     /// <summary>
     /// Factory method for creating message context. Virtual for testability.
@@ -300,13 +334,12 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
         return new HydratedMessageContext<T>(rawContext, _serializer!.Deserialize<T>(rawContext.Message));
     }
 
-    private static string ExtractAndValidateObjectKey(string claimCheckRef)
+    private string ExtractAndValidateObjectKey(string claimCheckRef)
     {
-        const string prefix = "objstore://";
-        var objectKey = claimCheckRef.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
-            ? claimCheckRef[prefix.Length..]
-            : claimCheckRef;
-        return MessageSecurity.ValidateObjectStoreKey(objectKey, nameof(claimCheckRef));
+        return MessageSecurity.ValidateClaimCheckReference(
+            claimCheckRef,
+            _offloadingOptions?.ObjectKeyPrefix,
+            nameof(claimCheckRef));
     }
 
     private async Task<T> DeserializeClaimCheckAsync(string objectKey, CancellationToken cancellationToken)
@@ -337,9 +370,16 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
                 $"Claim-check payload '{objectKey}' is too large to hydrate into managed memory safely ({info.Size} bytes).");
         }
 
-        using var pooledStream = new PooledWriteStream((int)info.Size);
-        await _objectStore.GetAsync(objectKey, pooledStream, cancellationToken);
-        return _serializer!.Deserialize<T>(pooledStream.WrittenMemory);
+        var pooledStream = new PooledWriteStream((int)info.Size);
+        try
+        {
+            await _objectStore.GetAsync(objectKey, pooledStream, cancellationToken);
+            return _serializer!.Deserialize<T>(pooledStream.WrittenMemory);
+        }
+        finally
+        {
+            pooledStream.ReturnBuffer();
+        }
     }
 
     private async Task WriteWithBackpressureAsync(
@@ -604,6 +644,7 @@ internal class JsMessageContextWrapper<T> : IJsMessageContext<T>, IPostAckLifecy
 {
     private readonly INatsJSMsg<T> _msg;
     private List<Func<CancellationToken, Task>>? _afterAckCallbacks;
+    private bool _acknowledged;
 
     public JsMessageContextWrapper(INatsJSMsg<T> msg)
     {
@@ -624,15 +665,25 @@ internal class JsMessageContextWrapper<T> : IJsMessageContext<T>, IPostAckLifecy
 
     public async Task AckAsync(CancellationToken cancellationToken = default)
     {
+        if (_acknowledged) return;
+        _acknowledged = true;
         await _msg.AckAsync(cancellationToken: cancellationToken);
         await RunAfterAckCallbacksAsync(cancellationToken);
     }
 
-    public async Task NackAsync(TimeSpan? delay = null, CancellationToken cancellationToken = default) =>
+    public async Task NackAsync(TimeSpan? delay = null, CancellationToken cancellationToken = default)
+    {
+        if (_acknowledged) return;
+        _acknowledged = true;
         await _msg.NakAsync(delay: delay ?? TimeSpan.FromSeconds(5), cancellationToken: cancellationToken);
+    }
 
-    public async Task TermAsync(CancellationToken cancellationToken = default) =>
+    public async Task TermAsync(CancellationToken cancellationToken = default)
+    {
+        if (_acknowledged) return;
+        _acknowledged = true;
         await _msg.AckTerminateAsync(cancellationToken: cancellationToken);
+    }
 
     public async Task InProgressAsync(CancellationToken cancellationToken = default) =>
         await _msg.AckProgressAsync(cancellationToken: cancellationToken);
@@ -670,6 +721,7 @@ internal class HydratedMessageContext<T> : IJsMessageContext<T>, IPostAckLifecyc
     private readonly IJsMessageContext<byte[]> _inner;
     private readonly T _message;
     private List<Func<CancellationToken, Task>>? _afterAckCallbacks;
+    private bool _acknowledged;
 
     public HydratedMessageContext(IJsMessageContext<byte[]> inner, T message, string? claimCheckObjectKey = null)
     {
@@ -695,12 +747,25 @@ internal class HydratedMessageContext<T> : IJsMessageContext<T>, IPostAckLifecyc
 
     public async Task AckAsync(CancellationToken cancellationToken = default)
     {
+        if (_acknowledged) return;
+        _acknowledged = true;
         await _inner.AckAsync(cancellationToken);
         await RunAfterAckCallbacksAsync(cancellationToken);
     }
 
-    public Task NackAsync(TimeSpan? delay = null, CancellationToken cancellationToken = default) => _inner.NackAsync(delay, cancellationToken);
-    public Task TermAsync(CancellationToken cancellationToken = default) => _inner.TermAsync(cancellationToken);
+    public async Task NackAsync(TimeSpan? delay = null, CancellationToken cancellationToken = default)
+    {
+        if (_acknowledged) return;
+        _acknowledged = true;
+        await _inner.NackAsync(delay, cancellationToken);
+    }
+
+    public async Task TermAsync(CancellationToken cancellationToken = default)
+    {
+        if (_acknowledged) return;
+        _acknowledged = true;
+        await _inner.TermAsync(cancellationToken);
+    }
     public Task InProgressAsync(CancellationToken cancellationToken = default) => _inner.InProgressAsync(cancellationToken);
     public Task RespondAsync<TResponse>(TResponse response, CancellationToken cancellationToken = default) => _inner.RespondAsync(response, cancellationToken);
 
@@ -799,18 +864,24 @@ internal sealed class PooledWriteStream : Stream
         ObjectDisposedException.ThrowIf(_disposed, this);
     }
 
+    // NATS object-store GetAsync disposes the target stream on completion; treat
+    // Dispose as a no-op so WrittenMemory remains readable, and return the rented
+    // buffer only via the explicit ReturnBuffer() call below.
     protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
+    }
+
+    public void ReturnBuffer()
     {
         if (_disposed)
         {
-            base.Dispose(disposing);
             return;
         }
 
         ArrayPool<byte>.Shared.Return(_buffer, clearArray: true);
         _buffer = [];
         _disposed = true;
-        base.Dispose(disposing);
     }
 
     public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();

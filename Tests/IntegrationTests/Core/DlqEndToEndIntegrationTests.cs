@@ -107,7 +107,7 @@ public partial class DlqEndToEndIntegrationTests
         var dlqStore = new NatsDlqStore(kv, new ConsoleLogger<NatsDlqStore>());
 
         // Poison handler
-        var typeAliasRegistry = new MessageTypeAliasRegistry(Microsoft.Extensions.Options.Options.Create(new MessageTypeAliasOptions()));
+        var typeAliasRegistry = new MessageTypeAliasRegistry(Microsoft.Extensions.Options.Options.Create(new MessageTypeAliasOptions { RequireExplicitAliases = false }));
         typeAliasRegistry.Register<OrderEvent>(nameof(OrderEvent));
         var poisonHandler = new DefaultDlqPoisonHandler<OrderEvent>(
             bus,
@@ -308,7 +308,7 @@ public partial class DlqEndToEndIntegrationTests
         await using var bus = new NatsJetStreamBus(js, new ConsoleLogger<NatsJetStreamBus>(), serializer);
 
         var dlqStore = new NatsDlqStore(kv, new ConsoleLogger<NatsDlqStore>());
-        var typeAliasRegistry = new MessageTypeAliasRegistry(Microsoft.Extensions.Options.Options.Create(new MessageTypeAliasOptions()));
+        var typeAliasRegistry = new MessageTypeAliasRegistry(Microsoft.Extensions.Options.Options.Create(new MessageTypeAliasOptions { RequireExplicitAliases = false }));
         typeAliasRegistry.Register<OrderEvent>(nameof(OrderEvent));
 
         var remediationService = new NatsDlqRemediationService(
@@ -388,7 +388,7 @@ public partial class DlqEndToEndIntegrationTests
         await using var bus = new NatsJetStreamBus(js, new ConsoleLogger<NatsJetStreamBus>(), serializer);
 
         var dlqStore = new NatsDlqStore(kv, new ConsoleLogger<NatsDlqStore>());
-        var typeAliasRegistry = new MessageTypeAliasRegistry(Microsoft.Extensions.Options.Options.Create(new MessageTypeAliasOptions()));
+        var typeAliasRegistry = new MessageTypeAliasRegistry(Microsoft.Extensions.Options.Options.Create(new MessageTypeAliasOptions { RequireExplicitAliases = false }));
 
         var remediationService = new NatsDlqRemediationService(
             dlqStore,
@@ -437,4 +437,135 @@ public partial class DlqEndToEndIntegrationTests
     }
 
     public class ConsoleLogger<T> : ConsoleLogger, ILogger<T> { }
+
+    /// <summary>
+    /// Test DLQ flow without manual bridge: DefaultDlqPoisonHandler with injected IDlqStore
+    /// automatically persists to KV, no need for separate bridge consumer.
+    /// </summary>
+    [Test]
+    public async Task DlqFlow_WithInjectedDlqStore_AutoPersistsWithoutManualBridge()
+    {
+        // Arrange
+        await using var fixture = new NatsContainerFixture();
+        await fixture.InitializeAsync();
+
+        var opts = new NatsOpts
+        {
+            Url = fixture.ConnectionString,
+            SerializerRegistry = HybridSerializerRegistry.Default
+        };
+        await using var conn = new NatsConnection(opts);
+        await conn.ConnectAsync();
+
+        var js = new NatsJSContext(conn);
+        var kv = new NatsKVContext(js);
+
+        var streamName = "ORDERS_AUTO_DLQ_TEST";
+        var subject = "orders.auto.dlq.test";
+        await js.CreateStreamAsync(new StreamConfig(streamName, [subject])
+        {
+            Storage = StreamConfigStorage.Memory
+        });
+
+        var dlqStreamName = "DLQ_ORDERS_AUTO";
+        var dlqSubject = "dlq.orders.auto";
+        await js.CreateStreamAsync(new StreamConfig(dlqStreamName, [dlqSubject])
+        {
+            Storage = StreamConfigStorage.Memory
+        });
+
+        var consumerName = "orders-processor-auto";
+        var maxDeliver = 2;
+        var consumer = await js.CreateOrUpdateConsumerAsync(streamName, new ConsumerConfig(consumerName)
+        {
+            DurableName = consumerName,
+            AckPolicy = ConsumerConfigAckPolicy.Explicit,
+            AckWait = TimeSpan.FromMilliseconds(500),
+            MaxDeliver = maxDeliver
+        });
+
+        // Create KV bucket
+        await kv.CreateStoreAsync(new NatsKVConfig("fs-dlq-entries")
+        {
+            Storage = NatsKVStorageType.Memory
+        });
+
+        var serializer = new HybridNatsSerializer();
+        await using var bus = new NatsJetStreamBus(js, new ConsoleLogger<NatsJetStreamBus>(), serializer);
+
+        var dlqPolicyRegistry = new DlqPolicyRegistry(new ConsoleLogger<DlqPolicyRegistry>());
+        var dlqPolicy = new DeadLetterPolicy
+        {
+            SourceStream = streamName,
+            SourceConsumer = consumerName,
+            TargetStream = StreamName.From(dlqStreamName),
+            TargetSubject = dlqSubject
+        };
+        dlqPolicyRegistry.Register(streamName, consumerName, dlqPolicy);
+
+        // Key: Inject IDlqStore into poison handler so it automatically persists to KV
+        var dlqStore = new NatsDlqStore(kv, new ConsoleLogger<NatsDlqStore>());
+        var typeAliasRegistry = new MessageTypeAliasRegistry(Microsoft.Extensions.Options.Options.Create(new MessageTypeAliasOptions { RequireExplicitAliases = false }));
+        typeAliasRegistry.Register<OrderEvent>(nameof(OrderEvent));
+
+        var poisonHandler = new DefaultDlqPoisonHandler<OrderEvent>(
+            bus,
+            serializer,
+            typeAliasRegistry,
+            null, // No object store
+            null, // No notification service
+            dlqPolicyRegistry,
+            new ConsoleLogger<DefaultDlqPoisonHandler<OrderEvent>>(),
+            null, // failureOptions
+            null, // natsOptions
+            dlqStore);  // IMPORTANT: Pass dlqStore so it persists automatically
+
+        var failureCount = new CountdownEvent(maxDeliver);
+        Func<IJsMessageContext<OrderEvent>, Task> handler = async ctx =>
+        {
+            failureCount.Signal();
+            throw new InvalidOperationException($"Simulated failure for order {ctx.Message.OrderId}");
+        };
+
+        var service = new NatsConsumerBackgroundService<OrderEvent>(
+            consumer,
+            streamName,
+            consumerName,
+            handler,
+            new NatsJSConsumeOpts { MaxMsgs = 1 },
+            new ConsoleLogger<NatsConsumerBackgroundService<OrderEvent>>(),
+            poisonHandler);
+
+        using var cts = new CancellationTokenSource();
+        await service.StartAsync(cts.Token);
+        await Task.Delay(500);
+
+        // Act: Publish and wait for failures
+        var order = new OrderEvent("ORD-AUTO-001", 49.99m, "Created");
+        await js.PublishAsync(subject, order);
+
+        var allFailed = failureCount.Wait(TimeSpan.FromSeconds(15));
+        allFailed.ShouldBeTrue();
+
+        // Wait for poison handler to persist to KV (no manual bridge needed!)
+        await Task.Delay(2000);
+
+        // Assert: Verify DLQ entry was persisted to KV automatically
+        var remediationService = new NatsDlqRemediationService(
+            dlqStore,
+            bus,
+            serializer,
+            typeAliasRegistry,
+            new ConsoleLogger<NatsDlqRemediationService>());
+
+        var dlqEntries = await remediationService.ListAsync(filterStream: streamName);
+        dlqEntries.Count.ShouldBeGreaterThanOrEqualTo(1, "Should have auto-persisted DLQ entry without manual bridge");
+
+        var dlqEntry = dlqEntries.First();
+        dlqEntry.OriginalStream.ShouldBe(streamName);
+        dlqEntry.DeliveryCount.ShouldBe(maxDeliver);
+
+        await cts.CancelAsync();
+        await service.StopAsync(CancellationToken.None);
+    }
 }

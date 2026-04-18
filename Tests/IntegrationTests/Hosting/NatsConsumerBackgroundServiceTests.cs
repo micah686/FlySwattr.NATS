@@ -71,7 +71,7 @@ public partial class NatsConsumerBackgroundServiceTests
         dlqPolicyRegistry.Register(streamName, consumerName, dlqPolicy);
 
         var bus = new NatsJetStreamBus(js, new ConsoleLogger<NatsJetStreamBus>(), serializer);
-        var typeAliasRegistry = new MessageTypeAliasRegistry(Microsoft.Extensions.Options.Options.Create(new MessageTypeAliasOptions()));
+        var typeAliasRegistry = new MessageTypeAliasRegistry(Microsoft.Extensions.Options.Options.Create(new MessageTypeAliasOptions { RequireExplicitAliases = false }));
         
         var poisonHandler = new DefaultDlqPoisonHandler<TestMessage>(
             bus, 

@@ -122,6 +122,49 @@ public static class MessageSecurity
         return objectKey;
     }
 
+    /// <summary>
+    /// Validates a claim-check reference and enforces that the resolved object key begins with the
+    /// configured <paramref name="requiredPrefix"/>. This prevents a malicious or misrouted
+    /// <c>X-ClaimCheck-Ref</c> header from pointing consumers or cleanup middleware at arbitrary
+    /// objects in the shared Object Store bucket.
+    /// </summary>
+    /// <param name="reference">The raw header value; may include an <c>objstore://</c> scheme prefix.</param>
+    /// <param name="requiredPrefix">
+    /// The expected object-key prefix (e.g. <c>PayloadOffloadingOptions.ObjectKeyPrefix</c>).
+    /// When null or empty, prefix enforcement is skipped and the call behaves like
+    /// <see cref="ValidateObjectStoreKey"/>.
+    /// </param>
+    /// <param name="paramName">Parameter name used when throwing.</param>
+    /// <returns>The validated object key with any <c>objstore://</c> scheme stripped.</returns>
+    public static string ValidateClaimCheckReference(
+        string reference,
+        string? requiredPrefix,
+        string paramName = "reference")
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(reference, paramName);
+
+        const string schemePrefix = "objstore://";
+        var objectKey = reference.StartsWith(schemePrefix, StringComparison.OrdinalIgnoreCase)
+            ? reference[schemePrefix.Length..]
+            : reference;
+
+        objectKey = ValidateObjectStoreKey(objectKey, paramName);
+
+        if (!string.IsNullOrEmpty(requiredPrefix))
+        {
+            var normalizedPrefix = requiredPrefix.EndsWith('/') ? requiredPrefix : requiredPrefix + "/";
+            if (!objectKey.StartsWith(normalizedPrefix, StringComparison.Ordinal) &&
+                !string.Equals(objectKey, requiredPrefix, StringComparison.Ordinal))
+            {
+                throw new ArgumentException(
+                    $"Claim-check reference '{reference}' does not match the configured object key prefix '{requiredPrefix}'.",
+                    paramName);
+            }
+        }
+
+        return objectKey;
+    }
+
     public static string SanitizeExceptionMessage(Exception exception, bool enablePrivacySanitization = true)
     {
         ArgumentNullException.ThrowIfNull(exception);

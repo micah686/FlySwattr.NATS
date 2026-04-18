@@ -30,6 +30,7 @@ public class DefaultDlqPoisonHandlerTests
     private IObjectStore _objectStore = null!;
     private IDlqNotificationService _notificationService = null!;
     private IDlqPolicyRegistry _policyRegistry = null!;
+    private IDlqStore _dlqStore = null!;
     private IMessageTypeAliasRegistry _typeAliasRegistry = null!;
     private ILogger<DefaultDlqPoisonHandler<TestMessage>> _logger = null!;
     private IJsMessageContext<TestMessage> _context = null!;
@@ -42,7 +43,9 @@ public class DefaultDlqPoisonHandlerTests
         _objectStore = Substitute.For<IObjectStore>();
         _notificationService = Substitute.For<IDlqNotificationService>();
         _policyRegistry = Substitute.For<IDlqPolicyRegistry>();
+        _dlqStore = Substitute.For<IDlqStore>();
         _typeAliasRegistry = new MessageTypeAliasRegistry(Options.Create(new MessageTypeAliasOptions()));
+        _typeAliasRegistry.Register<TestMessage>(nameof(TestMessage));
         _logger = Substitute.For<ILogger<DefaultDlqPoisonHandler<TestMessage>>>();
         _logger.IsEnabled(default).ReturnsForAnyArgs(true);
         _context = CreateMockContext();
@@ -71,6 +74,7 @@ public class DefaultDlqPoisonHandlerTests
         IMessageSerializer? serializer = null,
         IObjectStore? objectStore = null,
         IDlqNotificationService? notificationService = null,
+        IDlqStore? dlqStore = null,
         bool sanitizeExceptionMessages = true)
     {
         return new DefaultDlqPoisonHandler<TestMessage>(
@@ -84,7 +88,8 @@ public class DefaultDlqPoisonHandlerTests
             natsOptions: Options.Create(new NatsConfiguration
             {
                 SanitizeExceptionMessages = sanitizeExceptionMessages
-            }));
+            }),
+            dlqStore: dlqStore == null ? null : (dlqStore ?? _dlqStore));
     }
 
     #endregion
@@ -237,24 +242,24 @@ public class DefaultDlqPoisonHandlerTests
     #region 3. Header Preservation
 
     /// <summary>
-    /// Original message headers (TraceID, CorrelationID, etc.) must be preserved
-    /// in the DLQ entry to aid debugging.
+    /// By default all header values are redacted; only headers matching the AllowedHeaderPrefixes
+    /// allowlist retain their original values.
     /// </summary>
     [Test]
-    public async Task HandleAsync_ShouldPreserveOriginalHeaders_InDlqMessage()
+    public async Task HandleAsync_ShouldRedactHeaders_ByDefault()
     {
         // Arrange
         var originalHeaders = new Dictionary<string, string>
         {
             ["TraceID"] = "trace-12345",
-            ["CorrelationID"] = "corr-67890",
+            ["Authorization"] = "Bearer secret-token",
             ["X-Custom-Header"] = "custom-value"
         };
         var contextWithHeaders = CreateMockContext(headers: originalHeaders);
-        
+
         var policy = new DeadLetterPolicy { SourceStream = "orders-stream", SourceConsumer = "orders-consumer", TargetStream = StreamName.From("dlq"), TargetSubject = "dlq.orders" };
         _policyRegistry.Get("orders-stream", "orders-consumer").Returns(policy);
-        
+
         _serializer.Serialize(Arg.Any<IBufferWriter<byte>>(), Arg.Any<TestMessage>());
         _serializer.GetContentType<TestMessage>().Returns("application/json");
 
@@ -283,13 +288,82 @@ public class DefaultDlqPoisonHandlerTests
             exception,
             CancellationToken.None);
 
-        // Assert - All headers preserved
+        // Assert - all header values redacted (no allowlist configured)
         capturedDlqMessage.ShouldNotBeNull();
         capturedDlqMessage.OriginalHeaders.ShouldNotBeNull();
         capturedDlqMessage.OriginalHeaders.Count.ShouldBe(3);
+        capturedDlqMessage.OriginalHeaders["TraceID"].ShouldBe("[REDACTED]");
+        capturedDlqMessage.OriginalHeaders["Authorization"].ShouldBe("[REDACTED]");
+        capturedDlqMessage.OriginalHeaders["X-Custom-Header"].ShouldBe("[REDACTED]");
+    }
+
+    /// <summary>
+    /// Headers matching AllowedHeaderPrefixes retain their values; all others are redacted.
+    /// </summary>
+    [Test]
+    public async Task HandleAsync_ShouldPreserveAllowedHeaders_AndRedactOthers()
+    {
+        // Arrange
+        var originalHeaders = new Dictionary<string, string>
+        {
+            ["TraceID"] = "trace-12345",
+            ["Authorization"] = "Bearer secret-token",
+            ["X-Correlation-Id"] = "corr-67890"
+        };
+        var contextWithHeaders = CreateMockContext(headers: originalHeaders);
+
+        var policy = new DeadLetterPolicy { SourceStream = "orders-stream", SourceConsumer = "orders-consumer", TargetStream = StreamName.From("dlq"), TargetSubject = "dlq.orders" };
+        _policyRegistry.Get("orders-stream", "orders-consumer").Returns(policy);
+
+        _serializer.Serialize(Arg.Any<IBufferWriter<byte>>(), Arg.Any<TestMessage>());
+        _serializer.GetContentType<TestMessage>().Returns("application/json");
+
+        DlqMessage? capturedDlqMessage = null;
+        _publisher.PublishAsync(
+            Arg.Any<string>(),
+            Arg.Any<DlqMessage>(),
+            Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
+            Arg.Any<CancellationToken>())
+            .Returns(callInfo =>
+            {
+                capturedDlqMessage = callInfo.Arg<DlqMessage>();
+                return Task.CompletedTask;
+            });
+
+        // Create handler with allowlist for trace/correlation headers
+        var handler = new DefaultDlqPoisonHandler<TestMessage>(
+            _publisher,
+            _serializer,
+            _typeAliasRegistry,
+            _objectStore,
+            _notificationService,
+            _policyRegistry,
+            _logger,
+            headerRedactionOptions: Options.Create(new DlqHeaderRedactionOptions
+            {
+                RedactHeaders = true,
+                AllowedHeaderPrefixes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    "TraceID", "X-Correlation-"
+                }
+            }));
+
+        // Act
+        await handler.HandleAsync(
+            contextWithHeaders,
+            "orders-stream",
+            "orders-consumer",
+            maxDeliveries: 3,
+            new InvalidOperationException("Processing failed"),
+            CancellationToken.None);
+
+        // Assert - allowed headers preserved, others redacted
+        capturedDlqMessage.ShouldNotBeNull();
+        capturedDlqMessage.OriginalHeaders.ShouldNotBeNull();
         capturedDlqMessage.OriginalHeaders["TraceID"].ShouldBe("trace-12345");
-        capturedDlqMessage.OriginalHeaders["CorrelationID"].ShouldBe("corr-67890");
-        capturedDlqMessage.OriginalHeaders["X-Custom-Header"].ShouldBe("custom-value");
+        capturedDlqMessage.OriginalHeaders["X-Correlation-Id"].ShouldBe("corr-67890");
+        capturedDlqMessage.OriginalHeaders["Authorization"].ShouldBe("[REDACTED]");
     }
 
     [Test]
@@ -659,6 +733,81 @@ public class DefaultDlqPoisonHandlerTests
         
         // Message should still be terminated
         await context.Received(1).TermAsync(Arg.Any<CancellationToken>());
+    }
+
+    #endregion
+
+    #region DLQ Store Persistence
+
+    /// <summary>
+    /// When IDlqStore is provided, HandleAsync should persist the entry to the store
+    /// in addition to publishing to the DLQ subject.
+    /// </summary>
+    [Test]
+    public async Task HandleAsync_WithDlqStore_ShouldPersistToStore()
+    {
+        // Arrange
+        var dlqStore = Substitute.For<IDlqStore>();
+        var policy = new DeadLetterPolicy { SourceStream = "orders-stream", SourceConsumer = "orders-consumer", TargetStream = StreamName.From("dlq"), TargetSubject = "dlq.orders" };
+        _policyRegistry.Get("orders-stream", "orders-consumer").Returns(policy);
+
+        _serializer.Serialize(Arg.Any<IBufferWriter<byte>>(), Arg.Any<TestMessage>());
+        _serializer.GetContentType<TestMessage>().Returns("application/json");
+
+        _publisher.PublishAsync(
+            Arg.Any<string>(),
+            Arg.Any<DlqMessage>(),
+            Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
+            Arg.Any<CancellationToken>())
+            .Returns(Task.CompletedTask);
+
+        var handler = CreateHandler(dlqStore: dlqStore);
+        var exception = new InvalidOperationException("Processing failed");
+
+        // Act
+        await handler.HandleAsync(_context, "orders-stream", "orders-consumer", 3, exception, CancellationToken.None);
+
+        // Assert - store should have been called
+        await dlqStore.Received(1).StoreAsync(Arg.Any<DlqMessageEntry>(), Arg.Any<CancellationToken>());
+    }
+
+    /// <summary>
+    /// When IDlqStore is null, HandleAsync should not attempt to persist but should still publish DLQ message.
+    /// </summary>
+    [Test]
+    public async Task HandleAsync_WithoutDlqStore_ShouldSkipStoreAndPublish()
+    {
+        // Arrange
+        var policy = new DeadLetterPolicy { SourceStream = "orders-stream", SourceConsumer = "orders-consumer", TargetStream = StreamName.From("dlq"), TargetSubject = "dlq.orders" };
+        _policyRegistry.Get("orders-stream", "orders-consumer").Returns(policy);
+
+        _serializer.Serialize(Arg.Any<IBufferWriter<byte>>(), Arg.Any<TestMessage>());
+        _serializer.GetContentType<TestMessage>().Returns("application/json");
+
+        _publisher.PublishAsync(
+            Arg.Any<string>(),
+            Arg.Any<DlqMessage>(),
+            Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
+            Arg.Any<CancellationToken>())
+            .Returns(Task.CompletedTask);
+
+        var handler = CreateHandler(dlqStore: null);
+        var exception = new InvalidOperationException("Processing failed");
+
+        // Act
+        await handler.HandleAsync(_context, "orders-stream", "orders-consumer", 3, exception, CancellationToken.None);
+
+        // Assert - publisher should be called, but store should not
+        await _publisher.Received(1).PublishAsync(
+            "dlq.orders",
+            Arg.Any<DlqMessage>(),
+            Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
+            Arg.Any<CancellationToken>());
+
+        await _dlqStore.DidNotReceive().StoreAsync(Arg.Any<DlqMessageEntry>(), Arg.Any<CancellationToken>());
     }
 
     #endregion

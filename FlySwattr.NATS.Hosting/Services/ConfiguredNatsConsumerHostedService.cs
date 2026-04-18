@@ -9,6 +9,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using NATS.Client.JetStream;
 using Polly;
+using Polly.Retry;
 
 namespace FlySwattr.NATS.Hosting.Services;
 
@@ -66,9 +67,18 @@ internal sealed class ConfiguredNatsConsumerHostedService<TMessage> : IHostedSer
             : _serviceProvider.GetService<IJetStreamPublisher>();
 
         var notificationService = _serviceProvider.GetService<IDlqNotificationService>();
+        var dlqStore = _serviceProvider.GetService<IDlqStore>();
         var resiliencePipeline = _options.ResiliencePipelineKey != null
             ? _serviceProvider.GetKeyedService<ResiliencePipeline>(_options.ResiliencePipelineKey)
             : null;
+
+        if (resiliencePipeline == null)
+        {
+            var consumerResilienceOpts = _serviceProvider.GetService<IOptions<ConsumerResilienceOptions>>()?.Value;
+            if (consumerResilienceOpts != null)
+                resiliencePipeline = BuildDefaultResiliencePipeline(consumerResilienceOpts);
+        }
+
         var healthMetrics = _serviceProvider.GetService<IConsumerHealthMetrics>();
         var topologyReadySignal = _serviceProvider.GetService<ITopologyReadySignal>();
         var middlewares = ServiceCollectionExtensions.ResolveMiddlewares<TMessage>(_serviceProvider, _options);
@@ -94,7 +104,8 @@ internal sealed class ConfiguredNatsConsumerHostedService<TMessage> : IHostedSer
                 notificationService,
                 registry,
                 _serviceProvider.GetRequiredService<ILogger<DefaultDlqPoisonHandler<TMessage>>>(),
-                natsOptions: _serviceProvider.GetService<IOptions<NatsConfiguration>>());
+                natsOptions: _serviceProvider.GetService<IOptions<NatsConfiguration>>(),
+                dlqStore: dlqStore);
         }
 
         _worker = new NatsConsumerBackgroundService<TMessage>(
@@ -121,4 +132,19 @@ internal sealed class ConfiguredNatsConsumerHostedService<TMessage> : IHostedSer
 
     public Task StopAsync(CancellationToken cancellationToken)
         => _worker?.StopAsync(cancellationToken) ?? Task.CompletedTask;
+
+    private static ResiliencePipeline BuildDefaultResiliencePipeline(ConsumerResilienceOptions opts)
+    {
+        var retryStrategy = new RetryStrategyOptions
+        {
+            ShouldHandle = new PredicateBuilder().Handle<Exception>(),
+            BackoffType = DelayBackoffType.Exponential,
+            MaxRetryAttempts = opts.MaxRetryAttempts,
+            UseJitter = opts.UseJitter,
+        };
+
+        return new ResiliencePipelineBuilder()
+            .AddRetry(retryStrategy)
+            .Build();
+    }
 }

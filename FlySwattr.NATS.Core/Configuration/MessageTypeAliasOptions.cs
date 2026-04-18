@@ -22,5 +22,5 @@ public class MessageTypeAliasOptions
     /// silently resolving to the same alias.
     /// </para>
     /// </summary>
-    public bool RequireExplicitAliases { get; set; }
+    public bool RequireExplicitAliases { get; set; } = true;
 }

@@ -170,6 +170,18 @@ public class TopologyConsumerOptions
     public object? ObjectStoreServiceKey { get; set; }
 
     /// <summary>
+    /// Keyed service key for a custom DLQ publisher.
+    /// If null, uses the default IJetStreamPublisher.
+    /// </summary>
+    public object? DlqPublisherServiceKey { get; set; }
+
+    /// <summary>
+    /// Keyed service key for a custom IPoisonMessageHandler&lt;T&gt;.
+    /// If null, a DefaultDlqPoisonHandler is constructed.
+    /// </summary>
+    public object? PoisonHandlerKey { get; set; }
+
+    /// <summary>
     /// Custom middleware types to include in the pipeline.
     /// </summary>
     public List<Type> MiddlewareTypes { get; } = new();

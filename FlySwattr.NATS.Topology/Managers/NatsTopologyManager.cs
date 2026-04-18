@@ -348,6 +348,7 @@ internal class NatsTopologyManager : ITopologyManager
                  History = spec.History,
                  Description = spec.Description,
                  MaxAge = spec.MaxAge
+                 // Note: spec.Replicas is defined but not wired — NatsKVConfig.NumReplicas is not exposed in the current NATS.NET SDK
              };
 
              var lockKey = $"topology_lock_kv_bucket_{spec.Name.Value}";
@@ -392,6 +393,7 @@ internal class NatsTopologyManager : ITopologyManager
                  MaxBytes = spec.MaxBytes,
                  MaxAge = spec.MaxAge > TimeSpan.Zero ? spec.MaxAge : TimeSpan.Zero,
                  Description = spec.Description
+                 // Note: spec.Replicas is defined but not wired — NatsObjConfig.NumReplicas is not exposed in the current NATS.NET SDK
              };
 
              var lockKey = $"topology_lock_obj_store_{spec.Name.Value}";

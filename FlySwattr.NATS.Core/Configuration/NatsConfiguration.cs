@@ -37,4 +37,20 @@ public class NatsConfiguration
     /// Default: true.
     /// </summary>
     public bool SanitizeExceptionMessages { get; set; } = true;
+
+    /// <summary>
+    /// Maximum number of messages published concurrently within a single <c>PublishBatchAsync</c> call.
+    /// Set to 0 to disable the cap (all messages publish concurrently).
+    /// Default: 32.
+    /// </summary>
+    public int BatchPublishMaxConcurrency { get; set; } = 32;
+
+    /// <summary>
+    /// When <c>false</c>, reject NATS URLs whose scheme is not <c>tls</c> or <c>wss</c> at
+    /// startup validation. Set to <c>false</c> in production to prevent accidentally shipping
+    /// plaintext <c>nats://</c> or <c>ws://</c> connections.
+    /// Default: <c>true</c> to preserve backward compatibility with the <c>nats://localhost:4222</c>
+    /// default URL used in development and tests.
+    /// </summary>
+    public bool AllowInsecureTransport { get; set; } = true;
 }

@@ -1,5 +1,6 @@
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Core.Configuration;
+using FlySwattr.NATS.Core.Services;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -32,6 +33,7 @@ public sealed partial class ClaimCheckCleanupMiddleware<T> : IConsumerMiddleware
 {
     private readonly IObjectStore _objectStore;
     private readonly string _claimCheckHeaderName;
+    private readonly string _objectKeyPrefix;
     private readonly ILogger<ClaimCheckCleanupMiddleware<T>> _logger;
 
     public ClaimCheckCleanupMiddleware(
@@ -41,6 +43,7 @@ public sealed partial class ClaimCheckCleanupMiddleware<T> : IConsumerMiddleware
     {
         _objectStore = objectStore;
         _claimCheckHeaderName = options.Value.ClaimCheckHeaderName;
+        _objectKeyPrefix = options.Value.ObjectKeyPrefix;
         _logger = logger;
     }
 
@@ -52,7 +55,23 @@ public sealed partial class ClaimCheckCleanupMiddleware<T> : IConsumerMiddleware
         if (context is IPostAckLifecycle lifecycle &&
             context.Headers.Headers.TryGetValue(_claimCheckHeaderName, out var claimCheckRef))
         {
-            var objectKey = ExtractObjectKey(claimCheckRef);
+            string objectKey;
+            try
+            {
+                // Enforce the configured prefix so a hostile X-ClaimCheck-Ref header can never
+                // trigger deletion of arbitrary Object Store entries after ack.
+                objectKey = MessageSecurity.ValidateClaimCheckReference(
+                    claimCheckRef,
+                    _objectKeyPrefix,
+                    nameof(claimCheckRef));
+            }
+            catch (ArgumentException ex)
+            {
+                LogClaimCheckReferenceRejected(claimCheckRef, ex);
+                await next();
+                return;
+            }
+
             lifecycle.RegisterAfterAckCallback(async cleanupCt =>
             {
                 try
@@ -71,17 +90,12 @@ public sealed partial class ClaimCheckCleanupMiddleware<T> : IConsumerMiddleware
         await next();
     }
 
-    private static string ExtractObjectKey(string reference)
-    {
-        const string prefix = "objstore://";
-        return reference.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
-            ? reference[prefix.Length..]
-            : reference;
-    }
-
     [LoggerMessage(Level = LogLevel.Debug, Message = "Deleted claim-check object {ObjectKey} after successful ack")]
     private partial void LogClaimCheckDeleted(string objectKey);
 
     [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to delete claim-check object {ObjectKey}. Object Store TTL will clean it up.")]
     private partial void LogClaimCheckDeleteFailed(string objectKey, Exception exception);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Rejected claim-check cleanup for reference '{Reference}': reference does not match the configured object key prefix.")]
+    private partial void LogClaimCheckReferenceRejected(string reference, Exception exception);
 }
