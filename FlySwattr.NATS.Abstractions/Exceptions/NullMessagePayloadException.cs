@@ -5,4 +5,7 @@ public class NullMessagePayloadException : Exception
 {
     public NullMessagePayloadException(string subject)
         : base($"Null payload received on subject: {subject}") { }
+
+    public NullMessagePayloadException(string message, Exception? innerException)
+        : base(message, innerException) { }
 }

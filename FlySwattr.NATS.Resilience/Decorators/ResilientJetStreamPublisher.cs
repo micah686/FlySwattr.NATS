@@ -1,6 +1,9 @@
+using System.Net.Sockets;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Resilience.Builders;
 using Microsoft.Extensions.Logging;
+using NATS.Client.Core;
+using NATS.Client.JetStream;
 using Polly;
 using Polly.CircuitBreaker;
 using Polly.Retry;
@@ -97,6 +100,10 @@ internal class ResilientJetStreamPublisher : IJetStreamPublisher
     private static bool IsOperationCanceled(Exception ex) => ex is OperationCanceledException;
 
     private static bool IsTransient(Exception ex) =>
-        ex is TimeoutException or
-        System.IO.IOException;
+        ex is TimeoutException
+            or IOException
+            or SocketException
+            or NatsNoRespondersException
+            or NatsException
+        || (ex is NatsJSApiException jsApi && jsApi.Error.Code is 503 or 504);
 }

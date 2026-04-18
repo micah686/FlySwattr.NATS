@@ -8,6 +8,13 @@ namespace FlySwattr.NATS.Core.Configuration;
 public class DlqStoreFailureOptions
 {
     /// <summary>
+    /// The name of the DLQ entries KV bucket.
+    /// Must match the bucket name used by topology provisioning (<see cref="FlySwattr.NATS.Topology.Configuration.TopologyStartupOptions.DlqBucketName"/>).
+    /// Default: "fs-dlq-entries"
+    /// </summary>
+    public string BucketName { get; set; } = "fs-dlq-entries";
+
+    /// <summary>
     /// Policy applied when the DLQ KV bucket cannot be initialized (created or accessed).
     /// Default: <see cref="DlqStoreFailurePolicy.LogAndContinue"/> — matches current behavior
     /// where initialization failure is logged and individual operations fail on their own.

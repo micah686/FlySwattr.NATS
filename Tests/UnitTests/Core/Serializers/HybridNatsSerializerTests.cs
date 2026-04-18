@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Text.Json;
 using FlySwattr.NATS.Abstractions;
 using FlySwattr.NATS.Abstractions.Attributes;
+using FlySwattr.NATS.Abstractions.Exceptions;
 using FlySwattr.NATS.Core.Serializers;
 using MemoryPack;
 using NATS.Client.Core;
@@ -96,7 +97,7 @@ public class HybridNatsSerializerTests
         _serializer.Serialize(writer, (string?)null);
 
         // JSON deserialization of "null" literal returns null in C#, but HybridNatsSerializer throws on null result.
-        Assert.Throws<InvalidOperationException>(() => _serializer.Deserialize<string?>(writer.WrittenMemory));
+        Assert.Throws<NullMessagePayloadException>(() => _serializer.Deserialize<string?>(writer.WrittenMemory));
     }
 
     [Test]

@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Text.Json;
 using FlySwattr.NATS.Abstractions;
+using FlySwattr.NATS.Abstractions.Exceptions;
 using MemoryPack;
 using Microsoft.Extensions.Logging;
 
@@ -59,7 +60,8 @@ public class HybridNatsSerializer : IMessageSerializer
         else
         {
             // Compatible path: System.Text.Json for all other types
-            var jsonWriter = new Utf8JsonWriter(writer);
+            var limitingWriter = new SizeLimitingBufferWriter(writer, _maxPayloadSize);
+            var jsonWriter = new Utf8JsonWriter(limitingWriter);
             JsonSerializer.Serialize(jsonWriter, message, _jsonOptions);
             jsonWriter.Flush();
         }
@@ -84,7 +86,8 @@ public class HybridNatsSerializer : IMessageSerializer
         {
             // Compatible path: System.Text.Json
             return JsonSerializer.Deserialize<T>(data.Span, _jsonOptions)
-                   ?? throw new InvalidOperationException($"JSON deserialization returned null for type {typeof(T).Name}");
+                   ?? throw new NullMessagePayloadException(
+                       $"JSON deserialization returned null for type {typeof(T).Name}", null);
         }
     }
 

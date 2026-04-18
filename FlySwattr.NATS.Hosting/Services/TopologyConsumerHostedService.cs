@@ -145,7 +145,24 @@ internal class TopologyConsumerHostedService<TSource> : IHostedService
 
         // Resolve services still needed for the worker (claim-check hydration support)
         var serializer = _serviceProvider.GetService<IMessageSerializer>();
-        var objectStore = _serviceProvider.GetService<IObjectStore>();
+
+        // Resolve IObjectStore: prefer the consumer-specific key, then fall back to the
+        // key embedded in PayloadOffloadingOptions (set by AddPayloadOffloading), then default.
+        var objectStoreKey = registration.Options.ObjectStoreServiceKey ?? offloadingOptions?.ObjectStoreServiceKey;
+        var objectStore = objectStoreKey != null
+            ? _serviceProvider.GetKeyedService<IObjectStore>(objectStoreKey)
+            : _serviceProvider.GetService<IObjectStore>();
+
+        // Fail fast: if offloading is configured but the object store is not resolvable,
+        // offloaded messages would arrive with empty payloads and be Term()'d as fatal errors.
+        if (offloadingOptions != null && objectStore == null)
+        {
+            throw new InvalidOperationException(
+                $"Payload offloading is configured (PayloadOffloadingOptions is registered) but no IObjectStore " +
+                $"could be resolved for consumer '{spec.DurableName}' on stream '{spec.StreamName}'. " +
+                $"Ensure AddPayloadOffloading() is called with the correct bucket, or set " +
+                $"NatsConsumerOptions.ObjectStoreServiceKey to the keyed IObjectStore service key.");
+        }
 
         // Resolve optional services
         var healthMetrics = _serviceProvider.GetService<IConsumerHealthMetrics>();

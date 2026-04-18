@@ -1,9 +1,11 @@
 using FlySwattr.NATS.Abstractions;
+using FlySwattr.NATS.Core.Configuration;
 using FlySwattr.NATS.Topology.Configuration;
 using FlySwattr.NATS.Topology.Managers;
 using FlySwattr.NATS.Topology.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Options;
 
 namespace FlySwattr.NATS.Topology.Extensions;
 
@@ -120,6 +122,14 @@ public static class ServiceCollectionExtensions
         // Register startup configuration options
         services.AddOptions<TopologyStartupOptions>()
             .Configure(configure ?? (_ => { }));
+
+        // Sync the DLQ bucket name from topology options into the runtime DlqStoreFailureOptions
+        // so that NatsDlqStore uses the same bucket that topology provisioning creates.
+        services.AddOptions<DlqStoreFailureOptions>()
+            .PostConfigure<IOptions<TopologyStartupOptions>>((dlqOpts, topologyOpts) =>
+            {
+                dlqOpts.BucketName = topologyOpts.Value.DlqBucketName;
+            });
 
         services.AddHostedService<TopologyProvisioningService>();
         return services;

@@ -141,7 +141,7 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
     /// errors like timeouts, but NatsNoRespondersException should propagate immediately.
     /// </summary>
     [Test]
-    public async Task PublishAsync_ShouldNotRetry_OnNatsNoRespondersException()
+    public async Task PublishAsync_ShouldRetry_OnNatsNoRespondersException()
     {
         // Arrange
         var subject = "test.subject";
@@ -151,12 +151,12 @@ public class ResilientJetStreamPublisherTests : IAsyncDisposable
         _inner.PublishAsync(subject, message, messageId, Arg.Any<MessageHeaders?>(), Arg.Any<CancellationToken>())
             .Returns(x => throw new NATS.Client.Core.NatsNoRespondersException());
 
-        // Act & Assert - should throw immediately without retrying
+        // Act & Assert - should exhaust retries then throw
         await Assert.ThrowsAsync<NATS.Client.Core.NatsNoRespondersException>(
             async () => await _sut.PublishAsync(subject, message, messageId));
 
-        // Verify only 1 call was made (no retries)
-        await _inner.Received(1).PublishAsync(subject, message, messageId, null, Arg.Any<CancellationToken>());
+        // Verify multiple calls were made (initial + retries)
+        await _inner.Received(4).PublishAsync(subject, message, messageId, null, Arg.Any<CancellationToken>());
     }
 
     [Test]

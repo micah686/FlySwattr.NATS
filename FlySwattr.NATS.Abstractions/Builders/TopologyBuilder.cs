@@ -164,6 +164,12 @@ public class TopologyConsumerOptions
     public TimeSpan? InProgressHeartbeatInterval { get; set; }
 
     /// <summary>
+    /// Optional keyed service key for resolving IObjectStore for claim-check hydration.
+    /// If null, falls back to PayloadOffloadingOptions.ObjectStoreServiceKey, then the default IObjectStore.
+    /// </summary>
+    public object? ObjectStoreServiceKey { get; set; }
+
+    /// <summary>
     /// Custom middleware types to include in the pipeline.
     /// </summary>
     public List<Type> MiddlewareTypes { get; } = new();

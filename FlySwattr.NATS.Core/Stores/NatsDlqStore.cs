@@ -27,12 +27,12 @@ namespace FlySwattr.NATS.Core;
 /// </remarks>
 internal class NatsDlqStore : IDlqStore
 {
-    private const string BucketName = "fs-dlq-entries";
-    
+    private readonly string _bucketName;
+
     private readonly INatsKVContext _kvContext;
     private readonly ILogger<NatsDlqStore> _logger;
     private readonly DlqStoreFailureOptions _failureOptions;
-    
+
     private readonly SemaphoreSlim _initLock = new(1, 1);
     private bool _isInitialized;
     private bool _fallbackMode;
@@ -46,6 +46,7 @@ internal class NatsDlqStore : IDlqStore
         _kvContext = kvContext;
         _logger = logger;
         _failureOptions = failureOptions?.Value ?? new DlqStoreFailureOptions();
+        _bucketName = _failureOptions.BucketName;
     }
 
     private async ValueTask EnsureInitializedAsync(CancellationToken cancellationToken)
@@ -62,21 +63,21 @@ internal class NatsDlqStore : IDlqStore
                 // First check if the bucket already exists to avoid conflict errors
                 try
                 {
-                    _store = await _kvContext.GetStoreAsync(BucketName, cancellationToken: cancellationToken);
-                    _logger.LogDebug("DLQ KV bucket {BucketName} already exists", BucketName);
+                    _store = await _kvContext.GetStoreAsync(_bucketName, cancellationToken: cancellationToken);
+                    _logger.LogDebug("DLQ KV bucket {BucketName} already exists", _bucketName);
                 }
                 catch
                 {
                     // If getting the store fails, assume it doesn't exist and try to create it
-                    await _kvContext.CreateStoreAsync(new NatsKVConfig(BucketName) 
+                    await _kvContext.CreateStoreAsync(new NatsKVConfig(_bucketName)
                     { 
                         Storage = NatsKVStorageType.File,
                         Description = "Dead Letter Queue Storage",
                         History = 1
                     }, cancellationToken: cancellationToken);
-                    _store = await _kvContext.GetStoreAsync(BucketName, cancellationToken: cancellationToken);
+                    _store = await _kvContext.GetStoreAsync(_bucketName, cancellationToken: cancellationToken);
                     
-                    _logger.LogDebug("Created DLQ KV bucket {BucketName}", BucketName);
+                    _logger.LogDebug("Created DLQ KV bucket {BucketName}", _bucketName);
                 }
             }
             catch (Exception ex)
@@ -84,13 +85,13 @@ internal class NatsDlqStore : IDlqStore
                 switch (_failureOptions.InitializationFailurePolicy)
                 {
                     case DlqStoreFailurePolicy.Propagate:
-                        _logger.LogError(ex, "DLQ bucket {BucketName} initialization failed. Policy: Propagate — re-throwing.", BucketName);
+                        _logger.LogError(ex, "DLQ bucket {BucketName} initialization failed. Policy: Propagate — re-throwing.", _bucketName);
                         throw;
 
                     case DlqStoreFailurePolicy.FallbackToLogOnly:
                         _logger.LogWarning(ex,
                             "DLQ bucket {BucketName} initialization failed. Policy: FallbackToLogOnly — " +
-                            "DLQ entries will be written to logs instead of KV store.", BucketName);
+                            "DLQ entries will be written to logs instead of KV store.", _bucketName);
                         _fallbackMode = true;
                         break;
 
@@ -98,7 +99,7 @@ internal class NatsDlqStore : IDlqStore
                     default:
                         _logger.LogWarning(ex,
                             "Attempt to ensure DLQ bucket {BucketName} failed. Policy: LogAndContinue — " +
-                            "proceeding; individual operations may fail.", BucketName);
+                            "proceeding; individual operations may fail.", _bucketName);
                         break;
                 }
             }

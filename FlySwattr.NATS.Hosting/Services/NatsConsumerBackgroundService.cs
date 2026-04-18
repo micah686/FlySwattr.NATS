@@ -420,13 +420,6 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
                     try { await context.TermAsync(token); } catch { /* best effort */ }
                     continue;
                 }
-                catch (InvalidOperationException ex) when (ex.Message.Contains("null"))
-                {
-                    activity?.SetStatus(ActivityStatusCode.Error, "Null payload");
-                    LogNullPayloadTermination(_streamName, _consumerName, ex);
-                    try { await context.TermAsync(token); } catch { /* best effort */ }
-                    continue;
-                }
                 catch (OperationCanceledException)
                 {
                     throw; // Graceful shutdown
