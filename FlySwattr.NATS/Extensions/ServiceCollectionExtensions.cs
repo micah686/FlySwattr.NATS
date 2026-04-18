@@ -92,6 +92,7 @@ public static class ServiceCollectionExtensions
         // Register the enterprise options for use by other components
         services.TryAddSingleton(Options.Create(options));
         services.TryAddSingleton(Options.Create(options.Telemetry));
+        services.TryAddSingleton(Options.Create(options.DlqHeaderRedaction));
         NatsTelemetry.Configure(
             options.Telemetry.IncludeBucketNameInTags,
             options.Telemetry.IncludeDestinationNameInTags);

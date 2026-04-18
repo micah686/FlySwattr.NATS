@@ -5,9 +5,14 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+        <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+        <Version>1.0.0</Version>
+        <Authors>micah686</Authors>
+        <PackageProjectUrl>https://github.com/micah686/FlySwattr.NATS</PackageProjectUrl>
     </PropertyGroup>
 
     <ItemGroup>
+      <PackageReference Include="OpenTelemetry.Api" Version="1.9.0" />
       <PackageReference Include="FluentValidation" Version="12.1.1" />
       <PackageReference Include="MemoryPack" Version="1.21.4" />
       <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.1" />

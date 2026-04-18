@@ -90,7 +90,7 @@ public partial class PayloadOffloadingIntegrationTests
             objContext,
             bucketName,
             new ConsoleLogger<NatsObjectStore>());
-        var typeAliasRegistry = new MessageTypeAliasRegistry(Options.Create(new MessageTypeAliasOptions()));
+        var typeAliasRegistry = new MessageTypeAliasRegistry(Options.Create(new MessageTypeAliasOptions { RequireExplicitAliases = false }));
 
         var offloadingPublisher = new OffloadingJetStreamPublisher(
             innerBus,
@@ -204,7 +204,7 @@ public partial class PayloadOffloadingIntegrationTests
             objContext,
             bucketName,
             new ConsoleLogger<NatsObjectStore>());
-        var typeAliasRegistry = new MessageTypeAliasRegistry(Options.Create(new MessageTypeAliasOptions()));
+        var typeAliasRegistry = new MessageTypeAliasRegistry(Options.Create(new MessageTypeAliasOptions { RequireExplicitAliases = false }));
 
         var offloadingPublisher = new OffloadingJetStreamPublisher(
             innerBus,
@@ -286,7 +286,7 @@ public partial class PayloadOffloadingIntegrationTests
             objContext,
             bucketName,
             new ConsoleLogger<NatsObjectStore>());
-        var typeAliasRegistry = new MessageTypeAliasRegistry(Options.Create(new MessageTypeAliasOptions()));
+        var typeAliasRegistry = new MessageTypeAliasRegistry(Options.Create(new MessageTypeAliasOptions { RequireExplicitAliases = false }));
 
         var offloadingPublisher = new OffloadingJetStreamPublisher(
             innerBus,
@@ -381,7 +381,7 @@ public partial class PayloadOffloadingIntegrationTests
             objContext,
             bucketName,
             new ConsoleLogger<NatsObjectStore>());
-        var typeAliasRegistry = new MessageTypeAliasRegistry(Options.Create(new MessageTypeAliasOptions()));
+        var typeAliasRegistry = new MessageTypeAliasRegistry(Options.Create(new MessageTypeAliasOptions { RequireExplicitAliases = false }));
 
         var offloadingPublisher = new OffloadingJetStreamPublisher(
             innerBus,

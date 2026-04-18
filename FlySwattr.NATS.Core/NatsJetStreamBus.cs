@@ -66,6 +66,7 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
     private readonly IMessageSerializer _serializer;
     private readonly BackgroundTaskManager _backgroundTaskManager;
     private readonly WireCompatibilityOptions _wireOptions;
+    private readonly int _batchPublishMaxConcurrency;
     private int _disposed;
 
     public NatsJetStreamBus(
@@ -87,13 +88,15 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
         ILogger<NatsJetStreamBus> logger,
         IMessageSerializer serializer,
         BackgroundTaskManager backgroundTaskManager,
-        IOptions<WireCompatibilityOptions>? wireOptions = null)
+        IOptions<WireCompatibilityOptions>? wireOptions = null,
+        IOptions<NatsConfiguration>? natsOptions = null)
     {
         _jsContext = jsContext;
         _logger = logger;
         _serializer = serializer;
         _backgroundTaskManager = backgroundTaskManager;
         _wireOptions = wireOptions?.Value ?? new WireCompatibilityOptions();
+        _batchPublishMaxConcurrency = natsOptions?.Value.BatchPublishMaxConcurrency ?? 32;
 
         // Build reserved header lists including the version header
         _reservedPublishHeaders =
@@ -192,12 +195,29 @@ public class NatsJetStreamBus : IJetStreamPublisher, IJetStreamConsumer, IRawJet
             }
         }
 
-        // Publish all concurrently
+        // Publish concurrently, bounded by BatchPublishMaxConcurrency
+        var sem = _batchPublishMaxConcurrency > 0
+            ? new SemaphoreSlim(_batchPublishMaxConcurrency)
+            : null;
         var tasks = new Task[messages.Count];
         for (var i = 0; i < messages.Count; i++)
         {
             var msg = messages[i];
-            tasks[i] = PublishAsync(msg.Subject, msg.Message, msg.MessageId, msg.Headers, cancellationToken);
+            if (sem != null)
+            {
+                tasks[i] = PublishThrottledAsync(msg, sem, cancellationToken);
+            }
+            else
+            {
+                tasks[i] = PublishAsync(msg.Subject, msg.Message, msg.MessageId, msg.Headers, cancellationToken);
+            }
+        }
+
+        async Task PublishThrottledAsync(BatchMessage<T> bm, SemaphoreSlim s, CancellationToken ct)
+        {
+            await s.WaitAsync(ct);
+            try { await PublishAsync(bm.Subject, bm.Message, bm.MessageId, bm.Headers, ct); }
+            finally { s.Release(); }
         }
 
         // Collect failures

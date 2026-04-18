@@ -31,6 +31,7 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
     private readonly IDlqPolicyRegistry _dlqPolicyRegistry;
     private readonly IDlqStore? _dlqStore;
     private readonly DlqStoreFailureOptions _failureOptions;
+    private readonly DlqHeaderRedactionOptions _headerRedaction;
     private readonly bool _sanitizeExceptionMessages;
     private readonly ILogger _logger;
 
@@ -44,7 +45,8 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
         ILogger<DefaultDlqPoisonHandler<T>> logger,
         IOptions<DlqStoreFailureOptions>? failureOptions = null,
         IOptions<NatsConfiguration>? natsOptions = null,
-        IDlqStore? dlqStore = null)
+        IDlqStore? dlqStore = null,
+        IOptions<DlqHeaderRedactionOptions>? headerRedactionOptions = null)
     {
         _dlqPublisher = dlqPublisher;
         _serializer = serializer;
@@ -54,6 +56,7 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
         _dlqPolicyRegistry = dlqPolicyRegistry;
         _dlqStore = dlqStore;
         _failureOptions = failureOptions?.Value ?? new DlqStoreFailureOptions();
+        _headerRedaction = headerRedactionOptions?.Value ?? new DlqHeaderRedactionOptions();
         _sanitizeExceptionMessages = natsOptions?.Value.SanitizeExceptionMessages ?? true;
         _logger = logger;
     }
@@ -236,7 +239,7 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
             Payload = payload,
             PayloadEncoding = contentType,
             ErrorReason = MessageSecurity.SanitizeExceptionMessage(ex, _sanitizeExceptionMessages),
-            OriginalHeaders = context.Headers.Headers,
+            OriginalHeaders = FilterHeaders(context.Headers.Headers),
             OriginalMessageType = _typeAliasRegistry.GetAlias(typeof(T)),
             SerializerType = serializerType
         };
@@ -267,6 +270,27 @@ internal partial class DefaultDlqPoisonHandler<T> : IPoisonMessageHandler<T>
         {
             LogDlqNotificationFailed(streamName, consumerName, notifyEx);
         }
+    }
+
+    private Dictionary<string, string>? FilterHeaders(Dictionary<string, string>? headers)
+    {
+        if (headers == null || !_headerRedaction.RedactHeaders) return headers;
+
+        if (_headerRedaction.AllowedHeaderPrefixes.Count == 0)
+        {
+            return headers.ToDictionary(
+                kvp => kvp.Key,
+                _ => _headerRedaction.RedactedValue,
+                StringComparer.OrdinalIgnoreCase);
+        }
+
+        return headers.ToDictionary(
+            kvp => kvp.Key,
+            kvp => _headerRedaction.AllowedHeaderPrefixes.Any(
+                prefix => kvp.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                ? kvp.Value
+                : _headerRedaction.RedactedValue,
+            StringComparer.OrdinalIgnoreCase);
     }
 
     private void LogValidationFailed(string streamName, string consumerName, string subject, Exception exception)

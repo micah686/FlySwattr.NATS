@@ -184,6 +184,14 @@ public class EnterpriseNatsOptions
     /// When disabled, fingerprint mismatches emit a warning log instead.
     /// </summary>
     public bool EnforceSchemaFingerprint { get; set; } = true;
+
+    /// <summary>
+    /// Controls whether and how original message headers are redacted before being persisted to the DLQ store.
+    /// By default, all headers are preserved verbatim. Enable <see cref="DlqHeaderRedactionOptions.RedactHeaders"/>
+    /// and configure <see cref="DlqHeaderRedactionOptions.AllowedHeaderPrefixes"/> to strip sensitive headers
+    /// such as auth tokens or session keys.
+    /// </summary>
+    public DlqHeaderRedactionOptions DlqHeaderRedaction { get; set; } = new();
 }
 
 /// <summary>

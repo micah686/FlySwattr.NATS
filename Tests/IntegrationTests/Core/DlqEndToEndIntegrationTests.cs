@@ -107,7 +107,7 @@ public partial class DlqEndToEndIntegrationTests
         var dlqStore = new NatsDlqStore(kv, new ConsoleLogger<NatsDlqStore>());
 
         // Poison handler
-        var typeAliasRegistry = new MessageTypeAliasRegistry(Microsoft.Extensions.Options.Options.Create(new MessageTypeAliasOptions()));
+        var typeAliasRegistry = new MessageTypeAliasRegistry(Microsoft.Extensions.Options.Options.Create(new MessageTypeAliasOptions { RequireExplicitAliases = false }));
         typeAliasRegistry.Register<OrderEvent>(nameof(OrderEvent));
         var poisonHandler = new DefaultDlqPoisonHandler<OrderEvent>(
             bus,
@@ -308,7 +308,7 @@ public partial class DlqEndToEndIntegrationTests
         await using var bus = new NatsJetStreamBus(js, new ConsoleLogger<NatsJetStreamBus>(), serializer);
 
         var dlqStore = new NatsDlqStore(kv, new ConsoleLogger<NatsDlqStore>());
-        var typeAliasRegistry = new MessageTypeAliasRegistry(Microsoft.Extensions.Options.Options.Create(new MessageTypeAliasOptions()));
+        var typeAliasRegistry = new MessageTypeAliasRegistry(Microsoft.Extensions.Options.Options.Create(new MessageTypeAliasOptions { RequireExplicitAliases = false }));
         typeAliasRegistry.Register<OrderEvent>(nameof(OrderEvent));
 
         var remediationService = new NatsDlqRemediationService(
@@ -388,7 +388,7 @@ public partial class DlqEndToEndIntegrationTests
         await using var bus = new NatsJetStreamBus(js, new ConsoleLogger<NatsJetStreamBus>(), serializer);
 
         var dlqStore = new NatsDlqStore(kv, new ConsoleLogger<NatsDlqStore>());
-        var typeAliasRegistry = new MessageTypeAliasRegistry(Microsoft.Extensions.Options.Options.Create(new MessageTypeAliasOptions()));
+        var typeAliasRegistry = new MessageTypeAliasRegistry(Microsoft.Extensions.Options.Options.Create(new MessageTypeAliasOptions { RequireExplicitAliases = false }));
 
         var remediationService = new NatsDlqRemediationService(
             dlqStore,

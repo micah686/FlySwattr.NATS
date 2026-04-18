@@ -37,4 +37,11 @@ public class NatsConfiguration
     /// Default: true.
     /// </summary>
     public bool SanitizeExceptionMessages { get; set; } = true;
+
+    /// <summary>
+    /// Maximum number of messages published concurrently within a single <c>PublishBatchAsync</c> call.
+    /// Set to 0 to disable the cap (all messages publish concurrently).
+    /// Default: 32.
+    /// </summary>
+    public int BatchPublishMaxConcurrency { get; set; } = 32;
 }

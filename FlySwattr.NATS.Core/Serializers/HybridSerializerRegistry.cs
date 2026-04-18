@@ -56,7 +56,8 @@ internal class HybridNatsTypeSerializer<T> : INatsSerialize<T>, INatsDeserialize
         {
             // Use the default instance (strict fingerprint enforcement, no logger).
             // Consumer-specific enforcement settings are handled by HybridNatsSerializer instances.
-            return MemoryPackSchemaEnvelopeSerializer.Default.Deserialize<T>(buffer.ToArray());
+            return MemoryPackSchemaEnvelopeSerializer.Default.Deserialize<T>(
+                buffer.IsSingleSegment ? buffer.FirstSpan : buffer.ToArray());
         }
         else
         {

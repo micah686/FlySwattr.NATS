@@ -43,6 +43,7 @@ public class DefaultDlqPoisonHandlerTests
         _notificationService = Substitute.For<IDlqNotificationService>();
         _policyRegistry = Substitute.For<IDlqPolicyRegistry>();
         _typeAliasRegistry = new MessageTypeAliasRegistry(Options.Create(new MessageTypeAliasOptions()));
+        _typeAliasRegistry.Register<TestMessage>(nameof(TestMessage));
         _logger = Substitute.For<ILogger<DefaultDlqPoisonHandler<TestMessage>>>();
         _logger.IsEnabled(default).ReturnsForAnyArgs(true);
         _context = CreateMockContext();
@@ -237,24 +238,24 @@ public class DefaultDlqPoisonHandlerTests
     #region 3. Header Preservation
 
     /// <summary>
-    /// Original message headers (TraceID, CorrelationID, etc.) must be preserved
-    /// in the DLQ entry to aid debugging.
+    /// By default all header values are redacted; only headers matching the AllowedHeaderPrefixes
+    /// allowlist retain their original values.
     /// </summary>
     [Test]
-    public async Task HandleAsync_ShouldPreserveOriginalHeaders_InDlqMessage()
+    public async Task HandleAsync_ShouldRedactHeaders_ByDefault()
     {
         // Arrange
         var originalHeaders = new Dictionary<string, string>
         {
             ["TraceID"] = "trace-12345",
-            ["CorrelationID"] = "corr-67890",
+            ["Authorization"] = "Bearer secret-token",
             ["X-Custom-Header"] = "custom-value"
         };
         var contextWithHeaders = CreateMockContext(headers: originalHeaders);
-        
+
         var policy = new DeadLetterPolicy { SourceStream = "orders-stream", SourceConsumer = "orders-consumer", TargetStream = StreamName.From("dlq"), TargetSubject = "dlq.orders" };
         _policyRegistry.Get("orders-stream", "orders-consumer").Returns(policy);
-        
+
         _serializer.Serialize(Arg.Any<IBufferWriter<byte>>(), Arg.Any<TestMessage>());
         _serializer.GetContentType<TestMessage>().Returns("application/json");
 
@@ -283,13 +284,82 @@ public class DefaultDlqPoisonHandlerTests
             exception,
             CancellationToken.None);
 
-        // Assert - All headers preserved
+        // Assert - all header values redacted (no allowlist configured)
         capturedDlqMessage.ShouldNotBeNull();
         capturedDlqMessage.OriginalHeaders.ShouldNotBeNull();
         capturedDlqMessage.OriginalHeaders.Count.ShouldBe(3);
+        capturedDlqMessage.OriginalHeaders["TraceID"].ShouldBe("[REDACTED]");
+        capturedDlqMessage.OriginalHeaders["Authorization"].ShouldBe("[REDACTED]");
+        capturedDlqMessage.OriginalHeaders["X-Custom-Header"].ShouldBe("[REDACTED]");
+    }
+
+    /// <summary>
+    /// Headers matching AllowedHeaderPrefixes retain their values; all others are redacted.
+    /// </summary>
+    [Test]
+    public async Task HandleAsync_ShouldPreserveAllowedHeaders_AndRedactOthers()
+    {
+        // Arrange
+        var originalHeaders = new Dictionary<string, string>
+        {
+            ["TraceID"] = "trace-12345",
+            ["Authorization"] = "Bearer secret-token",
+            ["X-Correlation-Id"] = "corr-67890"
+        };
+        var contextWithHeaders = CreateMockContext(headers: originalHeaders);
+
+        var policy = new DeadLetterPolicy { SourceStream = "orders-stream", SourceConsumer = "orders-consumer", TargetStream = StreamName.From("dlq"), TargetSubject = "dlq.orders" };
+        _policyRegistry.Get("orders-stream", "orders-consumer").Returns(policy);
+
+        _serializer.Serialize(Arg.Any<IBufferWriter<byte>>(), Arg.Any<TestMessage>());
+        _serializer.GetContentType<TestMessage>().Returns("application/json");
+
+        DlqMessage? capturedDlqMessage = null;
+        _publisher.PublishAsync(
+            Arg.Any<string>(),
+            Arg.Any<DlqMessage>(),
+            Arg.Any<string>(),
+            Arg.Any<MessageHeaders?>(),
+            Arg.Any<CancellationToken>())
+            .Returns(callInfo =>
+            {
+                capturedDlqMessage = callInfo.Arg<DlqMessage>();
+                return Task.CompletedTask;
+            });
+
+        // Create handler with allowlist for trace/correlation headers
+        var handler = new DefaultDlqPoisonHandler<TestMessage>(
+            _publisher,
+            _serializer,
+            _typeAliasRegistry,
+            _objectStore,
+            _notificationService,
+            _policyRegistry,
+            _logger,
+            headerRedactionOptions: Options.Create(new DlqHeaderRedactionOptions
+            {
+                RedactHeaders = true,
+                AllowedHeaderPrefixes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    "TraceID", "X-Correlation-"
+                }
+            }));
+
+        // Act
+        await handler.HandleAsync(
+            contextWithHeaders,
+            "orders-stream",
+            "orders-consumer",
+            maxDeliveries: 3,
+            new InvalidOperationException("Processing failed"),
+            CancellationToken.None);
+
+        // Assert - allowed headers preserved, others redacted
+        capturedDlqMessage.ShouldNotBeNull();
+        capturedDlqMessage.OriginalHeaders.ShouldNotBeNull();
         capturedDlqMessage.OriginalHeaders["TraceID"].ShouldBe("trace-12345");
-        capturedDlqMessage.OriginalHeaders["CorrelationID"].ShouldBe("corr-67890");
-        capturedDlqMessage.OriginalHeaders["X-Custom-Header"].ShouldBe("custom-value");
+        capturedDlqMessage.OriginalHeaders["X-Correlation-Id"].ShouldBe("corr-67890");
+        capturedDlqMessage.OriginalHeaders["Authorization"].ShouldBe("[REDACTED]");
     }
 
     [Test]
