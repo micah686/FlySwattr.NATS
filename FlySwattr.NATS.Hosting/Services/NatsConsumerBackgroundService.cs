@@ -334,13 +334,12 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
         return new HydratedMessageContext<T>(rawContext, _serializer!.Deserialize<T>(rawContext.Message));
     }
 
-    private static string ExtractAndValidateObjectKey(string claimCheckRef)
+    private string ExtractAndValidateObjectKey(string claimCheckRef)
     {
-        const string prefix = "objstore://";
-        var objectKey = claimCheckRef.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
-            ? claimCheckRef[prefix.Length..]
-            : claimCheckRef;
-        return MessageSecurity.ValidateObjectStoreKey(objectKey, nameof(claimCheckRef));
+        return MessageSecurity.ValidateClaimCheckReference(
+            claimCheckRef,
+            _offloadingOptions?.ObjectKeyPrefix,
+            nameof(claimCheckRef));
     }
 
     private async Task<T> DeserializeClaimCheckAsync(string objectKey, CancellationToken cancellationToken)

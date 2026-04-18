@@ -123,7 +123,8 @@ public static class ServiceCollectionExtensions
             sp.GetRequiredService<ILogger<Services.NatsDlqRemediationService>>(),
             sp.GetRequiredService<NatsJetStreamBus>(),
             sp.GetService<IObjectStore>(),
-            sp.GetService<IDlqNotificationService>()
+            sp.GetService<IDlqNotificationService>(),
+            wireOptions: sp.GetService<IOptions<WireCompatibilityOptions>>()
         ));
         return services;
     }

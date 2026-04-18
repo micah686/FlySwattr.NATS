@@ -88,6 +88,15 @@ internal sealed class MemoryPackSchemaEnvelopeSerializer
     }
 
     public T? Deserialize<T>(ReadOnlySpan<byte> data, MemoryPackSerializerOptions? options = null)
+        => Deserialize<T>(data, maxPayloadSize: 0, options);
+
+    /// <summary>
+    /// Deserializes a schema-enveloped payload, optionally enforcing a maximum size on the inner
+    /// payload byte array. Pass <paramref name="maxPayloadSize"/> &lt;= 0 to skip the cap.
+    /// The cap protects against an attacker crafting a small outer frame that declares a very
+    /// large inner <c>byte[]</c> to force runaway allocations during deserialization.
+    /// </summary>
+    public T? Deserialize<T>(ReadOnlySpan<byte> data, int maxPayloadSize, MemoryPackSerializerOptions? options = null)
     {
         var descriptor = MemoryPackSchemaMetadata.GetDescriptor<T>();
 
@@ -99,6 +108,12 @@ internal sealed class MemoryPackSchemaEnvelopeSerializer
 
         var envelope = MemoryPackSerializer.Deserialize<MemoryPackSchemaEnvelope>(data[Magic.Length..], options)
                        ?? throw new MemoryPackSerializationException($"Missing schema envelope for {descriptor.SchemaId}.");
+
+        if (maxPayloadSize > 0 && envelope.Payload.Length > maxPayloadSize)
+        {
+            throw new InvalidOperationException(
+                $"Enveloped payload is {envelope.Payload.Length} bytes which exceeds the configured MaxPayloadSize of {maxPayloadSize} bytes.");
+        }
 
         if (!string.Equals(envelope.SchemaId, descriptor.SchemaId, StringComparison.Ordinal))
         {

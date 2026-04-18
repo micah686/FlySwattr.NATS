@@ -623,6 +623,17 @@ internal class BasicNatsConsumerService<T> : BackgroundService
                             { "error.type", ex.GetType().Name }
                         };
                         NatsTelemetry.MessagesFailed.Add(1, errorTags);
+
+                        // Nak so the server redelivers instead of waiting for the ack-wait timeout.
+                        // Best-effort — swallow nak failures so they can't knock the consumer loop down.
+                        try
+                        {
+                            await msg.NakAsync(delay: TimeSpan.FromSeconds(5), cancellationToken: stoppingToken);
+                        }
+                        catch (Exception nakEx)
+                        {
+                            _logger.LogWarning(nakEx, "Failed to NAK message from {Stream}/{Consumer} after handler exception", _stream, _consumerName);
+                        }
                     }
                     finally
                     {

@@ -21,6 +21,20 @@ internal class NatsConfigurationValidator : AbstractValidator<NatsConfiguration>
             })
             .WithMessage("NATS Configuration validation failed. Check URL format.");
 
+        RuleFor(x => x.Url)
+            .Must(url =>
+            {
+                if (string.IsNullOrWhiteSpace(url)) return true; // other rule reports invalid URLs
+                foreach (var u in url.Split(','))
+                {
+                    if (!Uri.TryCreate(u.Trim(), UriKind.Absolute, out var uri)) return true;
+                    if (uri.Scheme != "tls" && uri.Scheme != "wss") return false;
+                }
+                return true;
+            })
+            .When(x => !x.AllowInsecureTransport)
+            .WithMessage("NATS Configuration rejects plaintext transport: all URLs must use 'tls' or 'wss' when AllowInsecureTransport is false.");
+
         When(x => x.TlsOpts != null, () =>
         {
             RuleFor(x => x.TlsOpts!.CaFile)
