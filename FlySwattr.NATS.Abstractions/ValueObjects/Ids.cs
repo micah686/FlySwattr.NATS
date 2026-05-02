@@ -7,8 +7,7 @@ namespace FlySwattr.NATS.Abstractions;
 [ValueObject<string>]
 public partial struct StreamName
 {
-    [GeneratedRegex(@"^[a-zA-Z0-9_-]+$")]
-    private static partial Regex ValidPattern();
+    private static readonly Regex ValidPattern = new("^[a-zA-Z0-9_-]+$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
     
     private static Validation Validate(string value)
     {
@@ -16,7 +15,7 @@ public partial struct StreamName
             return Validation.Invalid("Stream name cannot be empty");
         if (value.Length > 256)
             return Validation.Invalid("Stream name cannot exceed 256 characters");
-        if (!ValidPattern().IsMatch(value))
+        if (!ValidPattern.IsMatch(value))
             return Validation.Invalid("Stream name can only contain letters, numbers, underscores, and hyphens");
         return Validation.Ok;
     }
@@ -25,8 +24,7 @@ public partial struct StreamName
 [ValueObject<string>]
 public partial struct ConsumerName
 {
-    [GeneratedRegex(@"^[a-zA-Z0-9_-]+$")]
-    private static partial Regex ValidPattern();
+    private static readonly Regex ValidPattern = new("^[a-zA-Z0-9_-]+$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
     
     private static Validation Validate(string value)
     {
@@ -34,7 +32,7 @@ public partial struct ConsumerName
             return Validation.Invalid("Consumer name cannot be empty");
         if (value.Length > 256)
             return Validation.Invalid("Consumer name cannot exceed 256 characters");
-        if (!ValidPattern().IsMatch(value))
+        if (!ValidPattern.IsMatch(value))
             return Validation.Invalid("Consumer name can only contain letters, numbers, underscores, and hyphens");
         return Validation.Ok;
     }
@@ -45,8 +43,7 @@ public partial struct SubjectName
 {
     // NATS subjects allow alphanumeric, dots (hierarchy), and wildcards (* for single token, > for multi)
     // Wildcards should only appear in subscription patterns, not in publish subjects
-    [GeneratedRegex(@"^[a-zA-Z0-9_\-.*>]+$")]
-    private static partial Regex ValidPattern();
+    private static readonly Regex ValidPattern = new("^[a-zA-Z0-9_\\-.*>]+$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
     
     private static Validation Validate(string value)
     {
@@ -72,7 +69,7 @@ public partial struct SubjectName
         if (value.Contains("..") || value.Contains("**") || value.Contains(">>"))
             return Validation.Invalid("Subject contains invalid pattern sequences");
 
-        if (!ValidPattern().IsMatch(value))
+        if (!ValidPattern.IsMatch(value))
             return Validation.Invalid("Subject name contains invalid characters");
         // Check for invalid wildcard positions (> must be at end if present)
         if (value.Contains('>') && !value.EndsWith('>'))
@@ -86,8 +83,7 @@ public partial struct SubjectName
 public partial struct BucketName
 {
     // KV/Object store bucket names: alphanumeric, underscores, hyphens only
-    [GeneratedRegex(@"^[a-zA-Z0-9_-]+$")]
-    private static partial Regex ValidPattern();
+    private static readonly Regex ValidPattern = new("^[a-zA-Z0-9_-]+$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
     
     private static Validation Validate(string value)
     {
@@ -95,7 +91,7 @@ public partial struct BucketName
             return Validation.Invalid("Bucket name cannot be empty");
         if (value.Length > 256)
             return Validation.Invalid("Bucket name cannot exceed 256 characters");
-        if (!ValidPattern().IsMatch(value))
+        if (!ValidPattern.IsMatch(value))
             return Validation.Invalid("Bucket name can only contain letters, numbers, underscores, and hyphens");
         return Validation.Ok;
     }
@@ -105,8 +101,7 @@ public partial struct BucketName
 public partial struct QueueGroup
 {
     // Queue groups: no spaces, dots, or wildcards
-    [GeneratedRegex(@"^[a-zA-Z0-9_-]+$")]
-    private static partial Regex ValidPattern();
+    private static readonly Regex ValidPattern = new("^[a-zA-Z0-9_-]+$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
     
     private static Validation Validate(string value)
     {
@@ -114,7 +109,7 @@ public partial struct QueueGroup
             return Validation.Invalid("Queue group cannot be empty");
         if (value.Length > 256)
             return Validation.Invalid("Queue group cannot exceed 256 characters");
-        if (!ValidPattern().IsMatch(value))
+        if (!ValidPattern.IsMatch(value))
             return Validation.Invalid("Queue group can only contain letters, numbers, underscores, and hyphens");
         return Validation.Ok;
     }

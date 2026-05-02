@@ -169,7 +169,7 @@ public class NatsConsumerBackgroundServiceTests
             var msg = Substitute.For<INatsJSMsg<string>>();
             msg.Data.Returns($"message-{i}");
             msg.Subject.Returns("test.subject");
-            msg.NakAsync(default, default, default)
+            msg.NakAsync(default, default)
                 .ReturnsForAnyArgs(ValueTask.CompletedTask)
                 .AndDoes(x => Interlocked.Increment(ref nakCount));
             mockMessages.Add(msg);
@@ -372,7 +372,7 @@ public class NatsConsumerBackgroundServiceTests
         var secondMsg = Substitute.For<INatsJSMsg<string>>();
         secondMsg.Data.Returns("second");
         secondMsg.Subject.Returns("test.subject.2");
-        secondMsg.NakAsync(default, default, default).ReturnsForAnyArgs(ValueTask.CompletedTask);
+        secondMsg.NakAsync(default, default).ReturnsForAnyArgs(ValueTask.CompletedTask);
 
         consumer.ConsumeAsync<string>(
             Arg.Any<INatsDeserialize<string>>(),
@@ -469,7 +469,7 @@ public class NatsConsumerBackgroundServiceTests
         {
             try
             {
-                await message.Received(1).NakAsync(default, TimeSpan.FromSeconds(1), Arg.Any<CancellationToken>());
+                await message.Received(1).NakAsync(Arg.Is<AckOpts?>(opts => opts != null && opts.Value.NakDelay == TimeSpan.FromSeconds(1)), Arg.Any<CancellationToken>());
                 return;
             }
             catch
@@ -478,6 +478,6 @@ public class NatsConsumerBackgroundServiceTests
             }
         }
 
-        await message.Received(1).NakAsync(default, TimeSpan.FromSeconds(1), Arg.Any<CancellationToken>());
+        await message.Received(1).NakAsync(Arg.Is<AckOpts?>(opts => opts != null && opts.Value.NakDelay == TimeSpan.FromSeconds(1)), Arg.Any<CancellationToken>());
     }
 }

@@ -8,8 +8,7 @@ public class NatsContainerFixture : IAsyncDisposable
 
     public NatsContainerFixture()
     {
-        _container = new NatsBuilder()
-            .WithImage("nats:2.10") // Explicit version
+        _container = new NatsBuilder("nats:2.10")
             .WithCommand("--jetstream")
             .Build();
     }

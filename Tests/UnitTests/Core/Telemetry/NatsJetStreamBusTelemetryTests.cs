@@ -387,9 +387,19 @@ public class NatsJetStreamBusTelemetryTests : IAsyncDisposable
         SetupPublishMock();
         var startCount = _capturedActivities.Count;
 
-        // Act - publish without a parent activity
-        await _bus.PublishAsync(subject1, message, "msg-1");
-        await _bus.PublishAsync(subject2, message, "msg-2");
+        var previousActivity = Activity.Current;
+        try
+        {
+            Activity.Current = null;
+
+            // Act - publish without a parent activity
+            await _bus.PublishAsync(subject1, message, "msg-1");
+            await _bus.PublishAsync(subject2, message, "msg-2");
+        }
+        finally
+        {
+            Activity.Current = previousActivity;
+        }
 
         // Assert - find our specific activities
         var ourActivities = _capturedActivities.Skip(startCount).Where(a => a.OperationName.Contains(prefix)).ToList();

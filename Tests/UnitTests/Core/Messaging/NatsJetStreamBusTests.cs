@@ -146,7 +146,7 @@ public class NatsJetStreamBusTests : IAsyncDisposable
 
         // Assert
         await Assert.That(publishedHeaders).IsNotNull();
-        await Assert.That(publishedHeaders!["X-Test-Wire-Version"]).IsEqualTo("7");
+        await Assert.That(publishedHeaders!["X-Test-Wire-Version"].Single()).IsEqualTo("7");
     }
 
     private record TestMessage(string Data);
