@@ -195,9 +195,7 @@ public class NatsTelemetryTests : IDisposable
     {
         // Arrange
         var headers = new NatsHeaders();
-        // Create an activity that won't be sampled (no listener for this source)
-        using var tempSource = new ActivitySource("temp-test-source");
-        using var activity = tempSource.StartActivity("test"); // Will be null without listener
+        using var activity = new Activity("test");
 
         // Act
         NatsTelemetry.InjectTraceContext(activity, headers);

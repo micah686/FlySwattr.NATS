@@ -16,8 +16,8 @@
     </ItemGroup>
 
     <ItemGroup>
-      <PackageReference Include="DistributedLock.Core" Version="1.0.8" />
-      <PackageReference Include="Polly.Core" Version="8.6.5" />
+      <PackageReference Include="DistributedLock.Core" Version="1.0.9" />
+      <PackageReference Include="Polly.Core" Version="8.6.6" />
     </ItemGroup>
 
 </Project>

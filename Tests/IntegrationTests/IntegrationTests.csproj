@@ -11,16 +11,16 @@
 
     <ItemGroup>
         <PackageReference Include="MemoryPack" Version="1.21.4" />
-        <PackageReference Include="Microsoft.Extensions.Logging" Version="8.0.0" />
-        <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="8.0.0" />
-        <PackageReference Include="Microsoft.Testing.Extensions.Retry" Version="2.2.1" />
-        <PackageReference Include="NATS.Client.Serializers.Json" Version="2.7.0" />
-        <PackageReference Include="NATS.Net" Version="2.7.0" />
-        <PackageReference Include="Testcontainers.Nats" Version="4.1.0" />
-        <PackageReference Include="TUnit" Version="1.8.1" />
+        <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.7" />
+        <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.7" />
+        <PackageReference Include="Microsoft.Testing.Extensions.Retry" Version="2.2.2" />
+        <PackageReference Include="NATS.Client.Serializers.Json" Version="2.7.3" />
+        <PackageReference Include="NATS.Net" Version="2.7.3" />
+        <PackageReference Include="Testcontainers.Nats" Version="4.11.0" />
+        <PackageReference Include="TUnit" Version="1.43.2" />
         <PackageReference Include="NSubstitute" Version="5.3.0" />
         <PackageReference Include="Shouldly" Version="4.3.0" />
-        <PackageReference Include="ZiggyCreatures.FusionCache" Version="2.5.0" />
+        <PackageReference Include="ZiggyCreatures.FusionCache" Version="2.6.0" />
     </ItemGroup>
 
     <ItemGroup>

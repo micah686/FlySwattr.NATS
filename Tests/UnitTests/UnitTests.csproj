@@ -11,18 +11,18 @@
 
 
     <ItemGroup>
-        <PackageReference Include="MediatR" Version="14.0.0" />
+        <PackageReference Include="MediatR" Version="14.1.0" />
         <PackageReference Include="MemoryPack" Version="1.21.4" />
-        <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.0" />
-        <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="8.0.0" />
-        <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="9.0.0" />
-        <PackageReference Include="Microsoft.Testing.Extensions.Retry" Version="2.2.1" />
-        <PackageReference Include="TUnit" Version="1.8.1" />
+        <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.7" />
+        <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="10.0.7" />
+        <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.5.0" />
+        <PackageReference Include="Microsoft.Testing.Extensions.Retry" Version="2.2.2" />
+        <PackageReference Include="TUnit" Version="1.43.2" />
         <PackageReference Include="NSubstitute" Version="5.3.0" />
         <PackageReference Include="Shouldly" Version="4.3.0" />
-        <PackageReference Include="NATS.Net" Version="2.7.0" />
-        <PackageReference Include="Polly.Testing" Version="8.5.0" />
-        <PackageReference Include="Vogen" Version="8.0.4" />
+        <PackageReference Include="NATS.Net" Version="2.7.3" />
+        <PackageReference Include="Polly.Testing" Version="8.6.6" />
+        <PackageReference Include="Vogen" Version="8.0.5" />
         <PackageReference Include="OpenTelemetry.Api" Version="1.15.3" />
     </ItemGroup>
 
