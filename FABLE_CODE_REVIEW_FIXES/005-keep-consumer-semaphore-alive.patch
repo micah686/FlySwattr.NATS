@@ -1,0 +1,208 @@
+diff --git a/FlySwattr.NATS.Resilience/Decorators/ResilientJetStreamConsumer.cs b/FlySwattr.NATS.Resilience/Decorators/ResilientJetStreamConsumer.cs
+index 1248b88..1a5075d 100644
+--- a/FlySwattr.NATS.Resilience/Decorators/ResilientJetStreamConsumer.cs
++++ b/FlySwattr.NATS.Resilience/Decorators/ResilientJetStreamConsumer.cs
+@@ -91,27 +91,22 @@ internal class ResilientJetStreamConsumer : IJetStreamConsumer
+             ? WrapHandlerWithSemaphore(consumerKey, opts.MaxConcurrency.Value, handler)
+             : handler;
+ 
+-        try
++        // Wrap the consume call with bulkhead + circuit breaker.
++        //
++        // IMPORTANT: _inner.ConsumeAsync returns once the background consumer has STARTED,
++        // not when it stops — messages keep flowing through effectiveHandler afterwards.
++        // The per-consumer semaphore must therefore stay alive for the process lifetime;
++        // disposing it here (as a finally-block previously did) made every subsequent
++        // message fail with ObjectDisposedException. The semaphore manager owns disposal
++        // on shutdown, and the pipeline cache evicts stale entries on its own timer.
++        await bulkheadPipeline.ExecuteAsync(async ct =>
+         {
+-            // Wrap the consume call with bulkhead + circuit breaker
+-            await bulkheadPipeline.ExecuteAsync(async ct =>
++            await consumerPipeline.ExecuteAsync(async innerCt =>
+             {
+-                await consumerPipeline.ExecuteAsync(async innerCt =>
+-                {
+-                    await _inner.ConsumeAsync(
+-                        stream, subject, effectiveHandler, opts, innerCt);
+-                }, ct);
+-            }, cancellationToken);
+-        }
+-        finally
+-        {
+-            // Clean up resources when consumer stops
+-            if (opts.MaxConcurrency.HasValue)
+-            {
+-                _semaphoreManager.RemoveConsumerSemaphore(consumerKey);
+-            }
+-            _resilienceBuilder.InvalidatePipeline(consumerKey);
+-        }
++                await _inner.ConsumeAsync(
++                    stream, subject, effectiveHandler, opts, innerCt);
++            }, ct);
++        }, cancellationToken);
+     }
+ 
+     public async Task ConsumePullAsync<T>(
+@@ -140,27 +135,16 @@ internal class ResilientJetStreamConsumer : IJetStreamConsumer
+             ? WrapHandlerWithSemaphore(consumerKey, opts.MaxConcurrency.Value, handler)
+             : handler;
+ 
+-        try
++        // Wrap the consume call. See ConsumeAsync above: the inner call returns at consumer
++        // START, so the per-consumer semaphore must not be disposed here.
++        await bulkheadPipeline.ExecuteAsync(async ct =>
+         {
+-            // Wrap the consume call
+-            await bulkheadPipeline.ExecuteAsync(async ct =>
++            await consumerPipeline.ExecuteAsync(async innerCt =>
+             {
+-                await consumerPipeline.ExecuteAsync(async innerCt =>
+-                {
+-                    await _inner.ConsumePullAsync(
+-                        stream, consumer, effectiveHandler, opts, innerCt);
+-                }, ct);
+-            }, cancellationToken);
+-        }
+-        finally
+-        {
+-            // Clean up resources when consumer stops
+-            if (opts.MaxConcurrency.HasValue)
+-            {
+-                _semaphoreManager.RemoveConsumerSemaphore(consumerKey);
+-            }
+-            _resilienceBuilder.InvalidatePipeline(consumerKey);
+-        }
++                await _inner.ConsumePullAsync(
++                    stream, consumer, effectiveHandler, opts, innerCt);
++            }, ct);
++        }, cancellationToken);
+     }
+ 
+     /// <summary>
+diff --git a/Tests/UnitTests/Resilience/Decorators/ResilientJetStreamConsumerTests.cs b/Tests/UnitTests/Resilience/Decorators/ResilientJetStreamConsumerTests.cs
+index 415392d..66113f0 100644
+--- a/Tests/UnitTests/Resilience/Decorators/ResilientJetStreamConsumerTests.cs
++++ b/Tests/UnitTests/Resilience/Decorators/ResilientJetStreamConsumerTests.cs
+@@ -72,7 +72,7 @@ public class ResilientJetStreamConsumerTests : IAsyncDisposable
+     }
+ 
+     [Test]
+-    public async Task ConsumeAsync_ShouldCleanupSemaphore_WhenConsumerCompletes()
++    public async Task ConsumeAsync_ShouldKeepSemaphoreAlive_AfterConsumeReturns()
+     {
+         // Arrange
+         var stream = StreamName.From("stream");
+@@ -97,8 +97,10 @@ public class ResilientJetStreamConsumerTests : IAsyncDisposable
+         // Semaphore should have existed during consumption
+         semaphoreExistedDuringConsume.ShouldBeTrue("Semaphore should exist during consumption");
+         
+-        // After consumer completes, semaphore should be cleaned up (memory leak fix)
+-        _semaphoreManager.HasConsumerSemaphore(key).ShouldBeFalse("Semaphore should be cleaned up after consumer completes");
++        // ConsumeAsync returns when the background consumer has STARTED, not stopped.
++        // The wrapped handler keeps using this semaphore for every message, so it must
++        // stay alive; the manager disposes all semaphores on shutdown.
++        _semaphoreManager.HasConsumerSemaphore(key).ShouldBeTrue("Semaphore must stay alive while the consumer keeps processing messages");
+         
+         await _inner.Received(1).ConsumeAsync(
+             stream, 
+diff --git a/Tests/UnitTests/Resilience/ResilientConsumerSemaphoreLifetimeTests.cs b/Tests/UnitTests/Resilience/ResilientConsumerSemaphoreLifetimeTests.cs
+new file mode 100644
+index 0000000..106f868
+--- /dev/null
++++ b/Tests/UnitTests/Resilience/ResilientConsumerSemaphoreLifetimeTests.cs
+@@ -0,0 +1,94 @@
++using FlySwattr.NATS.Abstractions;
++using FlySwattr.NATS.Resilience.Builders;
++using FlySwattr.NATS.Resilience.Configuration;
++using FlySwattr.NATS.Resilience.Decorators;
++using Microsoft.Extensions.Logging.Abstractions;
++using Microsoft.Extensions.Options;
++using NSubstitute;
++using Shouldly;
++using TUnit.Core;
++
++namespace UnitTests.Resilience;
++
++/// <summary>
++/// IJetStreamConsumer.ConsumeAsync returns when the background consumer has STARTED, not
++/// when it stops. The resilient decorator previously disposed the per-consumer semaphore in
++/// a finally block right after start, so every message processed afterwards failed with
++/// ObjectDisposedException. These tests pin that the handler wrapper remains usable after
++/// the consume call has returned.
++/// </summary>
++[Property("nTag", "Resilience")]
++public class ResilientConsumerSemaphoreLifetimeTests
++{
++    private static ResilientJetStreamConsumer CreateSut(IJetStreamConsumer inner)
++    {
++        var bulkheads = new BulkheadManager(
++            Options.Create(new BulkheadConfiguration()),
++            NullLogger<BulkheadManager>.Instance);
++        var semaphores = new ConsumerSemaphoreManager(NullLogger<ConsumerSemaphoreManager>.Instance);
++        var resilience = new HierarchicalResilienceBuilder(NullLogger<HierarchicalResilienceBuilder>.Instance);
++        return new ResilientJetStreamConsumer(
++            inner,
++            bulkheads,
++            semaphores,
++            resilience,
++            NullLogger<ResilientJetStreamConsumer>.Instance);
++    }
++
++    [Test]
++    public async Task ConsumeAsync_WithMaxConcurrency_HandlerStillWorksAfterStartReturns()
++    {
++        Func<IJsMessageContext<string>, Task>? capturedHandler = null;
++        var inner = Substitute.For<IJetStreamConsumer>();
++        // ForAnyArgs + CallInfo capture: Vogen struct arguments (StreamName/SubjectName)
++        // confuse NSubstitute's Arg matchers, so capture the handler from the call info.
++        inner.ConsumeAsync<string>(StreamName.From("any"), SubjectName.From("any"), null!, null, CancellationToken.None)
++            .ReturnsForAnyArgs(ci =>
++            {
++                capturedHandler = ci.Arg<Func<IJsMessageContext<string>, Task>>();
++                return Task.CompletedTask; // background consumer "started"
++            });
++
++        var sut = CreateSut(inner);
++        var handled = 0;
++
++        await sut.ConsumeAsync<string>(
++            StreamName.From("ORDERS"),
++            SubjectName.From("orders.created"),
++            _ => { Interlocked.Increment(ref handled); return Task.CompletedTask; },
++            new JetStreamConsumeOptions { MaxConcurrency = 2 });
++
++        capturedHandler.ShouldNotBeNull();
++
++        // Simulate messages arriving AFTER ConsumeAsync returned (the real-world flow).
++        var context = Substitute.For<IJsMessageContext<string>>();
++        await Should.NotThrowAsync(() => capturedHandler!(context));
++        await Should.NotThrowAsync(() => capturedHandler!(context));
++        handled.ShouldBe(2);
++    }
++
++    [Test]
++    public async Task ConsumePullAsync_WithMaxConcurrency_HandlerStillWorksAfterStartReturns()
++    {
++        Func<IJsMessageContext<string>, Task>? capturedHandler = null;
++        var inner = Substitute.For<IJetStreamConsumer>();
++        inner.ConsumePullAsync<string>(StreamName.From("any"), ConsumerName.From("any"), null!, null, CancellationToken.None)
++            .ReturnsForAnyArgs(ci =>
++            {
++                capturedHandler = ci.Arg<Func<IJsMessageContext<string>, Task>>();
++                return Task.CompletedTask;
++            });
++
++        var sut = CreateSut(inner);
++
++        await sut.ConsumePullAsync<string>(
++            StreamName.From("ORDERS"),
++            ConsumerName.From("orders-processor"),
++            _ => Task.CompletedTask,
++            new JetStreamConsumeOptions { MaxConcurrency = 1 });
++
++        capturedHandler.ShouldNotBeNull();
++        var context = Substitute.For<IJsMessageContext<string>>();
++        await Should.NotThrowAsync(() => capturedHandler!(context));
++    }
++}

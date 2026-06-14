@@ -1,0 +1,238 @@
+diff --git a/FlySwattr.NATS.Topology/Managers/NatsTopologyManager.cs b/FlySwattr.NATS.Topology/Managers/NatsTopologyManager.cs
+index 0a02459..604d889 100644
+--- a/FlySwattr.NATS.Topology/Managers/NatsTopologyManager.cs
++++ b/FlySwattr.NATS.Topology/Managers/NatsTopologyManager.cs
+@@ -305,9 +305,28 @@ internal class NatsTopologyManager : ITopologyManager
+         }
+         catch (NatsJSApiException ex) when (IsResourceExistsError(ex))
+         {
+-            // DLQ stream already exists, update it
+-            await _jsContext.UpdateStreamAsync(dlqStreamConfig, cancellationToken);
+-            _logger.LogInformation("DLQ Stream {Stream} updated.", dlqStreamName);
++            // The DLQ stream already exists. Multiple consumers may share one DLQ target
++            // stream with different subjects, and users may have customized the stream.
++            // Never replace the existing configuration wholesale — that would remove the
++            // other policies' subjects and break their DLQ publishes. Merge this policy's
++            // subject into the existing subject set and leave everything else untouched.
++            var existingStream = await _jsContext.GetStreamAsync(dlqStreamName, cancellationToken: cancellationToken);
++            var existingConfig = existingStream.Info.Config;
++            var existingSubjects = existingConfig.Subjects ?? new List<string>();
++
++            if (SubjectCovered(existingSubjects, dlqSubject))
++            {
++                _logger.LogDebug("DLQ Stream {Stream} already covers subject {Subject}.", dlqStreamName, dlqSubject);
++            }
++            else
++            {
++                var mergedSubjects = new List<string>(existingSubjects) { dlqSubject };
++                existingConfig.Subjects = mergedSubjects;
++                await _jsContext.UpdateStreamAsync(existingConfig, cancellationToken);
++                _logger.LogInformation(
++                    "DLQ Stream {Stream} updated to additionally cover subject {Subject}.",
++                    dlqStreamName, dlqSubject);
++            }
+         }
+ 
+         _logger.LogInformation("DLQ Stream {Stream} ready.", dlqStreamName);
+@@ -449,6 +468,46 @@ internal class NatsTopologyManager : ITopologyManager
+         }
+     }
+ 
++    /// <summary>
++    /// True when any of the stream's existing subject patterns already matches the candidate
++    /// subject (exact or via NATS wildcards), in which case no stream update is required.
++    /// </summary>
++    private static bool SubjectCovered(IEnumerable<string> existingPatterns, string subject)
++        => existingPatterns.Any(pattern => SubjectMatches(pattern, subject));
++
++    private static bool SubjectMatches(string pattern, string subject)
++    {
++        if (string.Equals(pattern, subject, StringComparison.Ordinal))
++        {
++            return true;
++        }
++
++        var patternTokens = pattern.Split('.');
++        var subjectTokens = subject.Split('.');
++
++        for (var i = 0; i < patternTokens.Length; i++)
++        {
++            if (patternTokens[i] == ">")
++            {
++                // '>' matches one or more remaining tokens.
++                return subjectTokens.Length > i;
++            }
++
++            if (i >= subjectTokens.Length)
++            {
++                return false;
++            }
++
++            if (patternTokens[i] != "*" &&
++                !string.Equals(patternTokens[i], subjectTokens[i], StringComparison.Ordinal))
++            {
++                return false;
++            }
++        }
++
++        return patternTokens.Length == subjectTokens.Length;
++    }
++
+     private static InvalidOperationException CreateImmutableConsumerMismatchException(ConsumerSpec spec, NatsJSApiException ex)
+         => CreateImmutableConsumerMismatchException(
+             spec,
+diff --git a/Tests/IntegrationTests/Topology/DlqSharedTargetStreamTests.cs b/Tests/IntegrationTests/Topology/DlqSharedTargetStreamTests.cs
+new file mode 100644
+index 0000000..b727e64
+--- /dev/null
++++ b/Tests/IntegrationTests/Topology/DlqSharedTargetStreamTests.cs
+@@ -0,0 +1,149 @@
++using FlySwattr.NATS.Abstractions;
++using FlySwattr.NATS.Core;
++using FlySwattr.NATS.DistributedLock.Services;
++using FlySwattr.NATS.Topology.Managers;
++using IntegrationTests.Infrastructure;
++using Microsoft.Extensions.Logging.Abstractions;
++using NATS.Client.Core;
++using NATS.Client.JetStream;
++using NATS.Client.JetStream.Models;
++using NATS.Client.KeyValueStore;
++using NATS.Client.ObjectStore;
++using Shouldly;
++using TUnit.Core;
++
++namespace IntegrationTests.Topology;
++
++/// <summary>
++/// Multiple consumers commonly share one DLQ target stream with distinct subjects
++/// (e.g. one ORDERS-DLQ stream for all ORDERS consumers). Provisioning must merge
++/// subjects into the shared stream instead of replacing the subject list, otherwise
++/// the consumer provisioned first loses its DLQ subject and its DLQ publishes fail.
++/// </summary>
++[Property("nTag", "Topology")]
++public class DlqSharedTargetStreamTests
++{
++    [Test]
++    public async Task EnsureConsumer_TwoDlqPoliciesSameTargetStream_PreservesBothSubjects()
++    {
++        await using var fixture = new NatsContainerFixture();
++        await fixture.InitializeAsync();
++
++        var opts = new NatsOpts { Url = fixture.ConnectionString };
++        await using var conn = new NatsConnection(opts);
++        await conn.ConnectAsync();
++
++        var js = new NatsJSContext(conn);
++        var kv = new NatsKVContext(js);
++        var obj = new NatsObjContext(js);
++
++        var lockProvider = new NatsDistributedLockProvider(kv, NullLogger<NatsDistributedLockProvider>.Instance, TimeSpan.FromSeconds(5));
++        var dlqRegistry = new DlqPolicyRegistry(NullLogger<DlqPolicyRegistry>.Instance);
++        var manager = new NatsTopologyManager(js, kv, obj, NullLogger<NatsTopologyManager>.Instance, dlqRegistry, lockProvider);
++
++        await manager.EnsureStreamAsync(new StreamSpec
++        {
++            Name = StreamName.From("SHARED_SRC"),
++            Subjects = new[] { "shared.src.>" },
++            StorageType = StorageType.Memory,
++            RetentionPolicy = StreamRetention.Limits
++        });
++
++        var consumerA = new ConsumerSpec
++        {
++            StreamName = StreamName.From("SHARED_SRC"),
++            DurableName = ConsumerName.From("consumer-a"),
++            FilterSubject = "shared.src.a",
++            DeadLetterPolicy = new DeadLetterPolicy
++            {
++                SourceStream = "SHARED_SRC",
++                SourceConsumer = "consumer-a",
++                TargetStream = StreamName.From("SHARED-DLQ"),
++                TargetSubject = "shared.dlq.a"
++            }
++        };
++
++        var consumerB = new ConsumerSpec
++        {
++            StreamName = StreamName.From("SHARED_SRC"),
++            DurableName = ConsumerName.From("consumer-b"),
++            FilterSubject = "shared.src.b",
++            DeadLetterPolicy = new DeadLetterPolicy
++            {
++                SourceStream = "SHARED_SRC",
++                SourceConsumer = "consumer-b",
++                TargetStream = StreamName.From("SHARED-DLQ"),
++                TargetSubject = "shared.dlq.b"
++            }
++        };
++
++        await manager.EnsureConsumerAsync(consumerA);
++        await manager.EnsureConsumerAsync(consumerB);
++
++        var dlqStream = await js.GetStreamAsync("SHARED-DLQ");
++        dlqStream.Info.Config.Subjects.ShouldNotBeNull();
++        dlqStream.Info.Config.Subjects.ShouldContain("shared.dlq.a");
++        dlqStream.Info.Config.Subjects.ShouldContain("shared.dlq.b");
++
++        // Both DLQ subjects must actually accept publishes.
++        var ackA = await js.PublishAsync("shared.dlq.a", "poison-a");
++        ackA.EnsureSuccess();
++        var ackB = await js.PublishAsync("shared.dlq.b", "poison-b");
++        ackB.EnsureSuccess();
++    }
++
++    [Test]
++    public async Task EnsureConsumer_DlqPolicyAgainstWildcardCustomizedStream_DoesNotClobberSubjects()
++    {
++        await using var fixture = new NatsContainerFixture();
++        await fixture.InitializeAsync();
++
++        var opts = new NatsOpts { Url = fixture.ConnectionString };
++        await using var conn = new NatsConnection(opts);
++        await conn.ConnectAsync();
++
++        var js = new NatsJSContext(conn);
++        var kv = new NatsKVContext(js);
++        var obj = new NatsObjContext(js);
++
++        var lockProvider = new NatsDistributedLockProvider(kv, NullLogger<NatsDistributedLockProvider>.Instance, TimeSpan.FromSeconds(5));
++        var dlqRegistry = new DlqPolicyRegistry(NullLogger<DlqPolicyRegistry>.Instance);
++        var manager = new NatsTopologyManager(js, kv, obj, NullLogger<NatsTopologyManager>.Instance, dlqRegistry, lockProvider);
++
++        // User pre-declared the DLQ stream with a wildcard subject and custom retention.
++        await js.CreateStreamAsync(new StreamConfig("CUSTOM-DLQ", new[] { "custom.dlq.>" })
++        {
++            Storage = StreamConfigStorage.File,
++            Retention = StreamConfigRetention.Limits,
++            MaxAge = TimeSpan.FromDays(7)
++        });
++
++        await manager.EnsureStreamAsync(new StreamSpec
++        {
++            Name = StreamName.From("CUSTOM_SRC"),
++            Subjects = new[] { "custom.src.>" },
++            StorageType = StorageType.Memory,
++            RetentionPolicy = StreamRetention.Limits
++        });
++
++        await manager.EnsureConsumerAsync(new ConsumerSpec
++        {
++            StreamName = StreamName.From("CUSTOM_SRC"),
++            DurableName = ConsumerName.From("custom-consumer"),
++            FilterSubject = "custom.src.x",
++            DeadLetterPolicy = new DeadLetterPolicy
++            {
++                SourceStream = "CUSTOM_SRC",
++                SourceConsumer = "custom-consumer",
++                TargetStream = StreamName.From("CUSTOM-DLQ"),
++                TargetSubject = "custom.dlq.x"
++            }
++        });
++
++        var dlqStream = await js.GetStreamAsync("CUSTOM-DLQ");
++        // The wildcard already covers the policy subject; the stream must be left untouched.
++        dlqStream.Info.Config.Subjects.ShouldNotBeNull();
++        dlqStream.Info.Config.Subjects.ShouldContain("custom.dlq.>");
++        dlqStream.Info.Config.MaxAge.ShouldBe(TimeSpan.FromDays(7));
++    }
++}

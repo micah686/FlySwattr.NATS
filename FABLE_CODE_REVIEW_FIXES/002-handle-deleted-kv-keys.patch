@@ -1,0 +1,140 @@
+diff --git a/FlySwattr.NATS.Core/Stores/NatsDlqStore.cs b/FlySwattr.NATS.Core/Stores/NatsDlqStore.cs
+index 61a083d..272209d 100644
+--- a/FlySwattr.NATS.Core/Stores/NatsDlqStore.cs
++++ b/FlySwattr.NATS.Core/Stores/NatsDlqStore.cs
+@@ -243,6 +243,11 @@ internal class NatsDlqStore : IDlqStore
+         {
+             return null;
+         }
++        catch (NatsKVKeyDeletedException)
++        {
++            // The entry was deleted; the delete tombstone is the latest revision.
++            return null;
++        }
+         catch (Exception ex)
+         {
+             _logger.LogError(ex, "Failed to retrieve DLQ entry {MessageId}", id);
+@@ -364,6 +369,11 @@ internal class NatsDlqStore : IDlqStore
+             _logger.LogWarning("Cannot update status for DLQ entry {MessageId}: not found", id);
+             return new DlqEntryUpdateResult(DlqEntryUpdateOutcome.NotFound);
+         }
++        catch (NatsKVKeyDeletedException)
++        {
++            _logger.LogWarning("Cannot update status for DLQ entry {MessageId}: entry was deleted", id);
++            return new DlqEntryUpdateResult(DlqEntryUpdateOutcome.NotFound);
++        }
+         catch (NatsKVWrongLastRevisionException)
+         {
+             _logger.LogWarning("Cannot update status for DLQ entry {MessageId}: revision conflict", id);
+diff --git a/FlySwattr.NATS.Core/Stores/NatsKeyValueStore.cs b/FlySwattr.NATS.Core/Stores/NatsKeyValueStore.cs
+index 1696737..ffe8591 100644
+--- a/FlySwattr.NATS.Core/Stores/NatsKeyValueStore.cs
++++ b/FlySwattr.NATS.Core/Stores/NatsKeyValueStore.cs
+@@ -115,6 +115,12 @@ internal class NatsKeyValueStore : IKeyValueStore, IAsyncDisposable
+         {
+             return default;
+         }
++        catch (NatsKVKeyDeletedException)
++        {
++            // A delete/purge tombstone is the latest revision for this key.
++            // Contract: GetAsync returns default for keys that do not (any longer) hold a value.
++            return default;
++        }
+         catch (NatsJSApiException ex) when (ex.Error.Code is 503 or 504)
+         {
+             InvalidateCache();
+diff --git a/Tests/UnitTests/Core/Stores/DeletedKvKeyHandlingTests.cs b/Tests/UnitTests/Core/Stores/DeletedKvKeyHandlingTests.cs
+new file mode 100644
+index 0000000..b9972e5
+--- /dev/null
++++ b/Tests/UnitTests/Core/Stores/DeletedKvKeyHandlingTests.cs
+@@ -0,0 +1,89 @@
++using FlySwattr.NATS.Abstractions;
++using FlySwattr.NATS.Core;
++using FlySwattr.NATS.Core.Stores;
++using Microsoft.Extensions.Logging;
++using NATS.Client.Core;
++using NATS.Client.KeyValueStore;
++using NSubstitute;
++using Shouldly;
++using TUnit.Core;
++
++namespace UnitTests.Core.Stores;
++
++/// <summary>
++/// NATS.Net's <c>GetEntryAsync</c> throws <see cref="NatsKVKeyDeletedException"/> (not
++/// <see cref="NatsKVKeyNotFoundException"/>) when the latest revision of a key is a
++/// delete/purge tombstone. These tests pin the contract that deleted keys behave like
++/// missing keys for <see cref="NatsKeyValueStore"/> and <see cref="NatsDlqStore"/>.
++/// </summary>
++[Property("nTag", "Core")]
++public class DeletedKvKeyHandlingTests
++{
++    private static (NatsKeyValueStore Store, INatsKVStore KvStore) CreateKeyValueStore()
++    {
++        var kvContext = Substitute.For<INatsKVContext>();
++        var kvStore = Substitute.For<INatsKVStore>();
++        kvContext.GetStoreAsync("bucket", Arg.Any<CancellationToken>()).Returns(kvStore);
++        var store = new NatsKeyValueStore(kvContext, "bucket", Substitute.For<ILogger<NatsKeyValueStore>>());
++        return (store, kvStore);
++    }
++
++    private static (NatsDlqStore Store, INatsKVStore KvStore) CreateDlqStore()
++    {
++        var kvContext = Substitute.For<INatsKVContext>();
++        var kvStore = Substitute.For<INatsKVStore>();
++        kvContext.GetStoreAsync(Arg.Any<string>(), cancellationToken: Arg.Any<CancellationToken>()).Returns(kvStore);
++        var store = new NatsDlqStore(kvContext, Substitute.For<ILogger<NatsDlqStore>>());
++        return (store, kvStore);
++    }
++
++    [Test]
++    public async Task KeyValueStore_GetAsync_DeletedKey_ReturnsDefault()
++    {
++        var (store, kvStore) = CreateKeyValueStore();
++        kvStore.GetEntryAsync<string>("k1", Arg.Any<ulong>(), Arg.Any<INatsDeserialize<string>?>(), Arg.Any<CancellationToken>())
++            .Returns(_ => ValueTask.FromException<NatsKVEntry<string>>(new NatsKVKeyDeletedException(revision: 7)));
++
++        var result = await store.GetAsync<string>("k1");
++
++        result.ShouldBeNull();
++        await store.DisposeAsync();
++    }
++
++    [Test]
++    public async Task DlqStore_GetAsync_DeletedEntry_ReturnsNull()
++    {
++        var (store, kvStore) = CreateDlqStore();
++        kvStore.GetEntryAsync<string>(Arg.Any<string>(), Arg.Any<ulong>(), Arg.Any<INatsDeserialize<string>?>(), Arg.Any<CancellationToken>())
++            .Returns(_ => ValueTask.FromException<NatsKVEntry<string>>(new NatsKVKeyDeletedException(revision: 7)));
++
++        var result = await store.GetAsync("STREAM.consumer.42");
++
++        result.ShouldBeNull();
++    }
++
++    [Test]
++    public async Task DlqStore_UpdateStatusAsync_DeletedEntry_ReturnsNotFound()
++    {
++        var (store, kvStore) = CreateDlqStore();
++        kvStore.GetEntryAsync<string>(Arg.Any<string>(), Arg.Any<ulong>(), Arg.Any<INatsDeserialize<string>?>(), Arg.Any<CancellationToken>())
++            .Returns(_ => ValueTask.FromException<NatsKVEntry<string>>(new NatsKVKeyDeletedException(revision: 7)));
++
++        var result = await store.UpdateStatusAsync("STREAM.consumer.42", DlqMessageStatus.Archived);
++
++        result.Outcome.ShouldBe(DlqEntryUpdateOutcome.NotFound);
++        result.Succeeded.ShouldBeFalse();
++    }
++
++    [Test]
++    public async Task DlqStore_DeleteAsync_AlreadyDeletedEntry_ReturnsFalse()
++    {
++        var (store, kvStore) = CreateDlqStore();
++        kvStore.GetEntryAsync<string>(Arg.Any<string>(), Arg.Any<ulong>(), Arg.Any<INatsDeserialize<string>?>(), Arg.Any<CancellationToken>())
++            .Returns(_ => ValueTask.FromException<NatsKVEntry<string>>(new NatsKVKeyDeletedException(revision: 7)));
++
++        var deleted = await store.DeleteAsync("STREAM.consumer.42");
++
++        deleted.ShouldBeFalse();
++    }
++}

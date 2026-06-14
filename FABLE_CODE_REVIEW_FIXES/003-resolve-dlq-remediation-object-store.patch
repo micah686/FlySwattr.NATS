@@ -1,0 +1,88 @@
+diff --git a/FlySwattr.NATS.Core/Extensions/ServiceCollectionExtensions.cs b/FlySwattr.NATS.Core/Extensions/ServiceCollectionExtensions.cs
+index 0a94e6e..583130c 100644
+--- a/FlySwattr.NATS.Core/Extensions/ServiceCollectionExtensions.cs
++++ b/FlySwattr.NATS.Core/Extensions/ServiceCollectionExtensions.cs
+@@ -122,13 +122,35 @@ public static class ServiceCollectionExtensions
+             sp.GetRequiredService<IMessageTypeAliasRegistry>(),
+             sp.GetRequiredService<ILogger<Services.NatsDlqRemediationService>>(),
+             sp.GetRequiredService<NatsJetStreamBus>(),
+-            sp.GetService<IObjectStore>(),
++            ResolveDlqObjectStore(sp),
+             sp.GetService<IDlqNotificationService>(),
+             wireOptions: sp.GetService<IOptions<WireCompatibilityOptions>>()
+         ));
+         return services;
+     }
+ 
++    /// <summary>
++    /// Resolves the object store used for offloaded DLQ payloads. <c>DefaultDlqPoisonHandler</c>
++    /// offloads oversized payloads through the claim-check store, which is registered as a
++    /// <em>keyed</em> service (the key is carried in <see cref="PayloadOffloadingOptions.ObjectStoreServiceKey"/>).
++    /// The remediation service must resolve the same store, otherwise replay of offloaded
++    /// payloads fails with "Unable to retrieve payload for replay".
++    /// </summary>
++    private static IObjectStore? ResolveDlqObjectStore(IServiceProvider sp)
++    {
++        var offloadKey = sp.GetService<IOptions<PayloadOffloadingOptions>>()?.Value.ObjectStoreServiceKey;
++        if (offloadKey != null)
++        {
++            var keyed = sp.GetKeyedService<IObjectStore>(offloadKey);
++            if (keyed != null)
++            {
++                return keyed;
++            }
++        }
++
++        return sp.GetService<IObjectStore>();
++    }
++
+     public static IServiceCollection AddMessageTypeAlias<TMessage>(
+         this IServiceCollection services,
+         string alias)
+diff --git a/Tests/UnitTests/DI/DlqRemediationObjectStoreResolutionTests.cs b/Tests/UnitTests/DI/DlqRemediationObjectStoreResolutionTests.cs
+new file mode 100644
+index 0000000..334070d
+--- /dev/null
++++ b/Tests/UnitTests/DI/DlqRemediationObjectStoreResolutionTests.cs
+@@ -0,0 +1,41 @@
++using System.Reflection;
++using FlySwattr.NATS.Abstractions;
++using FlySwattr.NATS.Core.Services;
++using FlySwattr.NATS.Extensions;
++using Microsoft.Extensions.DependencyInjection;
++using Shouldly;
++using TUnit.Core;
++
++namespace UnitTests.DI;
++
++/// <summary>
++/// <c>DefaultDlqPoisonHandler</c> offloads oversized DLQ payloads through the keyed
++/// claim-check object store. The remediation service must resolve the same store, or
++/// replay of offloaded payloads always fails with "Unable to retrieve payload for replay".
++/// (The library never registers an unkeyed IObjectStore, so a plain
++/// GetService&lt;IObjectStore&gt;() resolution yields null.)
++/// </summary>
++[Property("nTag", "DI")]
++public class DlqRemediationObjectStoreResolutionTests
++{
++    [Test]
++    public async Task GoldenPath_DlqRemediationService_ResolvesClaimCheckObjectStore()
++    {
++        var services = new ServiceCollection();
++        services.AddLogging();
++        services.AddEnterpriseNATSMessaging(opts =>
++        {
++            opts.Core.Url = "nats://localhost:4222";
++        });
++
++        await using var sp = services.BuildServiceProvider();
++        var remediation = sp.GetRequiredService<IDlqRemediationService>();
++
++        remediation.ShouldBeOfType<NatsDlqRemediationService>();
++        var objectStoreField = typeof(NatsDlqRemediationService)
++            .GetField("_objectStore", BindingFlags.Instance | BindingFlags.NonPublic);
++        objectStoreField.ShouldNotBeNull();
++        objectStoreField.GetValue(remediation).ShouldNotBeNull(
++            "remediation must use the same (keyed) object store the poison handler offloads to");
++    }
++}

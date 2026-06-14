@@ -1,0 +1,113 @@
+diff --git a/FlySwattr.NATS.Hosting/Extensions/ServiceCollectionExtensions.cs b/FlySwattr.NATS.Hosting/Extensions/ServiceCollectionExtensions.cs
+index e741a22..cc23ec7 100644
+--- a/FlySwattr.NATS.Hosting/Extensions/ServiceCollectionExtensions.cs
++++ b/FlySwattr.NATS.Hosting/Extensions/ServiceCollectionExtensions.cs
+@@ -115,6 +115,15 @@ public static class ServiceCollectionExtensions
+                (options.MinAcceptedVersion.HasValue || options.MaxAcceptedVersion.HasValue);
+     }
+ 
++    /// <summary>
++    /// True only when payload offloading was actually registered (AddPayloadOffloading /
++    /// the golden path). <c>IOptions&lt;PayloadOffloadingOptions&gt;</c> must NOT be used for
++    /// this check: the options infrastructure materializes a default instance for any T,
++    /// so options-presence is always true in a real host even when offloading was never configured.
++    /// </summary>
++    internal static bool IsPayloadOffloadingConfigured(IServiceProvider sp)
++        => sp.GetService<NatsPayloadOffloadingMarker>() != null;
++
+     /// <summary>
+     /// Adds the DLQ Advisory Listener service that monitors NATS JetStream advisory events
+     /// for consumer delivery failures (MAX_DELIVERIES exceeded).
+diff --git a/FlySwattr.NATS.Hosting/Services/ConfiguredNatsConsumerHostedService.cs b/FlySwattr.NATS.Hosting/Services/ConfiguredNatsConsumerHostedService.cs
+index e2039ca..cd615ce 100644
+--- a/FlySwattr.NATS.Hosting/Services/ConfiguredNatsConsumerHostedService.cs
++++ b/FlySwattr.NATS.Hosting/Services/ConfiguredNatsConsumerHostedService.cs
+@@ -53,10 +53,13 @@ internal sealed class ConfiguredNatsConsumerHostedService<TMessage> : IHostedSer
+ 
+         // Fail fast: if offloading is configured but the object store is not resolvable,
+         // offloaded messages would arrive with empty payloads and be Term()'d as fatal errors.
+-        if (offloadingOptions != null && objectStore == null)
++        // The marker (not IOptions presence) decides "configured": IOptions<T> always resolves
++        // to a default instance in a real host, which previously made this check fire for
++        // hosts that never called AddPayloadOffloading at all.
++        if (ServiceCollectionExtensions.IsPayloadOffloadingConfigured(_serviceProvider) && objectStore == null)
+         {
+             throw new InvalidOperationException(
+-                $"Payload offloading is configured (PayloadOffloadingOptions is registered) but no IObjectStore " +
++                $"Payload offloading is configured (AddPayloadOffloading was called) but no IObjectStore " +
+                 $"could be resolved for consumer '{_consumerName}' on stream '{_streamName}'. " +
+                 $"Ensure AddPayloadOffloading() is called with the correct bucket, or set " +
+                 $"NatsConsumerOptions.ObjectStoreServiceKey to the keyed IObjectStore service key.");
+diff --git a/FlySwattr.NATS.Hosting/Services/TopologyConsumerHostedService.cs b/FlySwattr.NATS.Hosting/Services/TopologyConsumerHostedService.cs
+index cd4a70d..d2f19b4 100644
+--- a/FlySwattr.NATS.Hosting/Services/TopologyConsumerHostedService.cs
++++ b/FlySwattr.NATS.Hosting/Services/TopologyConsumerHostedService.cs
+@@ -167,10 +167,13 @@ internal class TopologyConsumerHostedService<TSource> : IHostedService
+ 
+         // Fail fast: if offloading is configured but the object store is not resolvable,
+         // offloaded messages would arrive with empty payloads and be Term()'d as fatal errors.
+-        if (offloadingOptions != null && objectStore == null)
++        // The marker (not IOptions presence) decides "configured": IOptions<T> always resolves
++        // to a default instance in a real host, which previously made this check fire for
++        // hosts that never called AddPayloadOffloading at all.
++        if (Extensions.ServiceCollectionExtensions.IsPayloadOffloadingConfigured(_serviceProvider) && objectStore == null)
+         {
+             throw new InvalidOperationException(
+-                $"Payload offloading is configured (PayloadOffloadingOptions is registered) but no IObjectStore " +
++                $"Payload offloading is configured (AddPayloadOffloading was called) but no IObjectStore " +
+                 $"could be resolved for consumer '{spec.DurableName}' on stream '{spec.StreamName}'. " +
+                 $"Ensure AddPayloadOffloading() is called with the correct bucket, or set " +
+                 $"NatsConsumerOptions.ObjectStoreServiceKey to the keyed IObjectStore service key.");
+diff --git a/Tests/UnitTests/Hosting/OffloadingConfiguredGateTests.cs b/Tests/UnitTests/Hosting/OffloadingConfiguredGateTests.cs
+new file mode 100644
+index 0000000..a3a61aa
+--- /dev/null
++++ b/Tests/UnitTests/Hosting/OffloadingConfiguredGateTests.cs
+@@ -0,0 +1,47 @@
++using FlySwattr.NATS.Abstractions;
++using FlySwattr.NATS.Core.Configuration;
++using FlySwattr.NATS.Hosting.Extensions;
++using Microsoft.Extensions.DependencyInjection;
++using Microsoft.Extensions.Options;
++using Shouldly;
++using TUnit.Core;
++
++namespace UnitTests.Hosting;
++
++/// <summary>
++/// The consumer hosted services must treat payload offloading as "configured" only when
++/// AddPayloadOffloading actually ran (marker present). IOptions&lt;PayloadOffloadingOptions&gt;
++/// is resolvable in any host with the options infrastructure, so options-presence is not a
++/// valid feature gate — using it forced every modular (non-offloading) host to register an
++/// IObjectStore or fail at startup.
++/// </summary>
++[Property("nTag", "Hosting")]
++public class OffloadingConfiguredGateTests
++{
++    [Test]
++    public void WithoutAddPayloadOffloading_GateIsClosed_EvenThoughOptionsResolve()
++    {
++        var services = new ServiceCollection();
++        services.AddOptions();
++
++        using var sp = services.BuildServiceProvider();
++
++        // The trap this guards against: options always resolve...
++        sp.GetService<IOptions<PayloadOffloadingOptions>>().ShouldNotBeNull();
++
++        // ...but offloading is NOT configured.
++        ServiceCollectionExtensions.IsPayloadOffloadingConfigured(sp).ShouldBeFalse();
++    }
++
++    [Test]
++    public void WithOffloadingMarker_GateIsOpen()
++    {
++        var services = new ServiceCollection();
++        services.AddOptions();
++        services.AddSingleton<NatsPayloadOffloadingMarker>();
++
++        using var sp = services.BuildServiceProvider();
++
++        ServiceCollectionExtensions.IsPayloadOffloadingConfigured(sp).ShouldBeTrue();
++    }
++}

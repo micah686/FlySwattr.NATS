@@ -1,0 +1,157 @@
+diff --git a/FlySwattr.NATS.Hosting/Services/ConfiguredNatsConsumerHostedService.cs b/FlySwattr.NATS.Hosting/Services/ConfiguredNatsConsumerHostedService.cs
+index e2039ca..44609a9 100644
+--- a/FlySwattr.NATS.Hosting/Services/ConfiguredNatsConsumerHostedService.cs
++++ b/FlySwattr.NATS.Hosting/Services/ConfiguredNatsConsumerHostedService.cs
+@@ -1,4 +1,5 @@
+ using FlySwattr.NATS.Abstractions;
++using FlySwattr.NATS.Abstractions.Exceptions;
+ using FlySwattr.NATS.Core;
+ using FlySwattr.NATS.Core.Configuration;
+ using FlySwattr.NATS.Hosting.Extensions;
+@@ -137,9 +138,16 @@ internal sealed class ConfiguredNatsConsumerHostedService<TMessage> : IHostedSer
+     {
+         var retryStrategy = new RetryStrategyOptions
+         {
+-            ShouldHandle = new PredicateBuilder().Handle<Exception>(),
++            // Permanent failures must reach the poison handler immediately:
++            // MessageValidationException is routed straight to the DLQ by design,
++            // and cancellation must never be retried. Everything else is treated
++            // as potentially transient.
++            ShouldHandle = new PredicateBuilder().Handle<Exception>(static ex =>
++                ex is not MessageValidationException and not OperationCanceledException),
+             BackoffType = DelayBackoffType.Exponential,
+             MaxRetryAttempts = opts.MaxRetryAttempts,
++            Delay = opts.InitialRetryDelay,
++            MaxDelay = opts.MaxRetryDelay,
+             UseJitter = opts.UseJitter,
+         };
+ 
+diff --git a/FlySwattr.NATS.Hosting/Services/TopologyConsumerHostedService.cs b/FlySwattr.NATS.Hosting/Services/TopologyConsumerHostedService.cs
+index cd4a70d..92dfbcb 100644
+--- a/FlySwattr.NATS.Hosting/Services/TopologyConsumerHostedService.cs
++++ b/FlySwattr.NATS.Hosting/Services/TopologyConsumerHostedService.cs
+@@ -1,4 +1,5 @@
+ using FlySwattr.NATS.Abstractions;
++using FlySwattr.NATS.Abstractions.Exceptions;
+ using FlySwattr.NATS.Core;
+ using FlySwattr.NATS.Core.Configuration;
+ using FlySwattr.NATS.Hosting.Extensions;
+@@ -285,9 +286,16 @@ internal class TopologyConsumerHostedService<TSource> : IHostedService
+     {
+         var retryStrategy = new RetryStrategyOptions
+         {
+-            ShouldHandle = new PredicateBuilder().Handle<Exception>(),
++            // Permanent failures must reach the poison handler immediately:
++            // MessageValidationException is routed straight to the DLQ by design,
++            // and cancellation must never be retried. Everything else is treated
++            // as potentially transient.
++            ShouldHandle = new PredicateBuilder().Handle<Exception>(static ex =>
++                ex is not MessageValidationException and not OperationCanceledException),
+             BackoffType = DelayBackoffType.Exponential,
+             MaxRetryAttempts = opts.MaxRetryAttempts,
++            Delay = opts.InitialRetryDelay,
++            MaxDelay = opts.MaxRetryDelay,
+             UseJitter = opts.UseJitter,
+         };
+ 
+diff --git a/Tests/UnitTests/Hosting/ConsumerRetryPipelineTests.cs b/Tests/UnitTests/Hosting/ConsumerRetryPipelineTests.cs
+new file mode 100644
+index 0000000..82ab40b
+--- /dev/null
++++ b/Tests/UnitTests/Hosting/ConsumerRetryPipelineTests.cs
+@@ -0,0 +1,95 @@
++using System.Reflection;
++using FlySwattr.NATS.Abstractions.Exceptions;
++using FlySwattr.NATS.Core.Configuration;
++using FlySwattr.NATS.Hosting.Services;
++using Polly;
++using Shouldly;
++using TUnit.Core;
++
++namespace UnitTests.Hosting;
++
++/// <summary>
++/// The default per-consumer retry pipeline must honor ConsumerResilienceOptions delays
++/// (previously InitialRetryDelay/MaxRetryDelay were ignored — Polly's 2s default base
++/// applied regardless of configuration) and must not retry permanent failures:
++/// MessageValidationException is designed to route straight to the DLQ.
++/// </summary>
++[Property("nTag", "Hosting")]
++public class ConsumerRetryPipelineTests
++{
++    private static ResiliencePipeline BuildPipeline(Type hostType, ConsumerResilienceOptions opts)
++    {
++        var method = hostType.GetMethod(
++            "BuildDefaultResiliencePipeline",
++            BindingFlags.NonPublic | BindingFlags.Static);
++        method.ShouldNotBeNull();
++        return (ResiliencePipeline)method.Invoke(null, [opts])!;
++    }
++
++    private static ConsumerResilienceOptions FastOptions(int maxRetries = 2) => new()
++    {
++        MaxRetryAttempts = maxRetries,
++        InitialRetryDelay = TimeSpan.FromMilliseconds(1),
++        MaxRetryDelay = TimeSpan.FromMilliseconds(2),
++        UseJitter = false,
++    };
++
++    [Test]
++    [Arguments(typeof(ConfiguredNatsConsumerHostedService<string>))]
++    [Arguments(typeof(TopologyConsumerHostedService<FakeTopologySource>))]
++    public async Task TransientFailure_IsRetriedUpToMaxAttempts(Type hostType)
++    {
++        var pipeline = BuildPipeline(hostType, FastOptions(maxRetries: 2));
++        var attempts = 0;
++
++        await Should.ThrowAsync<InvalidOperationException>(async () =>
++            await pipeline.ExecuteAsync(_ =>
++            {
++                attempts++;
++                throw new InvalidOperationException("transient");
++            }, CancellationToken.None));
++
++        attempts.ShouldBe(3); // initial + 2 retries
++    }
++
++    [Test]
++    [Arguments(typeof(ConfiguredNatsConsumerHostedService<string>))]
++    [Arguments(typeof(TopologyConsumerHostedService<FakeTopologySource>))]
++    public async Task ValidationFailure_IsNotRetried(Type hostType)
++    {
++        var pipeline = BuildPipeline(hostType, FastOptions(maxRetries: 5));
++        var attempts = 0;
++
++        await Should.ThrowAsync<MessageValidationException>(async () =>
++            await pipeline.ExecuteAsync(_ =>
++            {
++                attempts++;
++                throw new MessageValidationException("orders.created", ["Id: required"]);
++            }, CancellationToken.None));
++
++        attempts.ShouldBe(1); // permanent failure goes straight to the poison handler
++    }
++
++    [Test]
++    public async Task ConfiguredDelays_AreHonored_NoMultiSecondDefaultBackoff()
++    {
++        // With 1ms/2ms configured delays and 3 retries, the whole execution must complete
++        // far faster than Polly's default 2s exponential base would allow (~14s).
++        var pipeline = BuildPipeline(typeof(ConfiguredNatsConsumerHostedService<string>), FastOptions(maxRetries: 3));
++        var sw = System.Diagnostics.Stopwatch.StartNew();
++
++        await Should.ThrowAsync<InvalidOperationException>(async () =>
++            await pipeline.ExecuteAsync(_ => throw new InvalidOperationException("transient"), CancellationToken.None));
++
++        sw.Stop();
++        sw.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(1));
++    }
++
++    public sealed class FakeTopologySource : FlySwattr.NATS.Abstractions.ITopologySource
++    {
++        public IEnumerable<FlySwattr.NATS.Abstractions.StreamSpec> GetStreams() => [];
++        public IEnumerable<FlySwattr.NATS.Abstractions.ConsumerSpec> GetConsumers() => [];
++        public IEnumerable<FlySwattr.NATS.Abstractions.BucketSpec> GetBuckets() => [];
++        public IEnumerable<FlySwattr.NATS.Abstractions.ObjectStoreSpec> GetObjectStores() => [];
++    }
++}

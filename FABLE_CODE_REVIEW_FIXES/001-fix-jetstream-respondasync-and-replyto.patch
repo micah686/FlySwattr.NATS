@@ -1,0 +1,204 @@
+diff --git a/FlySwattr.NATS.Core/NatsJetStreamBus.cs b/FlySwattr.NATS.Core/NatsJetStreamBus.cs
+index b641707..116d0b7 100644
+--- a/FlySwattr.NATS.Core/NatsJetStreamBus.cs
++++ b/FlySwattr.NATS.Core/NatsJetStreamBus.cs
+@@ -679,6 +679,10 @@ internal sealed class RawByteArraySerializer : INatsSerialize<byte[]>, INatsDese
+ 
+ internal class JsMessageContext<T> : IJsMessageContext<T>
+ {
++    // JetStream delivers messages with the ack inbox as the protocol-level reply subject.
++    // That subject must never be surfaced as an application reply target.
++    private const string JsAckSubjectPrefix = "$JS.ACK.";
++
+     private readonly INatsJSMsg<T> _msg;
+ 
+     public JsMessageContext(INatsJSMsg<T> msg)
+@@ -692,7 +696,16 @@ internal class JsMessageContext<T> : IJsMessageContext<T>
+         ? new MessageHeaders(_msg.Headers.ToDictionary(k => k.Key, k => k.Value.ToString()))
+         : MessageHeaders.Empty;
+ 
+-    public string? ReplyTo => _msg.ReplyTo;
++    public string? ReplyTo
++    {
++        get
++        {
++            var replyTo = _msg.ReplyTo;
++            return string.IsNullOrEmpty(replyTo) || replyTo.StartsWith(JsAckSubjectPrefix, StringComparison.Ordinal)
++                ? null
++                : replyTo;
++        }
++    }
+ 
+     public async Task AckAsync(CancellationToken cancellationToken = default) => await _msg.AckAsync(cancellationToken: cancellationToken);
+ 
+@@ -707,21 +720,10 @@ internal class JsMessageContext<T> : IJsMessageContext<T>
+     public bool Redelivered => (_msg.Metadata?.NumDelivered ?? 1) > 1;
+     public uint NumDelivered => (uint)(_msg.Metadata?.NumDelivered ?? 1);
+ 
+-    public async Task RespondAsync<TResponse>(TResponse response, CancellationToken cancellationToken = default)
+-    {
+-        if (string.IsNullOrEmpty(ReplyTo))
+-        {
+-            throw new InvalidOperationException("Message does not have a ReplyTo subject.");
+-        }
+-        // Assuming _msg is castable or we have access to ReplyAsync via extension or interface
+-        // Standard NATS.Net v2 INatsJSMsg<T> inherits from INatsMsg<T> which has ReplyAsync
+-        if (_msg is INatsMsg<T> natsMsg)
+-        {
+-             await natsMsg.ReplyAsync(response, cancellationToken: cancellationToken);
+-        }
+-        else
+-        {
+-             throw new NotSupportedException("This message type does not support replies.");
+-        }
+-    }
++    public Task RespondAsync<TResponse>(TResponse response, CancellationToken cancellationToken = default)
++        => throw new NotSupportedException(
++            "JetStream messages do not carry the requester's reply subject; the delivery reply-to is the " +
++            "JetStream ack subject and replying to it would be interpreted as an ack-protocol message. " +
++            "Use IMessageBus.RequestAsync (core NATS) for request/reply, or propagate an application-level " +
++            "reply subject in message headers and publish the response explicitly.");
+ }
+diff --git a/FlySwattr.NATS.Hosting/Services/NatsConsumerBackgroundService.cs b/FlySwattr.NATS.Hosting/Services/NatsConsumerBackgroundService.cs
+index 6ea9afe..14f96fb 100644
+--- a/FlySwattr.NATS.Hosting/Services/NatsConsumerBackgroundService.cs
++++ b/FlySwattr.NATS.Hosting/Services/NatsConsumerBackgroundService.cs
+@@ -642,6 +642,10 @@ public partial class NatsConsumerBackgroundService<T> : BackgroundService
+ /// </summary>
+ internal class JsMessageContextWrapper<T> : IJsMessageContext<T>, IPostAckLifecycle
+ {
++    // JetStream delivers messages with the ack inbox as the protocol-level reply subject.
++    // That subject must never be surfaced as an application reply target.
++    private const string JsAckSubjectPrefix = "$JS.ACK.";
++
+     private readonly INatsJSMsg<T> _msg;
+     private List<Func<CancellationToken, Task>>? _afterAckCallbacks;
+     private bool _acknowledged;
+@@ -656,7 +660,17 @@ internal class JsMessageContextWrapper<T> : IJsMessageContext<T>, IPostAckLifecy
+     public MessageHeaders Headers => _msg.Headers != null
+         ? new MessageHeaders(_msg.Headers.ToDictionary(k => k.Key, k => k.Value.ToString()))
+         : MessageHeaders.Empty;
+-    public string? ReplyTo => _msg.ReplyTo;
++
++    public string? ReplyTo
++    {
++        get
++        {
++            var replyTo = _msg.ReplyTo;
++            return string.IsNullOrEmpty(replyTo) || replyTo.StartsWith(JsAckSubjectPrefix, StringComparison.Ordinal)
++                ? null
++                : replyTo;
++        }
++    }
+ 
+     public ulong Sequence => _msg.Metadata?.Sequence.Stream ?? 0;
+     public DateTimeOffset Timestamp => _msg.Metadata?.Timestamp ?? DateTimeOffset.UtcNow;
+@@ -688,16 +702,12 @@ internal class JsMessageContextWrapper<T> : IJsMessageContext<T>, IPostAckLifecy
+     public async Task InProgressAsync(CancellationToken cancellationToken = default) =>
+         await _msg.AckProgressAsync(cancellationToken: cancellationToken);
+ 
+-    public async Task RespondAsync<TResponse>(TResponse response, CancellationToken cancellationToken = default)
+-    {
+-        if (string.IsNullOrEmpty(ReplyTo))
+-            throw new InvalidOperationException("Message does not have a ReplyTo subject.");
+-
+-        if (_msg is INatsMsg<T> natsMsg)
+-            await natsMsg.ReplyAsync(response, cancellationToken: cancellationToken);
+-        else
+-            throw new NotSupportedException("This message type does not support replies.");
+-    }
++    public Task RespondAsync<TResponse>(TResponse response, CancellationToken cancellationToken = default)
++        => throw new NotSupportedException(
++            "JetStream messages do not carry the requester's reply subject; the delivery reply-to is the " +
++            "JetStream ack subject and replying to it would be interpreted as an ack-protocol message. " +
++            "Use IMessageBus.RequestAsync (core NATS) for request/reply, or propagate an application-level " +
++            "reply subject in message headers and publish the response explicitly.");
+ 
+     public void RegisterAfterAckCallback(Func<CancellationToken, Task> callback)
+     {
+diff --git a/Tests/UnitTests/Hosting/Services/JsMessageContextReplySemanticsTests.cs b/Tests/UnitTests/Hosting/Services/JsMessageContextReplySemanticsTests.cs
+new file mode 100644
+index 0000000..eb1ed76
+--- /dev/null
++++ b/Tests/UnitTests/Hosting/Services/JsMessageContextReplySemanticsTests.cs
+@@ -0,0 +1,80 @@
++using FlySwattr.NATS.Core;
++using FlySwattr.NATS.Hosting.Services;
++using NATS.Client.JetStream;
++using NSubstitute;
++using Shouldly;
++using TUnit.Core;
++
++namespace UnitTests.Hosting.Services;
++
++/// <summary>
++/// JetStream deliveries carry the ack inbox ($JS.ACK.…) as the protocol-level reply subject.
++/// These tests pin the contract that the ack subject is never exposed as an application
++/// ReplyTo and that RespondAsync fails loudly instead of replying onto the ack subject.
++/// (NatsJSMsg&lt;T&gt; does not implement INatsMsg&lt;T&gt;, so the previous cast-based reply
++/// path could never succeed against a real server.)
++/// </summary>
++[Property("nTag", "Hosting")]
++public class JsMessageContextReplySemanticsTests
++{
++    private const string AckSubject = "$JS.ACK.ORDERS.orders-processor.1.7.7.1700000000000000000.0";
++
++    private static INatsJSMsg<string> CreateMsg(string? replyTo)
++    {
++        var msg = Substitute.For<INatsJSMsg<string>>();
++        msg.Subject.Returns("orders.created");
++        msg.Data.Returns("payload");
++        msg.ReplyTo.Returns(replyTo);
++        return msg;
++    }
++
++    [Test]
++    public void HostingWrapper_ReplyTo_AckSubject_IsReportedAsNull()
++    {
++        var context = new JsMessageContextWrapper<string>(CreateMsg(AckSubject));
++
++        context.ReplyTo.ShouldBeNull();
++    }
++
++    [Test]
++    public void HostingWrapper_ReplyTo_NonAckSubject_IsPassedThrough()
++    {
++        var context = new JsMessageContextWrapper<string>(CreateMsg("_INBOX.abc123"));
++
++        context.ReplyTo.ShouldBe("_INBOX.abc123");
++    }
++
++    [Test]
++    public void HostingWrapper_ReplyTo_Null_IsReportedAsNull()
++    {
++        var context = new JsMessageContextWrapper<string>(CreateMsg(null));
++
++        context.ReplyTo.ShouldBeNull();
++    }
++
++    [Test]
++    public async Task HostingWrapper_RespondAsync_AlwaysThrowsNotSupported()
++    {
++        var context = new JsMessageContextWrapper<string>(CreateMsg(AckSubject));
++
++        await Should.ThrowAsync<NotSupportedException>(
++            () => context.RespondAsync("response"));
++    }
++
++    [Test]
++    public void CoreContext_ReplyTo_AckSubject_IsReportedAsNull()
++    {
++        var context = new JsMessageContext<string>(CreateMsg(AckSubject));
++
++        context.ReplyTo.ShouldBeNull();
++    }
++
++    [Test]
++    public async Task CoreContext_RespondAsync_AlwaysThrowsNotSupported()
++    {
++        var context = new JsMessageContext<string>(CreateMsg("_INBOX.abc123"));
++
++        await Should.ThrowAsync<NotSupportedException>(
++            () => context.RespondAsync("response"));
++    }
++}

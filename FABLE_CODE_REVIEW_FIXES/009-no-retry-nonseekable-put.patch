@@ -1,0 +1,123 @@
+diff --git a/FlySwattr.NATS.Core/Stores/NatsObjectStore.cs b/FlySwattr.NATS.Core/Stores/NatsObjectStore.cs
+index b8b0d51..fe8f76f 100644
+--- a/FlySwattr.NATS.Core/Stores/NatsObjectStore.cs
++++ b/FlySwattr.NATS.Core/Stores/NatsObjectStore.cs
+@@ -122,14 +122,22 @@ internal class NatsObjectStore : IObjectStore, IAsyncDisposable
+         
+         try
+         {
++            // Retrying a partially-consumed stream would re-upload only the REMAINING bytes
++            // and report success with silently truncated content. Only seekable streams can
++            // be rewound safely, so non-seekable uploads get exactly one attempt and any
++            // failure propagates to the caller.
++            if (!data.CanSeek)
++            {
++                var store = await GetStoreAsync(cancellationToken);
++                var meta = await store.PutAsync(key, data, leaveOpen: true, cancellationToken: cancellationToken);
++                return meta.Name;
++            }
++
+             return await ExecuteWithRetryAsync(async token =>
+             {
+-                // Reset stream position for retry (if stream supports seeking)
+-                if (data.CanSeek)
+-                {
+-                    data.Position = 0;
+-                }
+-                
++                // Reset stream position for retry
++                data.Position = 0;
++
+                 var store = await GetStoreAsync(token);
+                 var meta = await store.PutAsync(key, data, leaveOpen: true, cancellationToken: token);
+                 return meta.Name;
+diff --git a/Tests/UnitTests/Core/Stores/NonSeekablePutRetryTests.cs b/Tests/UnitTests/Core/Stores/NonSeekablePutRetryTests.cs
+new file mode 100644
+index 0000000..e3b5e82
+--- /dev/null
++++ b/Tests/UnitTests/Core/Stores/NonSeekablePutRetryTests.cs
+@@ -0,0 +1,84 @@
++using FlySwattr.NATS.Core.Stores;
++using Microsoft.Extensions.Logging;
++using NATS.Client.ObjectStore;
++using NATS.Client.ObjectStore.Models;
++using NSubstitute;
++using Shouldly;
++using TUnit.Core;
++
++namespace UnitTests.Core.Stores;
++
++/// <summary>
++/// Retrying a Put with a non-seekable stream re-uploads only the bytes remaining after the
++/// failed attempt — the object is then stored with silently truncated content and PutAsync
++/// reports success. Non-seekable uploads must therefore never be retried.
++/// </summary>
++[Property("nTag", "Core")]
++public class NonSeekablePutRetryTests
++{
++    private sealed class NonSeekableStream : MemoryStream
++    {
++        public NonSeekableStream(byte[] data) : base(data) { }
++        public override bool CanSeek => false;
++    }
++
++    [Test]
++    public async Task PutAsync_NonSeekableStream_TransientFailure_IsNotRetried()
++    {
++        var objContext = Substitute.For<INatsObjContext>();
++        var objStore = Substitute.For<INatsObjStore>();
++        objContext.GetObjectStoreAsync("bucket", Arg.Any<CancellationToken>()).Returns(objStore);
++
++        var calls = 0;
++        objStore.PutAsync(Arg.Any<string>(), Arg.Any<Stream>(), leaveOpen: true, cancellationToken: Arg.Any<CancellationToken>())
++            .Returns(_ =>
++            {
++                calls++;
++                // Simulate a network failure after part of the stream was consumed.
++                return ValueTask.FromException<ObjectMetadata>(new TimeoutException("connection dropped mid-upload"));
++            });
++
++        var sut = new NatsObjectStore(objContext, "bucket", Substitute.For<ILogger<NatsObjectStore>>());
++        await using var data = new NonSeekableStream([1, 2, 3, 4]);
++
++        await Should.ThrowAsync<TimeoutException>(() => sut.PutAsync("key", data));
++
++        // Exactly one attempt: a retry would silently upload truncated content.
++        calls.ShouldBe(1);
++        await sut.DisposeAsync();
++    }
++
++    [Test]
++    public async Task PutAsync_SeekableStream_TransientFailure_IsStillRetried()
++    {
++        var objContext = Substitute.For<INatsObjContext>();
++        var objStore = Substitute.For<INatsObjStore>();
++        objContext.GetObjectStoreAsync("bucket", Arg.Any<CancellationToken>()).Returns(objStore);
++
++        var calls = 0;
++        objStore.PutAsync(Arg.Any<string>(), Arg.Any<Stream>(), leaveOpen: true, cancellationToken: Arg.Any<CancellationToken>())
++            .Returns(callInfo =>
++            {
++                calls++;
++                if (calls == 1)
++                {
++                    return ValueTask.FromException<ObjectMetadata>(new TimeoutException("transient"));
++                }
++
++                // Retry must observe a rewound stream.
++                var stream = callInfo.Arg<Stream>();
++                stream.Position.ShouldBe(0);
++                return ValueTask.FromResult(new ObjectMetadata { Bucket = "bucket", Name = "key" });
++            });
++
++        var sut = new NatsObjectStore(objContext, "bucket", Substitute.For<ILogger<NatsObjectStore>>());
++        using var data = new MemoryStream([1, 2, 3, 4]);
++        data.Position = 4; // pretend a previous consumer moved it
++
++        var name = await sut.PutAsync("key", data);
++
++        name.ShouldBe("key");
++        calls.ShouldBe(2);
++        await sut.DisposeAsync();
++    }
++}
